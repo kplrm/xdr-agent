@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 set -e
 
+if [ ! -f /etc/xdr-agent/config.json ] && [ -f /usr/share/xdr-agent/config.default.json ]; then
+  mkdir -p /etc/xdr-agent
+  cp -f /usr/share/xdr-agent/config.default.json /etc/xdr-agent/config.json
+  chmod 0644 /etc/xdr-agent/config.json
+fi
+
+if [ -x /usr/bin/xdr-agent ] && [ -d /etc/bash_completion.d ]; then
+  /usr/bin/xdr-agent completion bash >/etc/bash_completion.d/xdr-agent || true
+  chmod 0644 /etc/bash_completion.d/xdr-agent || true
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
-  systemctl enable xdr-agent.service || true
-  systemctl restart xdr-agent.service || true
+  systemctl preset xdr-agent.service || true
+  systemctl disable xdr-agent.service || true
+  systemctl stop xdr-agent.service || true
 fi
 
 exit 0

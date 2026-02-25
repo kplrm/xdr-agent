@@ -1,6 +1,7 @@
 {
   "control_plane_url": "http://localhost:5601",
   "enrollment_path": "/api/v1/agents/enroll",
+  "heartbeat_path": "/api/v1/agents/heartbeat",
   "enrollment_token": "",
   "policy_id": "default-endpoint",
   "tags": ["linux", "xdr-agent"],

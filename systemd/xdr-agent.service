@@ -2,6 +2,7 @@
 Description=XDR Agent (Identity + Enrollment)
 Wants=network-online.target
 After=network-online.target
+ConditionPathExists=/etc/xdr-agent/config.json
 
 [Service]
 Type=simple

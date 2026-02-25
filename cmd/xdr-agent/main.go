@@ -29,7 +29,7 @@ func run() error {
 	}
 
 	switch os.Args[1] {
-	case "run", "enroll", "remove", "version":
+	case "run", "enroll", "remove", "version", "completion":
 		return runCommand(os.Args[1], os.Args[2:])
 	case "-h", "--help", "help":
 		printHelp()
@@ -43,6 +43,12 @@ func runCommand(command string, args []string) error {
 	switch command {
 	case "version":
 		fmt.Println(buildinfo.Version)
+		return nil
+	case "completion":
+		if len(args) != 1 || args[0] != "bash" {
+			return fmt.Errorf("usage: xdr-agent completion bash")
+		}
+		printBashCompletion()
 		return nil
 	case "remove":
 		return removeInstallation()
@@ -120,6 +126,7 @@ func removeInstallation() error {
 	paths := []string{
 		"/usr/bin/xdr-agent",
 		"/etc/xdr-agent",
+		"/etc/bash_completion.d/xdr-agent",
 		"/usr/lib/systemd/system/xdr-agent.service",
 		"/lib/systemd/system/xdr-agent.service",
 		"/var/lib/xdr-agent",
@@ -142,11 +149,76 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  run        Run the long-lived agent process")
 	fmt.Println("  enroll     Perform one enrollment attempt and exit")
+	fmt.Println("  completion Output shell completion script")
 	fmt.Println("  remove     Remove xdr-agent files and service")
 	fmt.Println("  version    Print build version")
 	fmt.Println()
 	fmt.Printf("Examples:\n")
 	fmt.Printf("  xdr-agent run --config %s\n", config.DefaultConfigPath)
 	fmt.Printf("  xdr-agent enroll <enrollment_token> --config %s\n", config.DefaultConfigPath)
+	fmt.Printf("  xdr-agent completion bash\n")
 	fmt.Printf("  sudo xdr-agent remove\n")
+}
+
+func printBashCompletion() {
+	const script = `# bash completion for xdr-agent
+_xdr_agent_completion() {
+	local cur
+	cur="${COMP_WORDS[COMP_CWORD]}"
+
+	if [[ ${COMP_CWORD} -eq 1 ]]; then
+		COMPREPLY=( $(compgen -W "run enroll remove version completion help" -- "${cur}") )
+		return 0
+	fi
+
+	case "${COMP_WORDS[1]}" in
+		run|enroll)
+			COMPREPLY=( $(compgen -W "--config -h --help" -- "${cur}") )
+			;;
+		completion)
+			COMPREPLY=( $(compgen -W "bash" -- "${cur}") )
+			;;
+		*)
+			COMPREPLY=()
+			;;
+	esac
+}
+
+_xdr_agent_sudo_completion() {
+	local idx
+	for ((idx = 1; idx < COMP_CWORD; idx++)); do
+		case "${COMP_WORDS[idx]}" in
+			xdr-agent|/usr/bin/xdr-agent)
+				local saved_words=("${COMP_WORDS[@]}")
+				local saved_cword="${COMP_CWORD}"
+
+				COMP_WORDS=("${COMP_WORDS[@]:idx}")
+				COMP_CWORD=$((COMP_CWORD - idx))
+
+				_xdr_agent_completion
+
+				COMP_WORDS=("${saved_words[@]}")
+				COMP_CWORD="${saved_cword}"
+				return 0
+				;;
+		esac
+	done
+
+	return 1
+}
+
+complete -F _xdr_agent_completion xdr-agent
+complete -F _xdr_agent_completion /usr/bin/xdr-agent
+
+if declare -F _sudo >/dev/null 2>&1; then
+	_xdr_agent_or_sudo_completion() {
+		_xdr_agent_sudo_completion || _sudo
+	}
+	complete -F _xdr_agent_or_sudo_completion sudo
+else
+	complete -F _xdr_agent_sudo_completion sudo
+fi
+`
+
+	fmt.Print(script)
 }

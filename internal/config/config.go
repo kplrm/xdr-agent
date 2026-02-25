@@ -13,6 +13,7 @@ const DefaultConfigPath = "/etc/xdr-agent/config.json"
 type Config struct {
 	ControlPlaneURL       string   `json:"control_plane_url"`
 	EnrollmentPath        string   `json:"enrollment_path"`
+	HeartbeatPath         string   `json:"heartbeat_path"`
 	EnrollmentToken       string   `json:"enrollment_token"`
 	PolicyID              string   `json:"policy_id"`
 	Tags                  []string `json:"tags"`
@@ -41,6 +42,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.EnrollmentPath == "" {
 		return cfg, fmt.Errorf("enrollment_path is required")
+	}
+	if cfg.HeartbeatPath == "" {
+		cfg.HeartbeatPath = "/api/v1/agents/heartbeat"
 	}
 	if cfg.PolicyID == "" {
 		return cfg, fmt.Errorf("policy_id is required")
@@ -73,4 +77,8 @@ func (c Config) EnrollInterval() time.Duration {
 
 func (c Config) RequestTimeout() time.Duration {
 	return time.Duration(c.RequestTimeoutSeconds) * time.Second
+}
+
+func (c Config) HeartbeatInterval() time.Duration {
+	return 30 * time.Second
 }

@@ -1,0 +1,57 @@
+# bash completion for xdr-agent
+_xdr_agent_completion() {
+    local cur
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "run enroll remove version completion help" -- "${cur}") )
+        return 0
+    fi
+
+    case "${COMP_WORDS[1]}" in
+        run|enroll)
+            COMPREPLY=( $(compgen -W "--config -h --help" -- "${cur}") )
+            ;;
+        completion)
+            COMPREPLY=( $(compgen -W "bash" -- "${cur}") )
+            ;;
+        *)
+            COMPREPLY=()
+            ;;
+    esac
+}
+
+_xdr_agent_sudo_completion() {
+    local idx
+    for ((idx = 1; idx < COMP_CWORD; idx++)); do
+        case "${COMP_WORDS[idx]}" in
+            xdr-agent|/usr/bin/xdr-agent)
+                local saved_words=("${COMP_WORDS[@]}")
+                local saved_cword="${COMP_CWORD}"
+
+                COMP_WORDS=("${COMP_WORDS[@]:idx}")
+                COMP_CWORD=$((COMP_CWORD - idx))
+
+                _xdr_agent_completion
+
+                COMP_WORDS=("${saved_words[@]}")
+                COMP_CWORD="${saved_cword}"
+                return 0
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+complete -F _xdr_agent_completion xdr-agent
+complete -F _xdr_agent_completion /usr/bin/xdr-agent
+
+if declare -F _sudo >/dev/null 2>&1; then
+    _xdr_agent_or_sudo_completion() {
+        _xdr_agent_sudo_completion || _sudo
+    }
+    complete -F _xdr_agent_or_sudo_completion sudo
+else
+    complete -F _xdr_agent_sudo_completion sudo
+fi

@@ -30,7 +30,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	log.Printf("xdr-agent starting: agent_id=%s machine_id=%s hostname=%s", state.AgentID, state.MachineID, state.Hostname)
 
-	attempt := func() error {
+	enrollAttempt := func() error {
 		resp, enrollErr := enroll.Enroll(ctx, cfg, state, buildinfo.Version) // Attempt enrollment with the current state and configuration
 		state = identity.MarkEnrollment(state, resp.EnrollmentID, enrollErr) // Update state with enrollment results (success or failure)
 		if saveErr := identity.Save(cfg.StatePath, state); saveErr != nil {
@@ -45,28 +45,59 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		return nil
 	}
 
-	if err := attempt(); err != nil {
-		if once {
+	heartbeatAttempt := func() error {
+		if err := enroll.Heartbeat(ctx, cfg, state, buildinfo.Version); err != nil {
 			return err
 		}
-		log.Printf("initial enrollment failed: %v", err)
-	} else if once {
+
+		log.Printf("heartbeat successful: agent_id=%s", state.AgentID)
 		return nil
 	}
 
-	// Creates a periodic timer that acts as the heartbeat for recurring enrollment attempts.
-	ticker := time.NewTicker(cfg.EnrollInterval())
-	defer ticker.Stop()
+	if once {
+		return enrollAttempt()
+	}
 
-	// Main loop that continues until the context is canceled or the ticker fires.
+	if !state.Enrolled {
+		if err := enrollAttempt(); err != nil {
+			log.Printf("initial enrollment failed: %v", err)
+		}
+	}
+
+	enrollTicker := time.NewTicker(cfg.EnrollInterval())
+	defer enrollTicker.Stop()
+
+	heartbeatTicker := time.NewTicker(cfg.HeartbeatInterval())
+	defer heartbeatTicker.Stop()
+
+	for {
+		if state.Enrolled {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			log.Printf("xdr-agent stopping")
+			return ctx.Err()
+		case <-enrollTicker.C:
+			if err := enrollAttempt(); err != nil {
+				log.Printf("enrollment attempt failed: %v", err)
+			}
+		}
+	}
+
+	if err := heartbeatAttempt(); err != nil {
+		log.Printf("initial heartbeat failed: %v", err)
+	}
+
 	for {
 		select {
 		case <-ctx.Done(): // If the context is canceled (e.g., on SIGTERM), log shutdown and exit.
 			log.Printf("xdr-agent stopping")
 			return ctx.Err()
-		case <-ticker.C: // On each tick, attempt enrollment.
-			if err := attempt(); err != nil {
-				log.Printf("enrollment attempt failed: %v", err)
+		case <-heartbeatTicker.C: // On each tick, send heartbeat.
+			if err := heartbeatAttempt(); err != nil {
+				log.Printf("heartbeat failed: %v", err)
 			}
 		}
 	}
