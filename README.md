@@ -51,7 +51,7 @@ Optional:
 
 ## Local build and test
 
-Prerequisite (Debian/Ubuntu):
+Prerequisites (Debian/Ubuntu):
 
 ```bash
 sudo apt-get update
@@ -71,8 +71,23 @@ echo "0.1.1" > VERSION
 cd xdr-agent
 make build
 ./dist/xdr-agent version
-./dist/xdr-agent run --config ./config/config.json
+```
+
+One-shot enrollment test (foreground, exits after one enrollment attempt):
+
+```bash
 ./dist/xdr-agent enroll <enrollment_token> --config ./config/config.json
+```
+
+Long-running mode (foreground, periodic heartbeat after enrollment):
+
+```bash
+./dist/xdr-agent run --config ./config/config.json
+```
+
+Completion output (for local binary):
+
+```bash
 ./dist/xdr-agent completion bash
 ```
 
@@ -155,21 +170,25 @@ ARCHES="amd64 arm64" FORMATS="deb rpm" bash ./packaging/build_multi_arch.sh "$(c
 cd xdr-agent
 sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
 sudo systemctl daemon-reload
-sudo xdr-agent enroll <enrollment_token> --config config/config.json
+sudo xdr-agent enroll <enrollment_token> --config /etc/xdr-agent/config.json
 sudo systemctl enable xdr-agent
 sudo systemctl start xdr-agent
-sudo systemctl status xdr-agent
+sudo systemctl status xdr-agent --no-pager -l
 sudo journalctl -u xdr-agent -f
 ```
 
 Installation does **not** auto-start the service by default.
 This prevents restart loops while you are still editing `/etc/xdr-agent/config.json`.
 
-Recommended flow:
+Recommended installation flow:
 
-1. Install package.
-2. Update `/etc/xdr-agent/config.json` with `control_plane_url`, `policy_id`, `enrollment_token`.
-3. Start service with `sudo systemctl start xdr-agent`.
+1. Install package with `dpkg`.
+2. Edit `/etc/xdr-agent/config.json` (`control_plane_url`, `policy_id`, `enrollment_token`).
+3. Run one-shot enrollment:
+  - `sudo xdr-agent enroll <enrollment_token> --config /etc/xdr-agent/config.json`
+4. Enable/start service for continuous operation:
+  - `sudo systemctl enable xdr-agent`
+  - `sudo systemctl start xdr-agent`
 
 Expected process command line after installation:
 
@@ -189,7 +208,8 @@ Service not found after install:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now xdr-agent
+sudo systemctl enable xdr-agent
+sudo systemctl start xdr-agent
 systemctl status xdr-agent --no-pager -l
 ```
 
