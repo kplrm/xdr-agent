@@ -1,0 +1,17 @@
+[Unit]
+Description=XDR Agent (Identity + Enrollment)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/xdr-agent run --config /etc/xdr-agent/config.json
+Restart=always
+RestartSec=5
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

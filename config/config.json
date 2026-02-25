@@ -1,0 +1,11 @@
+{
+  "control_plane_url": "http://localhost:54321",
+  "enrollment_path": "/api/v1/agents/enroll",
+  "enrollment_token": "",
+  "policy_id": "default-endpoint",
+  "tags": ["linux", "xdr-agent"],
+  "enroll_interval_seconds": 30,
+  "request_timeout_seconds": 10,
+  "state_path": "/var/lib/xdr-agent/state.json",
+  "insecure_skip_tls_verify": false
+}

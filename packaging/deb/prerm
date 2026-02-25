@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -e
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl stop xdr-agent.service || true
+  systemctl disable xdr-agent.service || true
+fi
+
+exit 0

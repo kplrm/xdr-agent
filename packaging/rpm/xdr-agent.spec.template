@@ -1,0 +1,51 @@
+Name:           xdr-agent
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Lightweight XDR agent (identity and enrollment)
+License:        Apache-2.0
+URL:            https://example.com/xdr-agent
+BuildArch:      @RPM_ARCH@
+Requires(post): systemd
+Requires(preun): systemd
+Requires(postun): systemd
+
+%description
+A minimal host agent that establishes identity and enrolls into a control plane.
+
+%prep
+
+%build
+
+%install
+mkdir -p %{buildroot}/usr/bin
+mkdir -p %{buildroot}/etc/xdr-agent
+mkdir -p %{buildroot}/usr/lib/systemd/system
+mkdir -p %{buildroot}/var/lib/xdr-agent
+
+install -m 0755 %{_sourcedir}/xdr-agent %{buildroot}/usr/bin/xdr-agent
+install -m 0644 %{_sourcedir}/config.json %{buildroot}/etc/xdr-agent/config.json
+install -m 0644 %{_sourcedir}/xdr-agent.service %{buildroot}/usr/lib/systemd/system/xdr-agent.service
+
+%files
+/usr/bin/xdr-agent
+%config(noreplace) /etc/xdr-agent/config.json
+/usr/lib/systemd/system/xdr-agent.service
+%dir /var/lib/xdr-agent
+
+%post
+if [ -x /usr/bin/systemctl ]; then
+  /usr/bin/systemctl daemon-reload || true
+  /usr/bin/systemctl enable xdr-agent.service || true
+  /usr/bin/systemctl restart xdr-agent.service || true
+fi
+
+%preun
+if [ "$1" -eq 0 ] && [ -x /usr/bin/systemctl ]; then
+  /usr/bin/systemctl stop xdr-agent.service || true
+  /usr/bin/systemctl disable xdr-agent.service || true
+fi
+
+%postun
+if [ -x /usr/bin/systemctl ]; then
+  /usr/bin/systemctl daemon-reload || true
+fi
