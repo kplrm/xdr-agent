@@ -12,11 +12,14 @@ import (
 	"xdr-agent/internal/identity"
 )
 
-func Run(ctx context.Context, configPath string, once bool) error {
+func Run(ctx context.Context, configPath string, once bool, enrollmentToken string) error {
 	// Load configuration from config.json
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
+	}
+	if enrollmentToken != "" {
+		cfg.EnrollmentToken = enrollmentToken
 	}
 
 	// Ensure identity State from 'state_path' is initialized and load current state
@@ -58,10 +61,10 @@ func Run(ctx context.Context, configPath string, once bool) error {
 	// Main loop that continues until the context is canceled or the ticker fires.
 	for {
 		select {
-		case <-ctx.Done():	// If the context is canceled (e.g., on SIGTERM), log shutdown and exit.
+		case <-ctx.Done(): // If the context is canceled (e.g., on SIGTERM), log shutdown and exit.
 			log.Printf("xdr-agent stopping")
 			return ctx.Err()
-		case <-ticker.C:	// On each tick, attempt enrollment.
+		case <-ticker.C: // On each tick, attempt enrollment.
 			if err := attempt(); err != nil {
 				log.Printf("enrollment attempt failed: %v", err)
 			}

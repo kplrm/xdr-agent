@@ -14,7 +14,7 @@ This repo is intentionally independent from the OpenSearch Dashboards plugin rep
 
 ## Project layout
 
-- `cmd/xdr-agent` - CLI entrypoint (`run`, `enroll`, `version`)
+- `cmd/xdr-agent` - CLI entrypoint (`run`, `enroll`, `remove`, `version`)
 - `internal/config` - JSON config loader
 - `internal/identity` - local identity/state management
 - `internal/enroll` - control-plane enrollment client
@@ -61,7 +61,7 @@ echo "0.1.1" > VERSION
 cd /home/kplrm/github/xdr-agent
 make build
 ./dist/xdr-agent version
-./dist/xdr-agent enroll --config ./config/config.json
+./dist/xdr-agent enroll <enrollment_token> --config ./config/config.json
 ```
 
 ## Build Debian package
@@ -148,3 +148,15 @@ Expected response body (minimal):
   "message": "enrolled"
 }
 ```
+
+## OpenSearch Dashboards xdr-manager-plugin compatibility
+
+For the plugin at `OpenSearch-Dashboards/plugins/xdr-manager-plugin`:
+
+1. Generate an enrollment token from the plugin UI (**Enroll XDR** flyout).
+2. Use `control_plane_url` pointing to OpenSearch Dashboards (default local: `http://localhost:5601`).
+3. Keep `enrollment_path` as `/api/v1/agents/enroll`.
+4. Set `enrollment_token` to the generated token.
+5. Set `policy_id` to the same policy used when generating the token.
+
+The plugin validates the bearer token and rejects enrollment when the token is invalid or policy mismatched.

@@ -1,5 +1,5 @@
 {
-  "control_plane_url": "http://localhost:54321",
+  "control_plane_url": "http://localhost:5601",
   "enrollment_path": "/api/v1/agents/enroll",
   "enrollment_token": "",
   "policy_id": "default-endpoint",

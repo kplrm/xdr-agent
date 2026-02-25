@@ -65,6 +65,7 @@ func Enroll(ctx context.Context, cfg config.Config, state identity.State, versio
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "xdr-agent")
+	req.Header.Set("osd-xsrf", "true")
 	if cfg.EnrollmentToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.EnrollmentToken)
 	}
