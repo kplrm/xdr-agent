@@ -1,0 +1,68 @@
+# Persistence mechanism detection rules
+# MITRE ATT&CK: T1053, T1543, T1546, T1547
+
+rules:
+  - id: persistence_cron_created
+    name: New cron job created
+    description: A new cron job was written, which could indicate persistence installation.
+    severity: medium
+    mitre_tactic: Persistence
+    mitre_technique: T1053.003
+    condition:
+      event_type: file.create
+      file_path: "(/etc/cron\\.|/var/spool/cron/).*"
+    action: alert
+    enabled: true
+    tags: [persistence, cron]
+
+  - id: persistence_systemd_service
+    name: New systemd service created
+    description: A new systemd service unit was created outside of package management.
+    severity: medium
+    mitre_tactic: Persistence
+    mitre_technique: T1543.002
+    condition:
+      event_type: file.create
+      file_path: "(/etc/systemd/system/|/usr/lib/systemd/system/).*\\.service$"
+    action: alert
+    enabled: true
+    tags: [persistence, systemd]
+
+  - id: persistence_authorized_keys
+    name: SSH authorized_keys modified
+    description: An SSH authorized_keys file was modified, potentially adding unauthorized access.
+    severity: high
+    mitre_tactic: Persistence
+    mitre_technique: T1098.004
+    condition:
+      event_type: file.modify
+      file_path: ".*/.ssh/authorized_keys"
+    action: alert
+    enabled: true
+    tags: [persistence, ssh]
+
+  - id: persistence_ld_preload
+    name: LD_PRELOAD file modified
+    description: /etc/ld.so.preload was modified, which forces loading a shared library into every process.
+    severity: critical
+    mitre_tactic: Persistence
+    mitre_technique: T1574.006
+    condition:
+      event_type: file.modify
+      file_path: "/etc/ld.so.preload"
+    action: block
+    enabled: true
+    tags: [persistence, ld-preload, high-confidence]
+
+  - id: persistence_bashrc_modified
+    name: Shell profile modified
+    description: A shell initialization file was modified, which executes code on every user login.
+    severity: medium
+    mitre_tactic: Persistence
+    mitre_technique: T1546.004
+    condition:
+      event_type: file.modify
+      file_path: ".*/(\\.(bashrc|bash_profile|profile|zshrc)|/etc/profile(\\.d/.*)?)"
+    action: alert
+    enabled: true
+    tags: [persistence, shell-profile]

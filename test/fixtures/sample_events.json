@@ -1,0 +1,44 @@
+{
+  "process_start": {
+    "id": "test-event-001",
+    "@timestamp": "2026-02-26T12:00:00Z",
+    "event.type": "process_start",
+    "event.category": "process",
+    "event.kind": "event",
+    "event.module": "telemetry.process",
+    "agent.id": "test-agent-001",
+    "host.hostname": "test-host",
+    "payload": {
+      "process.pid": 12345,
+      "process.ppid": 1000,
+      "process.name": "bash",
+      "process.executable": "/usr/bin/bash",
+      "process.command_line": "bash -c 'echo hello'",
+      "process.working_directory": "/home/testuser",
+      "user.name": "testuser",
+      "user.id": 1000
+    }
+  },
+  "malware_alert": {
+    "id": "test-alert-001",
+    "@timestamp": "2026-02-26T12:01:00Z",
+    "event.type": "alert",
+    "event.category": "malware",
+    "event.kind": "alert",
+    "event.severity": 4,
+    "event.module": "detection.malware",
+    "agent.id": "test-agent-001",
+    "host.hostname": "test-host",
+    "rule.name": "Known malware hash detected",
+    "rule.id": "malware_hash_001",
+    "event.action": "quarantine",
+    "event.risk_score": 95,
+    "threat.tactic.name": "Execution",
+    "threat.technique.id": "T1204",
+    "payload": {
+      "file.path": "/tmp/malware.elf",
+      "file.hash.sha256": "a1b2c3d4e5f6...",
+      "file.size": 45678
+    }
+  }
+}

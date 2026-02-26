@@ -1,221 +1,319 @@
 # xdr-agent
 
-Lightweight XDR agent focused on the first capability: **identity and enrollment**.
+Modular XDR endpoint security agent for Linux, written in Go.
 
-This repo is intentionally independent from the OpenSearch Dashboards plugin repo.
+Provides identity and enrollment (working today), with a full capability-based
+architecture scaffolded for threat detection, prevention, active response,
+compliance, and cloud/container security.
 
-## Current MVP scope
+## Security capabilities
 
-- Generates and persists a stable `agent_id`.
-- Collects host identity: machine ID, hostname, OS, architecture, IPv4 addresses.
-- Performs secure enrollment to a control plane over HTTP(S).
-- Sends heartbeat every 30 seconds after successful enrollment.
-- Stores enrollment status in local state.
-- Runs as a low-overhead systemd service.
+| Domain | Status | Description |
+|---|---|---|
+| **Identity & Enrollment** | ✅ Working | Agent ID, machine fingerprint, control-plane enrollment, heartbeat |
+| **Telemetry** | 🔲 Scaffolded | Process, file, network, session, kernel module, and audit monitoring |
+| **Malware Detection** | 🔲 Scaffolded | YARA rules, hash matching, static analysis |
+| **Behavioral Detection** | 🔲 Scaffolded | SIGMA-like rules for ransomware, credential access, persistence, lateral movement |
+| **Memory & Exploit** | 🔲 Scaffolded | Process injection, hollowing, fileless malware, ASLR/NX enforcement |
+| **Threat Intelligence** | 🔲 Scaffolded | IoC feeds, hash/IP/domain reputation matching |
+| **Malware Prevention** | 🔲 Scaffolded | fanotify-based exec blocking, quarantine vault |
+| **Ransomware Prevention** | 🔲 Scaffolded | Canary files, entropy detection, automatic rollback |
+| **Active Response** | 🔲 Scaffolded | Network isolation, process kill, file remediation, remote shell, playbooks |
+| **Cloud & Container** | 🔲 Scaffolded | Docker/containerd/CRI-O monitoring, Kubernetes audit, drift detection |
+| **Compliance** | 🔲 Scaffolded | CIS benchmarks, SCA, hardening checks, software inventory |
+| **Vulnerability** | 🔲 Scaffolded | CVE matching, package scanning, open port audit |
 
 ## Project layout
 
-- `cmd/xdr-agent` - CLI entrypoint (`run`, `enroll`, `remove`, `version`)
-- `internal/config` - JSON config loader
-- `internal/identity` - local identity/state management
-- `internal/enroll` - control-plane enrollment client
-- `internal/service` - runtime loop, enrollment retry, and heartbeat scheduling
-- `systemd/xdr-agent.service` - service unit
-- `packaging/deb` - Debian package build and maintainer scripts
-- `packaging/rpm` - RPM package spec template and build script
-- `packaging/build_multi_arch.sh` - multi-arch packaging orchestrator
-
-## Configuration
-
-Default config path: `/etc/xdr-agent/config.json`
-
-Sample file: `config/config.json`
-
-Required values for real enrollment:
-
-- `control_plane_url` (for example `https://xdr-manager.example.com`)
-- `enrollment_path` (for example `/api/v1/agents/enroll`)
-- `heartbeat_path` (for example `/api/v1/agents/heartbeat`)
-- `policy_id`
-- `enroll_interval_seconds` (> 0)
-- `request_timeout_seconds` (> 0)
-- `state_path`
-
-Optional:
-
-- `enrollment_token` for bearer auth
-- `tags`
-- `insecure_skip_tls_verify` (keep `false` in production)
-
-`config/config.json` is the single source for default values used by this project.
-
-## Local build and test
-
-Prerequisites (Debian/Ubuntu):
-
-```bash
-sudo apt-get update
-sudo apt-get install -y golang-go
-go version
+```
+xdr-agent/
+├── cmd/xdr-agent/              # CLI entrypoint (run, enroll, remove, version)
+├── internal/
+│   ├── agent/                  # Central orchestrator, capability registry, lifecycle
+│   ├── buildinfo/              # Build version injection
+│   ├── capability/             # Capability interface (Init/Start/Stop/Health)
+│   ├── config/                 # JSON config loader, validation, policy schema
+│   ├── controlplane/           # Control-plane HTTP client (enroll, heartbeat, policy, shipper)
+│   ├── enroll/                 # Current enrollment + heartbeat implementation
+│   ├── events/                 # Event pipeline (emit → enrich → filter → buffer → ship)
+│   ├── identity/               # Agent identity and local state persistence
+│   ├── service/                # Current runtime loop (enrollment retry + heartbeat)
+│   ├── telemetry/              # Endpoint visibility
+│   │   ├── process/            #   Process creation/termination, process tree
+│   │   ├── file/               #   File integrity monitoring (FIM)
+│   │   ├── network/            #   TCP/UDP connections, DNS queries
+│   │   ├── session/            #   User logon/logoff, privilege escalation
+│   │   ├── kernel/             #   Kernel module loads, eBPF program monitoring
+│   │   ├── audit/              #   Auditd/syslog collection
+│   │   └── scheduled/          #   Cron/systemd timer monitoring
+│   ├── detection/              # Threat detection engines
+│   │   ├── malware/            #   YARA, hash, static analysis scanners
+│   │   ├── behavioral/         #   Rule-based behavioral detection (ransomware, cred access, etc.)
+│   │   ├── memory/             #   Injection, hollowing, fileless, exploit detection
+│   │   └── threatintel/        #   IoC feed ingestion and matching
+│   ├── prevention/             # Real-time threat blocking
+│   │   ├── malware/            #   fanotify exec blocker, quarantine vault
+│   │   ├── ransomware/         #   Canary files, entropy shield, rollback
+│   │   ├── exploit/            #   ASLR/NX/ptrace enforcement
+│   │   └── allowlist/          #   Exclusion management
+│   ├── response/               # Active response (isolate, kill, remediate, shell, playbooks)
+│   ├── cloud/                  # Cloud & container security
+│   │   ├── container/          #   Docker/containerd/CRI-O runtime, drift, inventory
+│   │   └── kubernetes/         #   K8s audit log, pod security
+│   ├── compliance/             # CIS benchmarks, SCA, hardening, software inventory
+│   ├── vulnerability/          # CVE matching, package scanning, open ports
+│   └── platform/               # OS abstraction layer
+│       ├── linux/              #   procfs, fanotify, inotify, netlink, eBPF, seccomp, cgroups, auditd
+│       └── common/             #   Cross-platform filesystem, process, hash helpers
+├── pkg/                        # Public Go packages (importable by external tools)
+│   ├── eventschema/            #   ECS-compatible event schema (Event, Process, File, Network, Alert)
+│   └── ruleformat/             #   Detection rule parsing (SIGMA-like YAML)
+├── rules/                      # Detection and compliance rule files
+│   ├── behavioral/             #   SIGMA-like YAML rules (ransomware, persistence, etc.)
+│   ├── malware/                #   Known hash lists + YARA rules
+│   │   └── yara/               #     .yar files (ELF malware, webshells, cryptominers, rootkits)
+│   ├── compliance/             #   CIS/hardening check definitions
+│   └── threatintel/            #   Threat intel feed configuration
+├── config/                     # Default configuration files
+│   └── config.json             #   Sample agent config
+├── docs/                       # Project documentation
+│   ├── architecture.md         #   Architecture overview and diagrams
+│   ├── event-pipeline.md       #   Event pipeline design
+│   └── development/
+│       └── adding-capability.md  # Guide: how to add a new capability
+├── test/                       # Integration tests and fixtures
+│   ├── integration/
+│   └── fixtures/
+├── packaging/                  # OS package build scripts
+│   ├── deb/                    #   Debian package builder + maintainer scripts
+│   ├── rpm/                    #   RPM spec + build script
+│   ├── bash_completion/        #   Shell completion snippet
+│   ├── systemd-preset/         #   systemd preset for auto-enable
+│   └── build_multi_arch.sh     #   Multi-arch packaging orchestrator
+├── systemd/                    # systemd service unit
+├── Makefile                    # Build, run, package targets
+├── VERSION                     # Semantic version (e.g. 0.1.0)
+└── go.mod                      # Go module definition
 ```
 
-Default version source: `VERSION` (for example `0.1.0`).
+## Prerequisites
 
-You can bump once for all build/package commands:
+- **Go 1.22+** (`go version`)
+- **Linux** (agent uses Linux-specific APIs: procfs, fanotify, netlink, eBPF)
+- `dpkg-deb` for Debian packaging (part of `dpkg`)
+- `rpm` / `rpmbuild` for RPM packaging
+
+Install Go on Debian/Ubuntu:
 
 ```bash
-echo "0.1.1" > VERSION
+sudo apt-get update && sudo apt-get install -y golang-go
 ```
+
+## Build
 
 ```bash
 cd xdr-agent
 make build
-./dist/xdr-agent version
 ```
 
-One-shot enrollment test (foreground, exits after one enrollment attempt):
+This compiles the binary to `dist/xdr-agent` with version from the `VERSION` file
+injected via `-ldflags`.
+
+Verify:
+
+```bash
+./dist/xdr-agent version
+# 0.1.0
+```
+
+Override version without editing `VERSION`:
+
+```bash
+make build VERSION=0.2.0
+```
+
+## Run
+
+### Development (foreground)
+
+```bash
+make run
+# equivalent to: ./dist/xdr-agent run --config ./config/config.json
+```
+
+### One-shot enrollment
 
 ```bash
 ./dist/xdr-agent enroll <enrollment_token> --config ./config/config.json
 ```
 
-Long-running mode (foreground, periodic heartbeat after enrollment):
+Exits after a single enrollment attempt. Use this to verify control-plane
+connectivity before starting the long-running service.
+
+### Long-running mode
 
 ```bash
 ./dist/xdr-agent run --config ./config/config.json
 ```
 
-Completion output (for local binary):
+The agent will:
+1. Load config and ensure agent identity.
+2. Attempt enrollment (retry every `enroll_interval_seconds` until successful).
+3. Send heartbeats every 30 seconds.
+4. Shut down gracefully on `SIGTERM` or `SIGINT`.
+
+### With make
 
 ```bash
-./dist/xdr-agent completion bash
+# Run in foreground (builds first):
+make run
+
+# Enroll and exit:
+make enroll ENROLLMENT_TOKEN=<token>
 ```
 
-## Bash completion
+## Configuration
 
-Generate completion script from a local build:
+Default path: `/etc/xdr-agent/config.json`
 
-```bash
-source <(./dist/xdr-agent completion bash)
+Sample: `config/config.json`
+
+```json
+{
+  "control_plane_url": "http://localhost:5601",
+  "enrollment_path": "/api/v1/agents/enroll",
+  "heartbeat_path": "/api/v1/agents/heartbeat",
+  "enrollment_token": "",
+  "policy_id": "default-endpoint",
+  "tags": ["linux", "xdr-agent"],
+  "enroll_interval_seconds": 30,
+  "request_timeout_seconds": 10,
+  "state_path": "/var/lib/xdr-agent/state.json",
+  "insecure_skip_tls_verify": false
+}
 ```
 
-After `.deb` installation, completion is installed automatically at:
+| Field | Required | Description |
+|---|---|---|
+| `control_plane_url` | Yes | XDR manager URL (e.g. `https://xdr-manager.example.com`) |
+| `enrollment_path` | Yes | Enrollment API path |
+| `heartbeat_path` | No | Heartbeat API path (default: `/api/v1/agents/heartbeat`) |
+| `enrollment_token` | No | Bearer token for enrollment auth |
+| `policy_id` | Yes | Security policy to apply |
+| `tags` | No | Agent tags for grouping |
+| `enroll_interval_seconds` | Yes | Retry interval for enrollment (> 0) |
+| `request_timeout_seconds` | Yes | HTTP request timeout (> 0) |
+| `state_path` | Yes | Path to persist agent identity state |
+| `insecure_skip_tls_verify` | No | Skip TLS verification (keep `false` in prod) |
 
-- `/etc/bash_completion.d/xdr-agent`
+## CLI commands
 
-Open a new shell session (or run `source /etc/bash_completion.d/xdr-agent`) and tab-complete:
+```
+xdr-agent run        Run the long-lived agent process
+xdr-agent enroll     Perform one enrollment attempt and exit
+xdr-agent remove     Remove xdr-agent files and systemd service (requires root)
+xdr-agent version    Print build version
+xdr-agent completion bash   Output bash completion script
+xdr-agent help       Show usage information
+```
 
-- `xdr-agent <TAB>` → `run`, `enroll`, `remove`, `version`, `completion`, `help`
-- `sudo xdr-agent <TAB>` → same command suggestions
+## Packaging
 
-## Build Debian package
-
-Prerequisites:
-
-- Go toolchain available in `PATH` (`go version` must work)
-- `dpkg-deb` installed (part of `dpkg` on Debian/Ubuntu)
+### Debian (.deb)
 
 ```bash
-cd xdr-agent
 chmod +x packaging/deb/build.sh packaging/deb/postinst packaging/deb/prerm
 make deb
 ls -lh dist/*.deb
 ```
 
-Optional override (without editing `VERSION`):
+### RPM
 
 ```bash
-make deb VERSION=0.1.0
-```
-
-Package output:
-
-- `dist/xdr-agent_0.1.0_amd64.deb`
-
-## Build RPM package
-
-Prerequisite on Debian/Ubuntu build hosts:
-
-```bash
-sudo apt install rpm
-```
-
-Then build:
-
-```bash
-cd xdr-agent
+sudo apt install rpm   # if building on Debian/Ubuntu
 chmod +x packaging/rpm/build.sh
-bash ./packaging/rpm/build.sh "$(cat VERSION)" amd64
+make rpm
 ```
 
-## Build multi-architecture packages
-
-Build both `amd64` and `arm64` for both `deb` and `rpm`:
+### Multi-architecture (amd64 + arm64, deb + rpm)
 
 ```bash
-cd xdr-agent
-chmod +x packaging/build_multi_arch.sh packaging/deb/build.sh packaging/rpm/build.sh
-bash ./packaging/build_multi_arch.sh
+chmod +x packaging/build_multi_arch.sh
+bash ./packaging/build_multi_arch.sh "$(cat VERSION)"
 ```
 
-You can customize with env vars:
+Customize:
 
 ```bash
-ARCHES="amd64 arm64" FORMATS="deb rpm" bash ./packaging/build_multi_arch.sh "$(cat VERSION)"
+ARCHES="amd64 arm64" FORMATS="deb rpm" bash ./packaging/build_multi_arch.sh
 ```
 
 ## Install on Debian/Ubuntu
 
 ```bash
-cd xdr-agent
 sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
-sudo systemctl daemon-reload
-sudo xdr-agent enroll <enrollment_token> --config /etc/xdr-agent/config.json
-sudo systemctl enable xdr-agent
-sudo systemctl start xdr-agent
-sudo systemctl status xdr-agent --no-pager -l
-sudo journalctl -u xdr-agent -f
 ```
 
-Installation does **not** auto-start the service by default.
-This prevents restart loops while you are still editing `/etc/xdr-agent/config.json`.
+The package does **not** auto-start the service. Recommended flow:
 
-Recommended installation flow:
+1. Edit `/etc/xdr-agent/config.json` with your `control_plane_url`, `policy_id`, and `enrollment_token`.
+2. Enroll:
+   ```bash
+   sudo xdr-agent enroll <token> --config /etc/xdr-agent/config.json
+   ```
+3. Enable and start:
+   ```bash
+   sudo systemctl enable xdr-agent
+   sudo systemctl start xdr-agent
+   ```
+4. Verify:
+   ```bash
+   sudo systemctl status xdr-agent --no-pager -l
+   sudo journalctl -u xdr-agent -f
+   ```
 
-1. Install package with `dpkg`.
-2. Edit `/etc/xdr-agent/config.json` (`control_plane_url`, `policy_id`, `enrollment_token`).
-3. Run one-shot enrollment:
-  - `sudo xdr-agent enroll <enrollment_token> --config /etc/xdr-agent/config.json`
-4. Enable/start service for continuous operation:
-  - `sudo systemctl enable xdr-agent`
-  - `sudo systemctl start xdr-agent`
+## Bash completion
 
-Expected process command line after installation:
+After `.deb` installation, completion is available at `/etc/bash_completion.d/xdr-agent`.
 
-- `/usr/bin/xdr-agent run --config /etc/xdr-agent/config.json`
-
-## Troubleshooting build/install
-
-`make deb` fails with `go: command not found`:
+From a local build:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y golang-go
-go version
+source <(./dist/xdr-agent completion bash)
 ```
 
-Service not found after install:
+Supports `xdr-agent <TAB>` and `sudo xdr-agent <TAB>`.
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable xdr-agent
-sudo systemctl start xdr-agent
-systemctl status xdr-agent --no-pager -l
+## Architecture
+
+See [docs/architecture.md](docs/architecture.md) for the full architecture overview
+with diagrams, data flow, and design decisions.
+
+See [docs/event-pipeline.md](docs/event-pipeline.md) for event pipeline design.
+
+See [docs/development/adding-capability.md](docs/development/adding-capability.md)
+for a step-by-step guide on adding new security capabilities.
+
+### Capability interface
+
+Every security module implements:
+
+```go
+type Capability interface {
+    Name() string                       // e.g. "telemetry.process"
+    Init(deps Dependencies) error       // receive config, pipeline, logger
+    Start(ctx context.Context) error    // begin monitoring
+    Stop() error                        // graceful shutdown
+    Health() HealthStatus               // running, degraded, failed, etc.
+}
 ```
 
-## Notes on control-plane compatibility
+The agent orchestrator manages all capability lifecycles, starts them in
+dependency order, and stops them in reverse order on shutdown.
 
-Current enrollment request schema sent by agent:
+## Control-plane compatibility
+
+### Enrollment request
 
 ```json
 {
@@ -227,11 +325,11 @@ Current enrollment request schema sent by agent:
   "ip_addresses": ["10.0.0.12"],
   "policy_id": "default-endpoint",
   "tags": ["linux", "xdr-agent"],
-  "agent_version": "<VERSION>"
+  "agent_version": "0.1.0"
 }
 ```
 
-Expected response body (minimal):
+### Expected response
 
 ```json
 {
@@ -240,15 +338,24 @@ Expected response body (minimal):
 }
 ```
 
-## OpenSearch Dashboards xdr-manager-plugin compatibility
-
-For the plugin at `OpenSearch-Dashboards/plugins/xdr-manager-plugin`:
+### OpenSearch Dashboards xdr-manager-plugin
 
 1. Generate an enrollment token from the plugin UI (**Enroll XDR** flyout).
-2. Use `control_plane_url` pointing to OpenSearch Dashboards (default local: `http://localhost:5601`).
-3. Keep `enrollment_path` as `/api/v1/agents/enroll`.
+2. Set `control_plane_url` to OpenSearch Dashboards (default: `http://localhost:5601`).
+3. Set `enrollment_path` to `/api/v1/agents/enroll`.
 4. Set `enrollment_token` to the generated token.
-5. Set `policy_id` to the same policy used when generating the token.
-6. Keep `heartbeat_path` as `/api/v1/agents/heartbeat`.
+5. Set `policy_id` to match the token's policy.
+6. Set `heartbeat_path` to `/api/v1/agents/heartbeat`.
 
-The plugin validates the bearer token and rejects enrollment when the token is invalid or policy mismatched.
+## Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| `go: command not found` | `sudo apt-get install -y golang-go` |
+| Service not found after install | `sudo systemctl daemon-reload` |
+| Enrollment rejected | Verify `enrollment_token` and `policy_id` match the control plane |
+| Config file not found | Check path with `--config` flag; default is `/etc/xdr-agent/config.json` |
+
+## License
+
+See project license file.

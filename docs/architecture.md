@@ -1,0 +1,97 @@
+# XDR Agent Architecture
+
+## Overview
+
+The XDR Agent is a lightweight, modular endpoint security agent written in Go.
+It provides comprehensive threat detection, prevention, and response capabilities
+for Linux endpoints.
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           XDR Agent Process                                  │
+│                                                                              │
+│  ┌────────────┐    ┌───────────────────────────────────────────────────┐    │
+│  │  CLI / CMD  │───▶│              Agent Orchestrator                   │    │
+│  └────────────┘    │  (lifecycle, capability registry, health)          │    │
+│                    └──────────────────┬────────────────────────────────┘    │
+│                                       │                                      │
+│  ┌────────────────────────────────────┼────────────────────────────────┐    │
+│  │                        Capability Layer                              │    │
+│  │                                                                      │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ │    │
+│  │  │Telemetry │ │Detection │ │Prevention│ │ Response │ │Compliance│ │    │
+│  │  │          │ │          │ │          │ │          │ │          │ │    │
+│  │  │• Process │ │• Malware │ │• Blocker │ │• Isolate │ │• CIS     │ │    │
+│  │  │• File    │ │• Behavior│ │• R-ware  │ │• Kill    │ │• SCA     │ │    │
+│  │  │• Network │ │• Memory  │ │• Exploit │ │• Shell   │ │• Harden  │ │    │
+│  │  │• Session │ │• ThreatI │ │• Allow   │ │• Playbook│ │• Vuln    │ │    │
+│  │  │• Kernel  │ │          │ │          │ │          │ │          │ │    │
+│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ │    │
+│  └───────┼────────────┼────────────┼────────────┼────────────┼────────┘    │
+│          │            │            │            │            │              │
+│  ┌───────▼────────────▼────────────▼────────────▼────────────▼────────┐    │
+│  │                       Event Pipeline                                │    │
+│  │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────────┐  │    │
+│  │  │  Emit    │─▶│ Enrichment│─▶│  Filter  │─▶│  Buffer / Ship   │  │    │
+│  │  └──────────┘  └───────────┘  └──────────┘  └────────┬─────────┘  │    │
+│  └───────────────────────────────────────────────────────┼────────────┘    │
+│                                                           │                  │
+│  ┌───────────────────────────────────────────────────────▼────────────┐    │
+│  │                    Control Plane Client                             │    │
+│  │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────────┐  │    │
+│  │  │  Enroll  │  │ Heartbeat │  │  Policy  │  │  Event Shipper   │  │    │
+│  │  └──────────┘  └───────────┘  └──────────┘  └──────────────────┘  │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────┐    │
+│  │                    Platform Abstraction                             │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐ │    │
+│  │  │  procfs  │ │ fanotify │ │  netlink │ │   eBPF   │ │ seccomp │ │    │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └─────────┘ │    │
+│  └────────────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │   XDR Control Plane    │
+                        │   (OpenSearch + OSD)   │
+                        └───────────────────────┘
+```
+
+## Data Flow
+
+1. **Platform layer** collects raw OS events (process exec, file write, network connect)
+2. **Telemetry capabilities** structure raw events into ECS-compatible format
+3. **Detection engines** analyze telemetry events against rules and produce alerts
+4. **Prevention modules** block threats in real-time (fanotify deny, process kill)
+5. **Event pipeline** enriches, filters, and buffers all events
+6. **Control plane client** ships events/alerts to the XDR backend
+7. **Response manager** receives and executes commands from the control plane
+
+## Capability Interface
+
+Every security module implements `capability.Capability`:
+
+```go
+type Capability interface {
+    Name() string
+    Init(deps Dependencies) error
+    Start(ctx context.Context) error
+    Stop() error
+    Health() HealthStatus
+}
+```
+
+## Key Design Decisions
+
+| Decision | Rationale |
+|---|---|
+| Go language | Low overhead, single binary, strong stdlib, go cross-compilation |
+| Capability pattern | Modular, independently testable, policy-controlled |
+| ECS-compatible events | Interoperable with Elastic ecosystem, standard field naming |
+| eBPF preferred | Lowest overhead kernel telemetry, safe (verified programs) |
+| YARA for signatures | Industry standard, huge existing rule collection |
+| SIGMA for behaviors | Industry standard, 3000+ community rules |
+| fanotify for blocking | Kernel-level file access control, no filesystem driver needed |

@@ -1,0 +1,63 @@
+# SSH Hardening Checks
+# Based on CIS Benchmark and industry best practices
+
+policy:
+  id: ssh_hardening
+  name: SSH Configuration Hardening
+  description: Checks SSH server configuration against security best practices.
+
+checks:
+  - id: ssh_001
+    title: Ensure SSH root login is disabled
+    description: Direct root login via SSH should be disabled.
+    rationale: Disabling root login forces administrators to authenticate as a regular user first.
+    remediation: "Set 'PermitRootLogin no' in /etc/ssh/sshd_config"
+    severity: high
+    check:
+      type: file_content
+      file: /etc/ssh/sshd_config
+      pattern: "^PermitRootLogin\\s+no"
+
+  - id: ssh_002
+    title: Ensure SSH password authentication is disabled
+    description: Password-based SSH authentication should be disabled in favor of key-based auth.
+    rationale: Key-based authentication is more secure than passwords.
+    remediation: "Set 'PasswordAuthentication no' in /etc/ssh/sshd_config"
+    severity: medium
+    check:
+      type: file_content
+      file: /etc/ssh/sshd_config
+      pattern: "^PasswordAuthentication\\s+no"
+
+  - id: ssh_003
+    title: Ensure SSH protocol version 2 is used
+    description: Only SSH protocol version 2 should be allowed.
+    rationale: SSH v1 has known cryptographic weaknesses.
+    remediation: "Set 'Protocol 2' in /etc/ssh/sshd_config"
+    severity: high
+    check:
+      type: file_content
+      file: /etc/ssh/sshd_config
+      pattern: "^Protocol\\s+2"
+
+  - id: ssh_004
+    title: Ensure SSH MaxAuthTries is set to 4 or less
+    description: Limit the number of authentication attempts per connection.
+    rationale: Reduces the risk of brute-force attacks.
+    remediation: "Set 'MaxAuthTries 4' in /etc/ssh/sshd_config"
+    severity: medium
+    check:
+      type: file_content
+      file: /etc/ssh/sshd_config
+      pattern: "^MaxAuthTries\\s+[1-4]$"
+
+  - id: ssh_005
+    title: Ensure SSH idle timeout interval is configured
+    description: SSH sessions should disconnect after a period of inactivity.
+    rationale: Reduces the risk of unauthorized access from abandoned sessions.
+    remediation: "Set 'ClientAliveInterval 300' and 'ClientAliveCountMax 3' in /etc/ssh/sshd_config"
+    severity: medium
+    check:
+      type: file_content
+      file: /etc/ssh/sshd_config
+      pattern: "^ClientAliveInterval\\s+[1-9]"
