@@ -1,0 +1,43 @@
+# Lateral movement detection rules
+# MITRE ATT&CK: T1021, T1572
+
+rules:
+  - id: lateral_ssh_tunnel
+    name: SSH tunnel or port forwarding detected
+    description: An SSH connection was established with tunneling/forwarding flags, potentially used for lateral movement.
+    severity: medium
+    mitre_tactic: Lateral Movement
+    mitre_technique: T1572
+    condition:
+      event_type: process.start
+      process_name: ssh
+      command_line: ".*(-L|-R|-D|-w)\\s.*"
+    action: alert
+    enabled: true
+    tags: [lateral-movement, ssh-tunnel]
+
+  - id: lateral_network_scan
+    name: Internal network scanning detected
+    description: A process made rapid connections to multiple internal hosts, indicating network reconnaissance.
+    severity: high
+    mitre_tactic: Discovery
+    mitre_technique: T1046
+    condition:
+      event_type: network.connection
+      # Stateful: >20 unique internal IPs from same PID in 30s
+    action: alert
+    enabled: true
+    tags: [lateral-movement, network-scan]
+
+  - id: lateral_proxy_tool
+    name: Known proxy/tunneling tool executed
+    description: A known proxy or tunneling tool was executed (chisel, frp, ngrok, socat relay).
+    severity: high
+    mitre_tactic: Command and Control
+    mitre_technique: T1090
+    condition:
+      event_type: process.start
+      process_name: "(chisel|frpc?|ngrok|ligolo)"
+    action: alert
+    enabled: true
+    tags: [lateral-movement, proxy-tool]

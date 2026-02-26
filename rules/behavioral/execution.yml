@@ -1,0 +1,69 @@
+# Suspicious execution detection rules
+# MITRE ATT&CK: T1059
+
+rules:
+  - id: exec_reverse_shell
+    name: Reverse shell detected
+    description: A process established a reverse shell pattern (bash/sh redirecting stdin/stdout to network).
+    severity: critical
+    mitre_tactic: Execution
+    mitre_technique: T1059.004
+    condition:
+      event_type: process.start
+      command_line: ".*(bash -i >& /dev/tcp/|/bin/sh -i|nc -e /bin/(sh|bash)|socat.*exec.*sh|python.*socket.*connect.*pty|perl.*socket.*exec).*"
+    action: block
+    enabled: true
+    tags: [execution, reverse-shell, high-confidence]
+
+  - id: exec_base64_decode_pipe
+    name: Base64 decoded execution
+    description: A command involved decoding base64 content and piping it to a shell interpreter.
+    severity: high
+    mitre_tactic: Execution
+    mitre_technique: T1059.004
+    condition:
+      event_type: process.start
+      command_line: ".*(echo.*\\|.*base64 -d.*\\|.*(bash|sh|python|perl)|base64 -d.*\\|.*(bash|sh)).*"
+    action: alert
+    enabled: true
+    tags: [execution, obfuscation, base64]
+
+  - id: exec_curl_pipe_bash
+    name: Download and execute pattern
+    description: "A download tool piped output directly to a shell interpreter (curl|bash pattern)."
+    severity: high
+    mitre_tactic: Execution
+    mitre_technique: T1059.004
+    condition:
+      event_type: process.start
+      command_line: ".*(curl|wget).*\\|.*(bash|sh|python|perl).*"
+    action: alert
+    enabled: true
+    tags: [execution, download-execute]
+
+  - id: exec_web_server_spawn_shell
+    name: Web server spawned shell
+    description: A web server process (httpd, nginx, apache, node) spawned a shell, indicating possible web shell or RCE exploitation.
+    severity: critical
+    mitre_tactic: Execution
+    mitre_technique: T1059.004
+    condition:
+      event_type: process.start
+      parent_process: "(httpd|nginx|apache2|node|java|php-fpm|uwsgi|gunicorn)"
+      process_name: "(bash|sh|dash|zsh|ksh|csh)"
+    action: alert
+    enabled: true
+    tags: [execution, webshell, high-confidence]
+
+  - id: exec_from_tmp
+    name: Execution from temporary directory
+    description: An executable was run from /tmp, /var/tmp, or /dev/shm, commonly used by attackers.
+    severity: medium
+    mitre_tactic: Execution
+    mitre_technique: T1059
+    condition:
+      event_type: process.start
+      command_line: "^(/tmp/|/var/tmp/|/dev/shm/).*"
+    action: alert
+    enabled: true
+    tags: [execution, temp-directory]

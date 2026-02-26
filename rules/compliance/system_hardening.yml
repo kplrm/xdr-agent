@@ -1,0 +1,74 @@
+# System Hardening Checks
+# Based on CIS Benchmark and industry best practices
+
+policy:
+  id: system_hardening
+  name: System Hardening Configuration
+  description: Checks general system security hardening settings.
+
+checks:
+  - id: sys_001
+    title: Ensure ASLR is enabled
+    description: Address Space Layout Randomization should be fully enabled.
+    rationale: ASLR makes it harder for attackers to exploit memory corruption vulnerabilities.
+    remediation: "Set kernel.randomize_va_space = 2 in /etc/sysctl.conf"
+    severity: high
+    check:
+      type: file_content
+      file: /proc/sys/kernel/randomize_va_space
+      pattern: "^2$"
+
+  - id: sys_002
+    title: Ensure core dumps are restricted
+    description: Core dumps should be restricted to prevent information leakage.
+    rationale: Core dumps may contain sensitive information like passwords and keys.
+    remediation: "Set 'fs.suid_dumpable = 0' in /etc/sysctl.conf"
+    severity: medium
+    check:
+      type: file_content
+      file: /proc/sys/fs/suid_dumpable
+      pattern: "^0$"
+
+  - id: sys_003
+    title: Ensure SELinux or AppArmor is active
+    description: A mandatory access control system should be active.
+    rationale: MAC systems limit the damage from compromised applications.
+    remediation: "Enable and configure SELinux or AppArmor"
+    severity: high
+    check:
+      type: command
+      command: "getenforce 2>/dev/null || aa-status --enabled 2>/dev/null"
+      pattern: "(Enforcing|Yes)"
+
+  - id: sys_004
+    title: Ensure /tmp is mounted with noexec
+    description: The /tmp directory should be mounted with noexec to prevent execution.
+    rationale: Attackers commonly drop and execute payloads in /tmp.
+    remediation: "Add 'noexec' option to /tmp mount in /etc/fstab"
+    severity: medium
+    check:
+      type: command
+      command: "findmnt -n -o OPTIONS /tmp"
+      pattern: "noexec"
+
+  - id: sys_005
+    title: Ensure IP forwarding is disabled
+    description: IP forwarding should be disabled unless this system is a router.
+    rationale: Prevents the system from being used as a network pivot point.
+    remediation: "Set 'net.ipv4.ip_forward = 0' in /etc/sysctl.conf"
+    severity: medium
+    check:
+      type: file_content
+      file: /proc/sys/net/ipv4/ip_forward
+      pattern: "^0$"
+
+  - id: sys_006
+    title: Ensure ptrace is restricted
+    description: ptrace should be restricted to prevent process injection attacks.
+    rationale: ptrace can be used for process injection and credential dumping.
+    remediation: "Set 'kernel.yama.ptrace_scope = 1' or higher in /etc/sysctl.conf"
+    severity: high
+    check:
+      type: file_content
+      file: /proc/sys/kernel/yama/ptrace_scope
+      pattern: "^[1-3]$"

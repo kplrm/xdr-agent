@@ -1,0 +1,42 @@
+# Ransomware behavioral detection rules
+# MITRE ATT&CK: T1486 (Data Encrypted for Impact)
+
+rules:
+  - id: ransomware_canary_triggered
+    name: Ransomware canary file modified
+    description: A honeypot/canary file deployed by the XDR agent was modified or deleted, strongly indicating ransomware activity.
+    severity: critical
+    mitre_tactic: Impact
+    mitre_technique: T1486
+    condition:
+      event_type: file.modify
+      file_path: ".*\\.xdr-canary$"
+    action: block
+    enabled: true
+    tags: [ransomware, canary, high-confidence]
+
+  - id: ransomware_mass_rename
+    name: Mass file rename with extension change
+    description: A process renamed more than 50 files with a new extension within 60 seconds, indicating possible ransomware encryption.
+    severity: high
+    mitre_tactic: Impact
+    mitre_technique: T1486
+    condition:
+      event_type: file.rename
+      # Stateful: >50 renames by same PID in 60s window
+    action: alert
+    enabled: true
+    tags: [ransomware, behavioral]
+
+  - id: ransomware_shadow_delete
+    name: Shadow copy deletion attempt
+    description: A command was executed that attempts to delete system backups or shadow copies.
+    severity: high
+    mitre_tactic: Impact
+    mitre_technique: T1490
+    condition:
+      event_type: process.start
+      command_line: ".*(vssadmin|wbadmin|bcdedit|bcdboot).*delete.*"
+    action: block
+    enabled: true
+    tags: [ransomware, shadow-copy]

@@ -1,0 +1,56 @@
+# Defense evasion detection rules
+# MITRE ATT&CK: T1070, T1027, T1562
+
+rules:
+  - id: evasion_log_deletion
+    name: System log deletion detected
+    description: System log files were deleted or truncated, potentially to cover attacker tracks.
+    severity: high
+    mitre_tactic: Defense Evasion
+    mitre_technique: T1070.002
+    condition:
+      event_type: file.delete
+      file_path: "/var/log/(auth\\.log|secure|syslog|messages|audit/audit\\.log|wtmp|btmp)"
+    action: alert
+    enabled: true
+    tags: [defense-evasion, log-deletion]
+
+  - id: evasion_timestomping
+    name: File timestamp modification detected
+    description: The touch command was used with explicit timestamp flags, potentially to evade timeline analysis.
+    severity: medium
+    mitre_tactic: Defense Evasion
+    mitre_technique: T1070.006
+    condition:
+      event_type: process.start
+      process_name: touch
+      command_line: ".*(-t|-d|--date|--reference).*"
+    action: alert
+    enabled: true
+    tags: [defense-evasion, timestomping]
+
+  - id: evasion_disable_firewall
+    name: Host firewall disabled
+    description: The host firewall (iptables, ufw, firewalld) was disabled.
+    severity: high
+    mitre_tactic: Defense Evasion
+    mitre_technique: T1562.004
+    condition:
+      event_type: process.start
+      command_line: ".*(iptables -F|ufw disable|systemctl stop firewalld|service iptables stop).*"
+    action: alert
+    enabled: true
+    tags: [defense-evasion, firewall-disable]
+
+  - id: evasion_history_clear
+    name: Shell history cleared
+    description: Shell command history was cleared or the HISTFILE was unset.
+    severity: medium
+    mitre_tactic: Defense Evasion
+    mitre_technique: T1070.003
+    condition:
+      event_type: process.start
+      command_line: ".*(history -c|history -w /dev/null|unset HISTFILE|export HISTSIZE=0|>.*\\.bash_history).*"
+    action: alert
+    enabled: true
+    tags: [defense-evasion, history-clear]
