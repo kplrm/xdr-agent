@@ -227,6 +227,12 @@ make deb
 ls -lh dist/*.deb
 ```
 
+By default, staging directories are removed. To keep them for inspection/debugging:
+
+```bash
+make deb KEEP_STAGING=1
+```
+
 ### RPM
 
 ```bash

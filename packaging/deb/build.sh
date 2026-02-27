@@ -11,6 +11,7 @@ PKG_NAME="xdr-agent"
 DIST_DIR="${ROOT_DIR}/dist"
 BIN_PATH="${DIST_DIR}/xdr-agent"
 PKG_ROOT="${DIST_DIR}/${PKG_NAME}_${VERSION}_${ARCH}"
+KEEP_STAGING="${KEEP_STAGING:-0}"
 
 echo "[1/4] Building binary"
 mkdir -p "${DIST_DIR}"
@@ -73,5 +74,14 @@ install -m 0755 "${ROOT_DIR}/packaging/deb/prerm" "${PKG_ROOT}/DEBIAN/prerm"
 echo "[3/4] Building .deb"
 dpkg-deb --build --root-owner-group "${PKG_ROOT}" >/dev/null
 
+if [[ "${KEEP_STAGING}" != "1" ]]; then
+  rm -rf "${PKG_ROOT}"
+fi
+
 echo "[4/4] Done"
 echo "Package created: ${PKG_ROOT}.deb"
+if [[ "${KEEP_STAGING}" == "1" ]]; then
+  echo "Staging directory kept: ${PKG_ROOT}"
+else
+  echo "Staging directory removed: ${PKG_ROOT}"
+fi

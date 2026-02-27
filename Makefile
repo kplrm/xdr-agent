@@ -42,7 +42,7 @@ enroll: build
 	./dist/xdr-agent enroll $(ENROLLMENT_TOKEN) --config ./config/config.json
 
 deb:
-	bash ./packaging/deb/build.sh $(VERSION) amd64
+	KEEP_STAGING=$(KEEP_STAGING) bash ./packaging/deb/build.sh $(VERSION) amd64
 
 rpm:
 	bash ./packaging/rpm/build.sh $(VERSION) amd64
