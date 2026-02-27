@@ -35,16 +35,16 @@ mkdir -p \
   "${PKG_ROOT}/DEBIAN" \
   "${PKG_ROOT}/usr/bin" \
   "${PKG_ROOT}/usr/share/xdr-agent" \
+  "${PKG_ROOT}/usr/share/bash-completion/completions" \
   "${PKG_ROOT}/usr/lib/systemd/system-preset" \
   "${PKG_ROOT}/etc/xdr-agent" \
-  "${PKG_ROOT}/etc/bash_completion.d" \
   "${PKG_ROOT}/lib/systemd/system" \
   "${PKG_ROOT}/var/lib/xdr-agent"
 
 install -m 0755 "${BIN_PATH}" "${PKG_ROOT}/usr/bin/xdr-agent"
 install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/etc/xdr-agent/config.json"
 install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/usr/share/xdr-agent/config.default.json"
-install -m 0644 "${ROOT_DIR}/packaging/bash_completion/xdr-agent" "${PKG_ROOT}/etc/bash_completion.d/xdr-agent"
+install -m 0644 "${ROOT_DIR}/packaging/bash_completion/xdr-agent" "${PKG_ROOT}/usr/share/bash-completion/completions/xdr-agent"
 install -m 0644 "${ROOT_DIR}/packaging/systemd-preset/90-xdr-agent.preset" "${PKG_ROOT}/usr/lib/systemd/system-preset/90-xdr-agent.preset"
 install -m 0644 "${ROOT_DIR}/systemd/xdr-agent.service" "${PKG_ROOT}/lib/systemd/system/xdr-agent.service"
 
@@ -59,7 +59,7 @@ Section: admin
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: XDR Team <xdr@example.com>
-Depends: systemd
+Depends: systemd, bash-completion
 Description: Lightweight XDR agent (identity and enrollment)
  A minimal host agent that establishes identity and enrolls into a control plane.
 EOF

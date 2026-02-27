@@ -267,12 +267,8 @@ The package does **not** auto-start the service. Recommended flow:
    ```bash
    sudo xdr-agent enroll <token> --config /etc/xdr-agent/config.json
    ```
-3. Enable and start:
-   ```bash
-   sudo systemctl enable xdr-agent
-   sudo systemctl start xdr-agent
-   ```
-4. Verify:
+  On successful enrollment, this command automatically runs `systemctl enable xdr-agent` and `systemctl start xdr-agent`.
+3. Verify:
    ```bash
    sudo systemctl status xdr-agent --no-pager -l
    sudo journalctl -u xdr-agent -f
@@ -280,7 +276,7 @@ The package does **not** auto-start the service. Recommended flow:
 
 ## Bash completion
 
-After `.deb` installation, completion is available at `/etc/bash_completion.d/xdr-agent`.
+After `.deb` installation, completion is installed at `/usr/share/bash-completion/completions/xdr-agent` and is auto-loaded by `bash-completion` in new shell sessions.
 
 From a local build:
 

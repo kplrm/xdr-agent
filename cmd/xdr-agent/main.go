@@ -121,10 +121,42 @@ func runCommand(command string, args []string) error {
 			}
 			return err
 		}
+
+		if command == "enroll" {
+			if err := enableAndStartServiceAfterEnroll(); err != nil {
+				return err
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported command %q", command)
 	}
+}
+
+func enableAndStartServiceAfterEnroll() error {
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(os.Stdout, "enrollment successful; run with sudo to auto-enable and start xdr-agent.service")
+		return nil
+	}
+
+	systemctlPath, err := exec.LookPath("systemctl")
+	if err != nil {
+		fmt.Fprintln(os.Stdout, "enrollment successful; systemctl not found, skipping service enable/start")
+		return nil
+	}
+
+	if err := exec.Command(systemctlPath, "daemon-reload").Run(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload failed: %w", err)
+	}
+	if err := exec.Command(systemctlPath, "enable", "xdr-agent.service").Run(); err != nil {
+		return fmt.Errorf("systemctl enable xdr-agent.service failed: %w", err)
+	}
+	if err := exec.Command(systemctlPath, "start", "xdr-agent.service").Run(); err != nil {
+		return fmt.Errorf("systemctl start xdr-agent.service failed: %w", err)
+	}
+
+	fmt.Fprintln(os.Stdout, "xdr-agent.service enabled and started")
+	return nil
 }
 
 func removeInstallation() error {

@@ -10,9 +10,10 @@ if [ ! -f /etc/xdr-agent/config.json ] && [ -f /usr/share/xdr-agent/config.defau
   chmod 0644 /etc/xdr-agent/config.json
 fi
 
-if [ -x /usr/bin/xdr-agent ] && [ -d /etc/bash_completion.d ]; then
-  /usr/bin/xdr-agent completion bash >/etc/bash_completion.d/xdr-agent || true
-  chmod 0644 /etc/bash_completion.d/xdr-agent || true
+if [ -x /usr/bin/xdr-agent ]; then
+  mkdir -p /usr/share/bash-completion/completions || true
+  /usr/bin/xdr-agent completion bash >/usr/share/bash-completion/completions/xdr-agent || true
+  chmod 0644 /usr/share/bash-completion/completions/xdr-agent || true
 fi
 
 if command -v systemctl >/dev/null 2>&1; then
