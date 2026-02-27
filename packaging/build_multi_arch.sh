@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# xdr-agent - Modular XDR endpoint security agent for Linux
+# Copyright (C) 2026  Diego A. Guillen-Rosaperez
+# SPDX-License-Identifier: AGPL-3.0
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

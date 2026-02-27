@@ -2,7 +2,7 @@ Name:           xdr-agent
 Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        Lightweight XDR agent (identity and enrollment)
-License:        Apache-2.0
+License:        AGPL-3.0
 URL:            https://example.com/xdr-agent
 BuildArch:      @RPM_ARCH@
 Requires(post): systemd
@@ -26,7 +26,13 @@ install -m 0755 %{_sourcedir}/xdr-agent %{buildroot}/usr/bin/xdr-agent
 install -m 0644 %{_sourcedir}/config.json %{buildroot}/etc/xdr-agent/config.json
 install -m 0644 %{_sourcedir}/xdr-agent.service %{buildroot}/usr/lib/systemd/system/xdr-agent.service
 
+mkdir -p %{buildroot}/usr/share/doc/xdr-agent
+install -m 0644 %{_sourcedir}/LICENSE %{buildroot}/usr/share/doc/xdr-agent/LICENSE
+install -m 0644 %{_sourcedir}/AUTHORS %{buildroot}/usr/share/doc/xdr-agent/AUTHORS
+
 %files
+%license /usr/share/doc/xdr-agent/LICENSE
+%doc /usr/share/doc/xdr-agent/AUTHORS
 /usr/bin/xdr-agent
 %config(noreplace) /etc/xdr-agent/config.json
 /usr/lib/systemd/system/xdr-agent.service

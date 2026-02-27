@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# xdr-agent - Modular XDR endpoint security agent for Linux
+# Copyright (C) 2026  Diego A. Guillen-Rosaperez
+# SPDX-License-Identifier: AGPL-3.0
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -64,6 +67,8 @@ mkdir -p \
 install -m 0755 "${DIST_DIR}/xdr-agent" "${RPMBUILD_DIR}/SOURCES/xdr-agent"
 install -m 0644 "${ROOT_DIR}/config/config.json" "${RPMBUILD_DIR}/SOURCES/config.json"
 install -m 0644 "${ROOT_DIR}/systemd/xdr-agent.service" "${RPMBUILD_DIR}/SOURCES/xdr-agent.service"
+install -m 0644 "${ROOT_DIR}/LICENSE" "${RPMBUILD_DIR}/SOURCES/LICENSE"
+install -m 0644 "${ROOT_DIR}/AUTHORS" "${RPMBUILD_DIR}/SOURCES/AUTHORS"
 
 sed \
   -e "s/@VERSION@/${VERSION}/g" \

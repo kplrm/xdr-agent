@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# xdr-agent - Modular XDR endpoint security agent for Linux
+# Copyright (C) 2026  Diego A. Guillen-Rosaperez
+# SPDX-License-Identifier: AGPL-3.0
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -43,6 +46,10 @@ install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/usr/share/xdr-agen
 install -m 0644 "${ROOT_DIR}/packaging/bash_completion/xdr-agent" "${PKG_ROOT}/etc/bash_completion.d/xdr-agent"
 install -m 0644 "${ROOT_DIR}/packaging/systemd-preset/90-xdr-agent.preset" "${PKG_ROOT}/usr/lib/systemd/system-preset/90-xdr-agent.preset"
 install -m 0644 "${ROOT_DIR}/systemd/xdr-agent.service" "${PKG_ROOT}/lib/systemd/system/xdr-agent.service"
+
+mkdir -p "${PKG_ROOT}/usr/share/doc/xdr-agent"
+install -m 0644 "${ROOT_DIR}/LICENSE" "${PKG_ROOT}/usr/share/doc/xdr-agent/copyright"
+install -m 0644 "${ROOT_DIR}/AUTHORS" "${PKG_ROOT}/usr/share/doc/xdr-agent/AUTHORS"
 
 cat > "${PKG_ROOT}/DEBIAN/control" <<EOF
 Package: ${PKG_NAME}

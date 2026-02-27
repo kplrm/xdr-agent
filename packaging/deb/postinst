@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# xdr-agent - Modular XDR endpoint security agent for Linux
+# Copyright (C) 2026  Diego A. Guillen-Rosaperez
+# SPDX-License-Identifier: AGPL-3.0
 set -e
 
 if [ ! -f /etc/xdr-agent/config.json ] && [ -f /usr/share/xdr-agent/config.default.json ]; then
