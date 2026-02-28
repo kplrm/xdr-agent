@@ -28,7 +28,7 @@ GO := /usr/local/go/bin/go
 endif
 endif
 
-.PHONY: build run enroll deb rpm packages clean
+.PHONY: build run enroll deb rpm packages clean test vet
 
 build:
 	@if [ -z "$(GO)" ]; then echo "Go toolchain not found. Install Go or add it to PATH."; exit 127; fi

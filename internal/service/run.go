@@ -147,6 +147,16 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("capability started: %s", netCollector.Name())
 	}
 
+	// CPU metrics (system-wide + per-process)
+	cpuCollector := system.NewCpuCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
+	if err := cpuCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("cpu collector init failed: %v", err)
+	} else if err := cpuCollector.Start(ctx); err != nil {
+		log.Printf("cpu collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", cpuCollector.Name())
+	}
+
 	for {
 		select {
 		case <-ctx.Done(): // If the context is canceled (e.g., on SIGTERM), log shutdown and exit.

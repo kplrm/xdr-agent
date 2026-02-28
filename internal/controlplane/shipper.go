@@ -107,8 +107,18 @@ func (s *Shipper) Run(ctx context.Context) {
 			return
 		case <-s.notify:
 			s.flush(ctx)
+			// Drain any pending notify so we don't double-flush.
+			select {
+			case <-s.notify:
+			default:
+			}
 		case <-ticker.C:
 			s.flush(ctx)
+			// Drain any pending notify so we don't double-flush.
+			select {
+			case <-s.notify:
+			default:
+			}
 		}
 	}
 }
