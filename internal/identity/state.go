@@ -14,16 +14,17 @@ import (
 )
 
 type State struct {
-	AgentID       string   `json:"agent_id"`
-	MachineID     string   `json:"machine_id"`
-	Hostname      string   `json:"hostname"`
-	Architecture  string   `json:"architecture"`
-	OSType        string   `json:"os_type"`
-	IPAddresses   []string `json:"ip_addresses"`
-	Enrolled      bool     `json:"enrolled"`
-	EnrollmentID  string   `json:"enrollment_id,omitempty"`
-	LastEnrollAt  string   `json:"last_enroll_at,omitempty"`
-	LastEnrollErr string   `json:"last_enroll_error,omitempty"`
+	AgentID         string   `json:"agent_id"`
+	MachineID       string   `json:"machine_id"`
+	Hostname        string   `json:"hostname"`
+	Architecture    string   `json:"architecture"`
+	OSType          string   `json:"os_type"`
+	IPAddresses     []string `json:"ip_addresses"`
+	Enrolled        bool     `json:"enrolled"`
+	EnrollmentID    string   `json:"enrollment_id,omitempty"`
+	EnrollmentToken string   `json:"enrollment_token,omitempty"`
+	LastEnrollAt    string   `json:"last_enroll_at,omitempty"`
+	LastEnrollErr   string   `json:"last_enroll_error,omitempty"`
 }
 
 func Ensure(path string) (State, error) {

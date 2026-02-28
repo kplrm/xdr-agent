@@ -45,7 +45,7 @@ func (p *Pipeline) Emit(event Event) {
 	}
 }
 
-// Subscribe registers a handler that will receive all events.
+// Subscribe registers an event handler that will receive all events.
 func (p *Pipeline) Subscribe(handler func(Event)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

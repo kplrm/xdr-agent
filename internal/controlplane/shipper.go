@@ -1,11 +1,28 @@
 package controlplane
 
-// Shipper sends batched events and alerts to the control plane for indexing
-// and analysis in the XDR backend (OpenSearch).
+import (
+	"context"
+	"fmt"
+	"strings"
 
-// TODO: Implement event shipper
-// - ShipEvents(ctx, events []Event) method on Client
-// - Batch events for efficient transport
-// - Compression (gzip)
-// - Retry with exponential backoff
-// - Integration with events.Buffer for offline resilience
+	"xdr-agent/internal/events"
+)
+
+// ShipEvents sends a batch of events to the control plane for indexing in OpenSearch.
+// Returns nil on success. On failure, the caller should re-buffer the events for retry.
+func (c *Client) ShipEvents(ctx context.Context, batch []events.Event) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	respBody, status, err := c.doJSON(ctx, c.eventsPath, batch)
+	if err != nil {
+		return fmt.Errorf("ship events: %w", err)
+	}
+
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("ship events rejected: status=%d body=%s", status, strings.TrimSpace(string(respBody)))
+	}
+
+	return nil
+}

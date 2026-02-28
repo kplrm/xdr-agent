@@ -3,7 +3,13 @@
 // itself with the agent and is managed through this common lifecycle interface.
 package capability
 
-import "context"
+import (
+	"context"
+	"log"
+
+	"xdr-agent/internal/config"
+	"xdr-agent/internal/events"
+)
 
 // HealthStatus represents the operational state of a capability.
 type HealthStatus int
@@ -63,12 +69,12 @@ type Capability interface {
 type Dependencies struct {
 	// EventPipeline is the central event bus for emitting telemetry and alerts.
 	// All capabilities should emit structured events here.
-	EventPipeline interface{} // will be *events.Pipeline once that package is built
+	EventPipeline *events.Pipeline
 
 	// Config provides access to the agent's configuration, including
 	// per-capability settings.
-	Config interface{} // will be config.Config once expanded
+	Config config.Config
 
 	// Logger provides structured logging.
-	Logger interface{} // will be *slog.Logger or similar
+	Logger *log.Logger
 }

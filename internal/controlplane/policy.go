@@ -1,9 +1,10 @@
 package controlplane
 
-// Policy handles pulling security policy from the control plane and applying
-// it to enable/disable capabilities and configure their parameters.
+// Policy sync is a placeholder for Phase 1. The control plane does not yet
+// expose a policy endpoint. When it does, PullPolicy will fetch the latest
+// policy document and the agent orchestrator will apply capability changes.
 
-// TODO: Implement policy sync
-// - PolicyResponse type (per-capability enable/disable + settings)
-// - PullPolicy(ctx) method on Client
-// - Policy change notification to agent orchestrator
+// TODO: Implement when the control-plane plugin adds a policy endpoint:
+// - PullPolicy(ctx, agentID) (*config.Policy, error)
+// - Compare policy.Version to detect changes
+// - Notify agent orchestrator to start/stop capabilities accordingly
