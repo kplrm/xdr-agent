@@ -8,5 +8,9 @@
   "enroll_interval_seconds": 30,
   "request_timeout_seconds": 10,
   "state_path": "/var/lib/xdr-agent/state.json",
-  "insecure_skip_tls_verify": false
+  "insecure_skip_tls_verify": false,
+  "telemetry_url": "",
+  "telemetry_path": "/api/v1/agents/telemetry",
+  "telemetry_interval_seconds": 5,
+  "telemetry_ship_interval_seconds": 1
 }

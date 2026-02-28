@@ -21,6 +21,14 @@ type Config struct {
 	RequestTimeoutSeconds int      `json:"request_timeout_seconds"`
 	StatePath             string   `json:"state_path"`
 	InsecureSkipTLSVerify bool     `json:"insecure_skip_tls_verify"`
+
+	// Telemetry shipping — optional fields.
+	// When TelemetryURL is empty the agent ships telemetry to ControlPlaneURL.
+	// Setting a different URL allows routing through Kafka, Logstash, etc.
+	TelemetryURL                  string `json:"telemetry_url,omitempty"`
+	TelemetryPath                 string `json:"telemetry_path,omitempty"`
+	TelemetryIntervalSeconds      int    `json:"telemetry_interval_seconds,omitempty"`
+	TelemetryShipIntervalSeconds  int    `json:"telemetry_ship_interval_seconds,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -81,4 +89,39 @@ func (c Config) RequestTimeout() time.Duration {
 
 func (c Config) HeartbeatInterval() time.Duration {
 	return 30 * time.Second
+}
+
+// TelemetryBaseURL returns the base URL for shipping telemetry data.
+// Falls back to ControlPlaneURL when TelemetryURL is not set.
+func (c Config) TelemetryBaseURL() string {
+	if c.TelemetryURL != "" {
+		return c.TelemetryURL
+	}
+	return c.ControlPlaneURL
+}
+
+// TelemetryEndpointPath returns the HTTP path for the telemetry endpoint.
+func (c Config) TelemetryEndpointPath() string {
+	if c.TelemetryPath != "" {
+		return c.TelemetryPath
+	}
+	return "/api/v1/agents/telemetry"
+}
+
+// TelemetryInterval returns the collection interval for telemetry metrics.
+func (c Config) TelemetryInterval() time.Duration {
+	if c.TelemetryIntervalSeconds > 0 {
+		return time.Duration(c.TelemetryIntervalSeconds) * time.Second
+	}
+	return 60 * time.Second
+}
+
+// TelemetryShipInterval returns the maximum linger time before the shipper
+// flushes buffered events. Events are also shipped immediately when the
+// buffer receives new data, so this is effectively a ceiling.
+func (c Config) TelemetryShipInterval() time.Duration {
+	if c.TelemetryShipIntervalSeconds > 0 {
+		return time.Duration(c.TelemetryShipIntervalSeconds) * time.Second
+	}
+	return 1 * time.Second
 }

@@ -23,7 +23,7 @@ mkdir -p %{buildroot}/usr/lib/systemd/system
 mkdir -p %{buildroot}/var/lib/xdr-agent
 
 install -m 0755 %{_sourcedir}/xdr-agent %{buildroot}/usr/bin/xdr-agent
-install -m 0644 %{_sourcedir}/config.json %{buildroot}/etc/xdr-agent/config.json
+install -m 0644 %{_sourcedir}/config.json %{buildroot}/etc/xdr-agent/config.default.json
 install -m 0644 %{_sourcedir}/xdr-agent.service %{buildroot}/usr/lib/systemd/system/xdr-agent.service
 
 mkdir -p %{buildroot}/usr/share/doc/xdr-agent
@@ -34,11 +34,17 @@ install -m 0644 %{_sourcedir}/AUTHORS %{buildroot}/usr/share/doc/xdr-agent/AUTHO
 %license /usr/share/doc/xdr-agent/LICENSE
 %doc /usr/share/doc/xdr-agent/AUTHORS
 /usr/bin/xdr-agent
-%config(noreplace) /etc/xdr-agent/config.json
+/etc/xdr-agent/config.default.json
 /usr/lib/systemd/system/xdr-agent.service
+%dir /etc/xdr-agent
 %dir /var/lib/xdr-agent
 
 %post
+# Install default config if none exists (never overwrite user edits)
+if [ ! -f /etc/xdr-agent/config.json ] && [ -f /etc/xdr-agent/config.default.json ]; then
+  cp -f /etc/xdr-agent/config.default.json /etc/xdr-agent/config.json
+  chmod 0644 /etc/xdr-agent/config.json
+fi
 if [ -x /usr/bin/systemctl ]; then
   /usr/bin/systemctl daemon-reload || true
   /usr/bin/systemctl enable xdr-agent.service || true

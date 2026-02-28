@@ -189,7 +189,11 @@ Sample: `config/config.json`
   "enroll_interval_seconds": 30,
   "request_timeout_seconds": 10,
   "state_path": "/var/lib/xdr-agent/state.json",
-  "insecure_skip_tls_verify": false
+  "insecure_skip_tls_verify": false,
+  "telemetry_url": "",
+  "telemetry_path": "/api/v1/agents/telemetry",
+  "telemetry_interval_seconds": 60,
+  "telemetry_ship_interval_seconds": 1
 }
 ```
 
@@ -205,6 +209,10 @@ Sample: `config/config.json`
 | `request_timeout_seconds` | Yes | HTTP request timeout (> 0) |
 | `state_path` | Yes | Path to persist agent identity state |
 | `insecure_skip_tls_verify` | No | Skip TLS verification (keep `false` in prod) |
+| `telemetry_url` | No | Telemetry shipping URL; defaults to `control_plane_url`. Set to route through Kafka, Logstash, etc. |
+| `telemetry_path` | No | Telemetry API path (default: `/api/v1/agents/telemetry`) |
+| `telemetry_interval_seconds` | No | Telemetry collection interval in seconds (default: `60`) |
+| `telemetry_ship_interval_seconds` | No | Max linger before shipping buffered events (default: `1`). Events also ship immediately on arrival. |
 
 ## CLI commands
 

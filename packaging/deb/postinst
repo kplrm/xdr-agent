@@ -4,9 +4,8 @@
 # SPDX-License-Identifier: AGPL-3.0
 set -e
 
-if [ ! -f /etc/xdr-agent/config.json ] && [ -f /usr/share/xdr-agent/config.default.json ]; then
-  mkdir -p /etc/xdr-agent
-  cp -f /usr/share/xdr-agent/config.default.json /etc/xdr-agent/config.json
+if [ ! -f /etc/xdr-agent/config.json ] && [ -f /etc/xdr-agent/config.default.json ]; then
+  cp -f /etc/xdr-agent/config.default.json /etc/xdr-agent/config.json
   chmod 0644 /etc/xdr-agent/config.json
 fi
 

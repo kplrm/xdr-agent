@@ -34,7 +34,6 @@ rm -rf "${PKG_ROOT}" "${PKG_ROOT}.deb"
 mkdir -p \
   "${PKG_ROOT}/DEBIAN" \
   "${PKG_ROOT}/usr/bin" \
-  "${PKG_ROOT}/usr/share/xdr-agent" \
   "${PKG_ROOT}/usr/share/bash-completion/completions" \
   "${PKG_ROOT}/usr/lib/systemd/system-preset" \
   "${PKG_ROOT}/etc/xdr-agent" \
@@ -42,8 +41,7 @@ mkdir -p \
   "${PKG_ROOT}/var/lib/xdr-agent"
 
 install -m 0755 "${BIN_PATH}" "${PKG_ROOT}/usr/bin/xdr-agent"
-install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/etc/xdr-agent/config.json"
-install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/usr/share/xdr-agent/config.default.json"
+install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/etc/xdr-agent/config.default.json"
 install -m 0644 "${ROOT_DIR}/packaging/bash_completion/xdr-agent" "${PKG_ROOT}/usr/share/bash-completion/completions/xdr-agent"
 install -m 0644 "${ROOT_DIR}/packaging/systemd-preset/90-xdr-agent.preset" "${PKG_ROOT}/usr/lib/systemd/system-preset/90-xdr-agent.preset"
 install -m 0644 "${ROOT_DIR}/systemd/xdr-agent.service" "${PKG_ROOT}/lib/systemd/system/xdr-agent.service"
@@ -64,9 +62,9 @@ Description: Lightweight XDR agent (identity and enrollment)
  A minimal host agent that establishes identity and enrolls into a control plane.
 EOF
 
-cat > "${PKG_ROOT}/DEBIAN/conffiles" <<EOF
-/etc/xdr-agent/config.json
-EOF
+# conffiles is intentionally empty — config.json is managed by postinst,
+# not by dpkg, so upgrades never prompt the user.
+touch "${PKG_ROOT}/DEBIAN/conffiles"
 
 install -m 0755 "${ROOT_DIR}/packaging/deb/postinst" "${PKG_ROOT}/DEBIAN/postinst"
 install -m 0755 "${ROOT_DIR}/packaging/deb/prerm" "${PKG_ROOT}/DEBIAN/prerm"

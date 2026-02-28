@@ -7,9 +7,13 @@ import (
 	"time"
 
 	"xdr-agent/internal/buildinfo"
+	"xdr-agent/internal/capability"
 	"xdr-agent/internal/config"
+	"xdr-agent/internal/controlplane"
 	"xdr-agent/internal/enroll"
+	"xdr-agent/internal/events"
 	"xdr-agent/internal/identity"
+	"xdr-agent/internal/telemetry/system"
 )
 
 func Run(ctx context.Context, configPath string, once bool, enrollmentToken string) error {
@@ -88,6 +92,35 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	if err := heartbeatAttempt(); err != nil {
 		log.Printf("initial heartbeat failed: %v", err)
+	}
+
+	// ── Event pipeline ──────────────────────────────────────────────────
+	pipeline := events.NewPipeline(4096)
+
+	// ── Telemetry shipper ──────────────────────────────────────────────
+	shipper := controlplane.NewShipper(controlplane.ShipperConfig{
+		TelemetryURL:    cfg.TelemetryBaseURL(),
+		TelemetryPath:   cfg.TelemetryEndpointPath(),
+		AgentID:         state.AgentID,
+		Interval:        cfg.TelemetryShipInterval(),
+		BatchSize:       500,
+		RequestTimeout:  cfg.RequestTimeout(),
+		InsecureSkipTLS: cfg.InsecureSkipTLSVerify,
+	})
+	pipeline.Subscribe(shipper.Enqueue)
+
+	go pipeline.Run(ctx)
+	go shipper.Run(ctx)
+	log.Printf("event pipeline and shipper started")
+
+	// ── Memory telemetry collector ──────────────────────────────────────
+	memCollector := system.NewMemoryCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
+	if err := memCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("memory collector init failed: %v", err)
+	} else if err := memCollector.Start(ctx); err != nil {
+		log.Printf("memory collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", memCollector.Name())
 	}
 
 	for {
