@@ -50,5 +50,11 @@ rpm:
 packages:
 	bash ./packaging/build_multi_arch.sh $(VERSION)
 
+test:
+	$(GO) test ./... -count=1
+
+vet:
+	$(GO) vet ./...
+
 clean:
 	rm -rf dist

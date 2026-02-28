@@ -13,6 +13,8 @@ import (
 	"xdr-agent/internal/enroll"
 	"xdr-agent/internal/events"
 	"xdr-agent/internal/identity"
+	"xdr-agent/internal/telemetry/network"
+	"xdr-agent/internal/telemetry/process"
 	"xdr-agent/internal/telemetry/system"
 )
 
@@ -113,7 +115,9 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	go shipper.Run(ctx)
 	log.Printf("event pipeline and shipper started")
 
-	// ── Memory telemetry collector ──────────────────────────────────────
+	// ── Telemetry collectors ────────────────────────────────────────────
+
+	// Memory (system metrics)
 	memCollector := system.NewMemoryCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
 	if err := memCollector.Init(capability.Dependencies{}); err != nil {
 		log.Printf("memory collector init failed: %v", err)
@@ -121,6 +125,26 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("memory collector start failed: %v", err)
 	} else {
 		log.Printf("capability started: %s", memCollector.Name())
+	}
+
+	// Process monitoring (procfs polling)
+	procCollector := process.NewProcessCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
+	if err := procCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("process collector init failed: %v", err)
+	} else if err := procCollector.Start(ctx); err != nil {
+		log.Printf("process collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", procCollector.Name())
+	}
+
+	// Network connection tracking
+	netCollector := network.NewNetworkCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
+	if err := netCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("network collector init failed: %v", err)
+	} else if err := netCollector.Start(ctx); err != nil {
+		log.Printf("network collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", netCollector.Name())
 	}
 
 	for {
