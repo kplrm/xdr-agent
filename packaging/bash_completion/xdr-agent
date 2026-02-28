@@ -4,16 +4,13 @@ _xdr_agent_completion() {
     cur="${COMP_WORDS[COMP_CWORD]}"
 
     if [[ ${COMP_CWORD} -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "run enroll remove version completion help" -- "${cur}") )
+        COMPREPLY=( $(compgen -W "run enroll remove version help" -- "${cur}") )
         return 0
     fi
 
     case "${COMP_WORDS[1]}" in
         run|enroll)
             COMPREPLY=( $(compgen -W "--config -h --help" -- "${cur}") )
-            ;;
-        completion)
-            COMPREPLY=( $(compgen -W "bash" -- "${cur}") )
             ;;
         *)
             COMPREPLY=()

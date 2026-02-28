@@ -12,7 +12,9 @@ fi
 
 if [ -x /usr/bin/xdr-agent ]; then
   mkdir -p /usr/share/bash-completion/completions || true
-  /usr/bin/xdr-agent completion bash >/usr/share/bash-completion/completions/xdr-agent || true
+  if [ -f /usr/share/xdr-agent/bash_completion/xdr-agent ]; then
+    cp -f /usr/share/xdr-agent/bash_completion/xdr-agent /usr/share/bash-completion/completions/xdr-agent || true
+  fi
   chmod 0644 /usr/share/bash-completion/completions/xdr-agent || true
 fi
 
