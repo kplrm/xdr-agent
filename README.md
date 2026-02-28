@@ -259,7 +259,7 @@ ARCHES="amd64 arm64" FORMATS="deb rpm" bash ./packaging/build_multi_arch.sh
 sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
 ```
 
-The package does **not** auto-start the service. Recommended flow:
+Deployment recommended flow:
 
 1. Edit `/etc/xdr-agent/config.json` with your `control_plane_url` and `policy_id`.
 2. Enroll:

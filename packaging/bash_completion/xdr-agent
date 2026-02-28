@@ -20,9 +20,9 @@ _xdr_agent_completion() {
 
 _xdr_agent_sudo_completion() {
     local idx
-    for ((idx = 1; idx < COMP_CWORD; idx++)); do
+    for ((idx = 1; idx <= COMP_CWORD; idx++)); do
         case "${COMP_WORDS[idx]}" in
-            xdr-agent|/usr/bin/xdr-agent)
+            xdr-agent|*/xdr-agent)
                 local saved_words=("${COMP_WORDS[@]}")
                 local saved_cword="${COMP_CWORD}"
 
@@ -48,7 +48,7 @@ if declare -F _sudo >/dev/null 2>&1; then
     _xdr_agent_or_sudo_completion() {
         _xdr_agent_sudo_completion || _sudo
     }
-    complete -F _xdr_agent_or_sudo_completion sudo
+    complete -o bashdefault -o default -F _xdr_agent_or_sudo_completion sudo
 else
-    complete -F _xdr_agent_sudo_completion sudo
+    complete -o bashdefault -o default -F _xdr_agent_sudo_completion sudo
 fi

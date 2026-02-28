@@ -99,12 +99,45 @@ func (a *Agent) Register(cap capability.Capability) {
 	a.capabilities = append(a.capabilities, cap)
 }
 
-// Enroll performs a single enrollment attempt and persists the result. This is
-// the one-shot path used by the "enroll" CLI command.
-func (a *Agent) Enroll(ctx context.Context) error {
+// Enroll enrolls the agent and persists the result.
+//
+// If retry is false, it performs a single enrollment attempt.
+// If retry is true, it retries using the configured enrollment interval until
+// enrollment succeeds or ctx is canceled.
+func (a *Agent) Enroll(ctx context.Context, retry bool) error {
 	log.Printf("xdr-agent starting: agent_id=%s machine_id=%s hostname=%s",
 		a.state.AgentID, a.state.MachineID, a.state.Hostname)
-	return a.enrollOnce(ctx)
+
+	if a.state.Enrolled {
+		log.Printf("already enrolled: enrollment_id=%s", a.state.EnrollmentID)
+		return nil
+	}
+
+	if !retry {
+		return a.enrollOnce(ctx)
+	}
+
+	if err := a.enrollOnce(ctx); err == nil {
+		return nil
+	} else {
+		log.Printf("initial enrollment failed: %v", err)
+	}
+
+	ticker := time.NewTicker(a.cfg.EnrollInterval())
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := a.enrollOnce(ctx); err != nil {
+				log.Printf("enrollment attempt failed: %v", err)
+				continue
+			}
+			return nil
+		}
+	}
 }
 
 // Run starts the agent and blocks until ctx is canceled.
@@ -119,16 +152,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	log.Printf("xdr-agent starting: agent_id=%s machine_id=%s hostname=%s",
 		a.state.AgentID, a.state.MachineID, a.state.Hostname)
 
-	// ── Step 1: Enroll if not already enrolled ──
-	if !a.state.Enrolled {
-		if err := a.enrollWithRetry(ctx); err != nil {
-			return fmt.Errorf("enrollment failed: %w", err)
-		}
-	} else {
-		log.Printf("already enrolled: enrollment_id=%s", a.state.EnrollmentID)
+	// ── Step 1: Enroll with retries (or no-op if already enrolled) ──
+	if err := a.Enroll(ctx, true); err != nil {
+		return fmt.Errorf("enrollment failed: %w", err)
 	}
 
-	// ── Step 2: Subscribe buffer to pipeline (events → buffer) ──
+	// ── Step 2: Adds a new event handler to the pipeline’s subscriber list in a thread-safe way ──
 	a.pipeline.Subscribe(func(e events.Event) {
 		a.buffer.Add(e)
 	})
@@ -163,7 +192,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	log.Printf("xdr-agent running (%d capabilities)", len(a.capabilities))
 
-	// ── Step 6: Block until shutdown ──
+	// ── Step 6: Block / waits until shutdown ──
 	<-ctx.Done()
 
 	// ── Step 7: Graceful shutdown ──
@@ -177,36 +206,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 
-	// Flush remaining events before exiting
+	// Flush remaining events before shutting down
 	a.shipOnce(context.Background())
 
 	return ctx.Err()
-}
-
-// enrollWithRetry attempts enrollment in a loop until successful or ctx is canceled.
-func (a *Agent) enrollWithRetry(ctx context.Context) error {
-	// Try immediately first
-	if err := a.enrollOnce(ctx); err == nil {
-		return nil
-	} else {
-		log.Printf("initial enrollment failed: %v", err)
-	}
-
-	ticker := time.NewTicker(a.cfg.EnrollInterval())
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if err := a.enrollOnce(ctx); err != nil {
-				log.Printf("enrollment attempt failed: %v", err)
-				continue
-			}
-			return nil
-		}
-	}
 }
 
 // enrollOnce performs a single enrollment attempt and persists the result.
@@ -226,26 +229,20 @@ func (a *Agent) enrollOnce(ctx context.Context) error {
 
 // heartbeatLoop sends periodic heartbeats to the control plane.
 func (a *Agent) heartbeatLoop(ctx context.Context) {
-	// Send initial heartbeat immediately
-	if err := a.client.Heartbeat(ctx, a.state, a.cfg.PolicyID, a.cfg.Tags, buildinfo.Version); err != nil {
-		log.Printf("initial heartbeat failed: %v", err)
-	} else {
-		log.Printf("heartbeat successful: agent_id=%s", a.state.AgentID)
-	}
-
 	ticker := time.NewTicker(a.cfg.HeartbeatInterval())
 	defer ticker.Stop()
 
 	for {
+		if err := a.client.Heartbeat(ctx, a.state, a.cfg.PolicyID, a.cfg.Tags, buildinfo.Version); err != nil {
+			log.Printf("heartbeat failed: %v", err)
+		} else {
+			log.Printf("heartbeat successful: agent_id=%s", a.state.AgentID)
+		}
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := a.client.Heartbeat(ctx, a.state, a.cfg.PolicyID, a.cfg.Tags, buildinfo.Version); err != nil {
-				log.Printf("heartbeat failed: %v", err)
-			} else {
-				log.Printf("heartbeat successful: agent_id=%s", a.state.AgentID)
-			}
 		}
 	}
 }

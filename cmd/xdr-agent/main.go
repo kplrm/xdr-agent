@@ -155,7 +155,7 @@ func enrollAgentCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.Enroll(ctx); err != nil {
+	if err := a.Enroll(ctx, false); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
