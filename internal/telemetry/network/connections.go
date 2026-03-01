@@ -4,6 +4,17 @@
 // of active connections, diffs against the previous snapshot, and emits events
 // for opened/closed connections.
 //
+// Events are emitted using ECS-compatible field names:
+//   - source.ip / source.port   — the local endpoint
+//   - destination.ip / destination.port — the remote endpoint
+//   - source.user.id / source.user.name — process owner resolved from UID
+//   - network.transport — "tcp" or "udp"
+//   - network.type      — "ipv4" or "ipv6"
+//   - network.direction — "inbound", "outbound", "listening", "internal"
+//   - network.community_id — deterministic 5-tuple flow identifier (Community ID v1)
+//   - network.state     — TCP state string (non-ECS; useful for security analysis)
+//   - process.pid / process.name / process.executable — enriched on opened events
+//
 // Future: upgrade to netlink SOCK_DIAG or eBPF kprobes for real-time events.
 package network
 
@@ -67,11 +78,12 @@ func (c ConnectionInfo) key() string {
 // NetworkCollector tracks TCP/UDP connections by periodically polling
 // /proc/net/* and emitting events for changes. It implements capability.Capability.
 type NetworkCollector struct {
-	pipeline *events.Pipeline
-	agentID  string
-	hostname string
-	interval time.Duration
-	procRoot string // path to /proc; defaults to /proc
+	pipeline  *events.Pipeline
+	agentID   string
+	hostname  string
+	interval  time.Duration
+	procRoot  string // path to /proc; defaults to /proc
+	etcPasswd string // path to /etc/passwd for UID → username resolution
 
 	mu       sync.Mutex
 	health   capability.HealthStatus
@@ -92,18 +104,22 @@ func NewNetworkCollector(pipeline *events.Pipeline, agentID, hostname string, in
 		interval = defaultNetInterval
 	}
 	return &NetworkCollector{
-		pipeline: pipeline,
-		agentID:  agentID,
-		hostname: hostname,
-		interval: interval,
-		procRoot: defaultNetProcRoot,
-		health:   capability.HealthStopped,
-		known:    make(map[string]ConnectionInfo),
+		pipeline:  pipeline,
+		agentID:   agentID,
+		hostname:  hostname,
+		interval:  interval,
+		procRoot:  defaultNetProcRoot,
+		etcPasswd: "/etc/passwd",
+		health:    capability.HealthStopped,
+		known:     make(map[string]ConnectionInfo),
 	}
 }
 
 // SetProcRoot overrides the default /proc path (useful for testing).
 func (n *NetworkCollector) SetProcRoot(path string) { n.procRoot = path }
+
+// SetEtcPasswd overrides the /etc/passwd path (useful for testing).
+func (n *NetworkCollector) SetEtcPasswd(path string) { n.etcPasswd = path }
 
 // ── capability.Capability interface ──────────────────────────────────────────
 
@@ -197,20 +213,70 @@ func (n *NetworkCollector) scan() {
 	// Opened connections (in snapshot but not in previous)
 	for key, conn := range snapshot {
 		if _, existed := prevKnown[key]; !existed {
-			n.emitEvent("network.connection_opened", conn)
+			// Resolve PID only for opened connections (costly inode scan).
+			proc := ResolveSocketInode(n.procRoot, conn.Inode)
+			n.emitEvent("network.connection_opened", conn, proc)
 		}
 	}
 
 	// Closed connections (in previous but not in snapshot)
 	for key, conn := range prevKnown {
 		if _, exists := snapshot[key]; !exists {
-			n.emitEvent("network.connection_closed", conn)
+			n.emitEvent("network.connection_closed", conn, nil)
 		}
 	}
 }
 
 // emitEvent publishes a network connection event into the pipeline.
-func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo) {
+// proc is optional — only populated for opened connections.
+func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc *ProcessInfo) {
+	tr := transport(conn.Protocol)
+	netType := networkType(conn.Protocol)
+
+	// Resolve username from UID.
+	userName := usernameForUID(n.etcPasswd, conn.UID)
+
+	// Compute Community ID hash.
+	cid := CommunityID(conn.LocalAddr, conn.RemoteAddr, conn.LocalPort, conn.RemotePort, tr)
+
+	sourceMap := map[string]interface{}{
+		"ip":   conn.LocalAddr,
+		"port": conn.LocalPort,
+		"user": map[string]interface{}{
+			"id":   strconv.Itoa(conn.UID),
+			"name": userName,
+		},
+	}
+
+	destinationMap := map[string]interface{}{
+		"ip":   conn.RemoteAddr,
+		"port": conn.RemotePort,
+	}
+
+	networkMap := map[string]interface{}{
+		"transport":    tr,
+		"type":         netType,
+		"direction":    direction(conn),
+		"community_id": cid,
+		"state":        conn.State,
+		"inode":        conn.Inode,
+	}
+
+	payload := map[string]interface{}{
+		"source":      sourceMap,
+		"destination": destinationMap,
+		"network":     networkMap,
+	}
+
+	// Enrich with process info when available (opened events only).
+	if proc != nil {
+		payload["process"] = map[string]interface{}{
+			"pid":        proc.PID,
+			"name":       proc.Name,
+			"executable": proc.Executable,
+		}
+	}
+
 	event := events.Event{
 		ID:        fmt.Sprintf("net-%s-%d", eventType, time.Now().UnixNano()),
 		Timestamp: time.Now().UTC(),
@@ -221,27 +287,15 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo) {
 		Module:    "telemetry.network",
 		AgentID:   n.agentID,
 		Hostname:  n.hostname,
-		Payload: map[string]interface{}{
-			"network": map[string]interface{}{
-				"protocol":    conn.Protocol,
-				"transport":   transport(conn.Protocol),
-				"direction":   direction(conn),
-				"local_addr":  conn.LocalAddr,
-				"local_port":  conn.LocalPort,
-				"remote_addr": conn.RemoteAddr,
-				"remote_port": conn.RemotePort,
-				"state":       conn.State,
-				"uid":         conn.UID,
-				"inode":       conn.Inode,
-			},
-		},
-		Tags: []string{"network", "telemetry"},
+		Payload:   payload,
+		Tags:      []string{"network", "telemetry"},
 	}
 
 	n.pipeline.Emit(event)
 }
 
-// direction infers the network direction from the connection state and addresses.
+// direction infers the ECS network.direction from the connection state and addresses.
+// Values: "inbound", "outbound", "listening", "internal"
 func direction(conn ConnectionInfo) string {
 	if conn.State == "LISTEN" {
 		return "listening"
@@ -249,16 +303,42 @@ func direction(conn ConnectionInfo) string {
 	if conn.RemoteAddr == "0.0.0.0" || conn.RemoteAddr == "::" {
 		return "listening"
 	}
+	// If both endpoints are loopback or same host, treat as internal.
+	if isLoopback(conn.LocalAddr) && isLoopback(conn.RemoteAddr) {
+		return "internal"
+	}
+	// Heuristic: if local port is a well-known server port and remote port is
+	// ephemeral (>1023), this is likely an inbound connection.
+	if conn.LocalPort > 0 && conn.LocalPort <= 1023 && conn.RemotePort > 1023 {
+		return "inbound"
+	}
 	return "outbound"
 }
 
-// transport extracts the L4 protocol name (tcp/udp) from the full protocol
-// string (which may include "6" for IPv6 variants).
+// isLoopback returns true for 127.x.x.x or ::1 addresses.
+func isLoopback(addr string) bool {
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
+}
+
+// transport extracts the ECS network.transport value ("tcp" or "udp") from the
+// procfs protocol string (tcp, tcp6, udp, udp6).
 func transport(protocol string) string {
 	if strings.HasPrefix(protocol, "tcp") {
 		return "tcp"
 	}
 	return "udp"
+}
+
+// networkType returns the ECS network.type value ("ipv4" or "ipv6").
+func networkType(protocol string) string {
+	if strings.HasSuffix(protocol, "6") {
+		return "ipv6"
+	}
+	return "ipv4"
 }
 
 // ── public parsing helpers (testable) ────────────────────────────────────────

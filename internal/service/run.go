@@ -13,6 +13,7 @@ import (
 	"xdr-agent/internal/enroll"
 	"xdr-agent/internal/events"
 	"xdr-agent/internal/identity"
+	"xdr-agent/internal/telemetry/file"
 	"xdr-agent/internal/telemetry/network"
 	"xdr-agent/internal/telemetry/process"
 	"xdr-agent/internal/telemetry/system"
@@ -145,6 +146,16 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("network collector start failed: %v", err)
 	} else {
 		log.Printf("capability started: %s", netCollector.Name())
+	}
+
+	// File Integrity Monitoring (inotify + SHA-256 rescan; uses default critical paths and BoltDB)
+	fimCollector := file.NewFIMCollector(pipeline, state.AgentID, state.Hostname, nil, 0, "")
+	if err := fimCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("fim collector init failed: %v", err)
+	} else if err := fimCollector.Start(ctx); err != nil {
+		log.Printf("fim collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", fimCollector.Name())
 	}
 
 	for {
