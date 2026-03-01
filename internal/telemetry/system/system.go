@@ -150,7 +150,6 @@ func (s *SystemCollector) collectBaseline() {
 	s.prevSys = &sys
 	s.prevProc = proc
 	s.mu.Unlock()
-	log.Printf("system collector: CPU baseline captured (%d cores, %d processes)", sys.Cores, len(proc))
 
 	// Capture disk and network I/O baseline snapshots (for delta on next tick)
 	if dio, dioErr := ReadDiskIO(s.procRoot); dioErr == nil {
@@ -210,7 +209,12 @@ func (s *SystemCollector) collectBaseline() {
 	}
 
 	s.pipeline.Emit(event)
-	log.Printf("system collector: emitted baseline memory metric")
+	log.Printf(
+		"system collector: baseline established cores=%d processes=%d mem_used_pct=%.1f",
+		sys.Cores,
+		len(proc),
+		memInfo.UsedPercent,
+	)
 }
 
 // collectAndEmit reads memory + CPU state, computes CPU deltas, and emits
@@ -399,11 +403,4 @@ func (s *SystemCollector) collectAndEmit() {
 	}
 
 	s.pipeline.Emit(event)
-	if hasCpuDelta {
-		log.Printf("system collector: emitted system.metrics (mem used_pct=%.1f%% cpu=%.1f%% cores=%d)",
-			memInfo.UsedPercent, totalPct, sys.Cores)
-	} else {
-		log.Printf("system collector: emitted system.metrics (memory only, used_pct=%.1f%%)",
-			memInfo.UsedPercent)
-	}
 }

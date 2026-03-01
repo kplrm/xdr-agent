@@ -92,12 +92,38 @@ func (s *Shipper) Enqueue(event events.Event) {
 	}
 }
 
-// Run starts the shipping loop. It flushes immediately when events arrive
-// (via the notify channel) or after the configured linger interval — whichever
-// comes first. Blocks until ctx is canceled, then performs a final flush.
+// Run starts the shipping loop.
+//
+// Flushes are rate-limited to at most once per configured interval. Notify
+// wakeups can trigger an early flush only when the interval has elapsed since
+// the previous flush; otherwise they are coalesced until the next eligible
+// tick/notify.
+//
+// Blocks until ctx is canceled, then performs a final flush.
 func (s *Shipper) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
+
+	lastFlush := time.Time{}
+
+	drainNotify := func() {
+		select {
+		case <-s.notify:
+		default:
+		}
+	}
+
+	flushIfDue := func() {
+		now := time.Now()
+		if !lastFlush.IsZero() && now.Sub(lastFlush) < s.cfg.Interval {
+			drainNotify()
+			return
+		}
+		if s.flush(ctx) {
+			lastFlush = now
+		}
+		drainNotify()
+	}
 
 	for {
 		select {
@@ -106,33 +132,28 @@ func (s *Shipper) Run(ctx context.Context) {
 			s.flush(context.Background())
 			return
 		case <-s.notify:
-			s.flush(ctx)
-			// Drain any pending notify so we don't double-flush.
-			select {
-			case <-s.notify:
-			default:
-			}
+			flushIfDue()
 		case <-ticker.C:
-			s.flush(ctx)
-			// Drain any pending notify so we don't double-flush.
-			select {
-			case <-s.notify:
-			default:
-			}
+			flushIfDue()
 		}
 	}
 }
 
 // flush drains the buffer and ships events in batches.
-func (s *Shipper) flush(ctx context.Context) {
+// Returns true when a non-empty buffer was processed.
+func (s *Shipper) flush(ctx context.Context) bool {
 	s.mu.Lock()
-	if len(s.buffer) == 0 {
+	bufferedBefore := len(s.buffer)
+	if bufferedBefore == 0 {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	batch := s.buffer
 	s.buffer = make([]events.Event, 0, s.cfg.BatchSize)
 	s.mu.Unlock()
+
+	shippedCount := 0
+	chunks := 0
 
 	// Ship in batch-sized chunks
 	for i := 0; i < len(batch); i += s.cfg.BatchSize {
@@ -143,16 +164,33 @@ func (s *Shipper) flush(ctx context.Context) {
 		chunk := batch[i:end]
 
 		if err := s.ship(ctx, chunk); err != nil {
-			log.Printf("shipper: failed to ship %d events: %v", len(chunk), err)
-			// Re-enqueue failed events so they can be retried
+			remaining := batch[i:]
+			// Re-enqueue failed + not-yet-attempted events so they can be retried
 			s.mu.Lock()
-			s.buffer = append(chunk, s.buffer...)
+			s.buffer = append(remaining, s.buffer...)
+			bufferedAfter := len(s.buffer)
 			s.mu.Unlock()
-			return // stop shipping this cycle; retry next tick
+			log.Printf(
+				"shipper: flush failed buffered_before=%d shipped=%d chunks=%d requeued=%d buffered_after=%d err=%v",
+				bufferedBefore, shippedCount, chunks, len(remaining), bufferedAfter, err,
+			)
+			return true // stop shipping this cycle; retry next tick
 		}
 
-		log.Printf("shipper: shipped %d events", len(chunk))
+		shippedCount += len(chunk)
+		chunks++
 	}
+
+	s.mu.Lock()
+	bufferedAfter := len(s.buffer)
+	s.mu.Unlock()
+
+	log.Printf(
+		"shipper: flush ok buffered_before=%d shipped=%d chunks=%d buffered_after=%d",
+		bufferedBefore, shippedCount, chunks, bufferedAfter,
+	)
+
+	return true
 }
 
 // ship sends a single batch of events to the telemetry endpoint with gzip

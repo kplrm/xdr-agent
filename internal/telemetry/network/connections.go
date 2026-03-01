@@ -239,9 +239,6 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo) {
 	}
 
 	n.pipeline.Emit(event)
-	log.Printf("network collector: %s %s %s:%d -> %s:%d (%s)",
-		eventType, conn.Protocol, conn.LocalAddr, conn.LocalPort,
-		conn.RemoteAddr, conn.RemotePort, conn.State)
 }
 
 // direction infers the network direction from the connection state and addresses.

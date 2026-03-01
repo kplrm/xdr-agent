@@ -282,6 +282,15 @@ The package does **not** auto-start the service. Recommended flow:
    sudo journalctl -u xdr-agent -f
    ```
 
+## Update xdr-agent to latest version:
+```bash
+sudo systemctl stop xdr-agent.service
+make clean; make deb
+sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
+sudo systemctl start xdr-agent.service
+sudo journalctl -u xdr-agent -f
+```
+
 ## Bash completion
 
 After `.deb` installation, completion is installed at `/usr/share/bash-completion/completions/xdr-agent` and is auto-loaded by `bash-completion` in new shell sessions.

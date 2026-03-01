@@ -437,8 +437,6 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 	}
 
 	p.pipeline.Emit(event)
-	log.Printf("process collector: %s pid=%d name=%s ppid=%d uid=%d exe=%s",
-		eventType, info.PID, info.Name, info.PPID, info.UID, info.Executable)
 }
 
 // ── public parsing helpers (testable) ────────────────────────────────────────
