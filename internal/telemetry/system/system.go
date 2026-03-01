@@ -28,11 +28,13 @@ type SystemCollector struct {
 	memPath  string // path to meminfo file (/proc/meminfo)
 	topN     int
 
-	mu       sync.Mutex
-	health   capability.HealthStatus
-	cancel   context.CancelFunc
-	prevSys  *CpuStats
-	prevProc map[int]ProcessCpuSnapshot
+	mu         sync.Mutex
+	health     capability.HealthStatus
+	cancel     context.CancelFunc
+	prevSys    *CpuStats
+	prevProc   map[int]ProcessCpuSnapshot
+	prevDiskIO map[string]DiskIOSample
+	prevNetIO  map[string]NetIOSample
 }
 
 // NewSystemCollector creates a combined memory + CPU telemetry collector.
@@ -120,7 +122,15 @@ func (s *SystemCollector) loop(ctx context.Context) {
 	}
 }
 
-// collectBaseline reads the initial CPU state without emitting CPU events.
+// swapUsedPct returns the swap used percentage (0..100) from a MemoryInfo, or 0 if swap
+// is not configured.
+func swapUsedPct(m MemoryInfo) float64 {
+	if m.SwapTotalBytes == 0 {
+		return 0.0
+	}
+	return round2(float64(m.SwapUsedBytes) / float64(m.SwapTotalBytes) * 100.0)
+}
+
 // It does emit a system.metrics event with memory data only.
 func (s *SystemCollector) collectBaseline() {
 	sys, err := ReadSystemCpu(s.procRoot)
@@ -142,6 +152,18 @@ func (s *SystemCollector) collectBaseline() {
 	s.prevProc = proc
 	s.mu.Unlock()
 	log.Printf("system collector: CPU baseline captured (%d cores, %d processes)", sys.Cores, len(proc))
+
+	// Capture disk and network I/O baseline snapshots (for delta on next tick)
+	if dio, dioErr := ReadDiskIO(s.procRoot); dioErr == nil {
+		s.mu.Lock()
+		s.prevDiskIO = dio
+		s.mu.Unlock()
+	}
+	if nio, nioErr := ReadNetIO(s.procRoot); nioErr == nil {
+		s.mu.Lock()
+		s.prevNetIO = nio
+		s.mu.Unlock()
+	}
 
 	// Emit memory-only event on baseline
 	memInfo, memErr := ReadMemoryInfo(s.memPath)
@@ -179,6 +201,7 @@ func (s *SystemCollector) collectBaseline() {
 						"free":  memInfo.SwapFreeBytes,
 						"used": map[string]interface{}{
 							"bytes": memInfo.SwapUsedBytes,
+							"pct":   swapUsedPct(memInfo),
 						},
 					},
 				},
@@ -217,6 +240,11 @@ func (s *SystemCollector) collectAndEmit() {
 		log.Printf("system collector: process CPU read failed: %v", procErr)
 	}
 
+	// ── Disk & Network I/O ───────────────────────────────────────────────
+	currDiskIO, _ := ReadDiskIO(s.procRoot)
+	currNetIO, _ := ReadNetIO(s.procRoot)
+	diskSpace := ReadDiskSpace([]string{"/", "/home", "/var", "/boot"})
+
 	if memErr != nil && cpuErr != nil {
 		return // nothing useful to emit
 	}
@@ -224,9 +252,17 @@ func (s *SystemCollector) collectAndEmit() {
 	s.mu.Lock()
 	prevSys := s.prevSys
 	prevProc := s.prevProc
+	prevDiskIO := s.prevDiskIO
+	prevNetIO := s.prevNetIO
 	if cpuErr == nil {
 		s.prevSys = &sys
 		s.prevProc = proc
+	}
+	if currDiskIO != nil {
+		s.prevDiskIO = currDiskIO
+	}
+	if currNetIO != nil {
+		s.prevNetIO = currNetIO
 	}
 	s.health = capability.HealthRunning
 	s.mu.Unlock()
@@ -252,8 +288,54 @@ func (s *SystemCollector) collectAndEmit() {
 				"free":  memInfo.SwapFreeBytes,
 				"used": map[string]interface{}{
 					"bytes": memInfo.SwapUsedBytes,
+					"pct":   swapUsedPct(memInfo),
 				},
 			},
+		}
+	}
+
+	// ── Disk I/O delta ──────────────────────────────────────────────────
+	if currDiskIO != nil && prevDiskIO != nil {
+		d := SumDiskIODelta(prevDiskIO, currDiskIO)
+		systemPayload["diskio"] = map[string]interface{}{
+			"read":  map[string]interface{}{"bytes": d.ReadBytes, "ops": d.ReadOps},
+			"write": map[string]interface{}{"bytes": d.WriteBytes, "ops": d.WriteOps},
+		}
+	}
+
+	// ── Network I/O delta ───────────────────────────────────────────────
+	if currNetIO != nil && prevNetIO != nil {
+		n := SumNetIODelta(prevNetIO, currNetIO)
+		systemPayload["netio"] = map[string]interface{}{
+			"in":  map[string]interface{}{"bytes": n.InBytes, "errors": n.InErrors},
+			"out": map[string]interface{}{"bytes": n.OutBytes, "errors": n.OutErrors},
+		}
+	}
+
+	// ── Disk space ──────────────────────────────────────────────────────
+	if len(diskSpace) > 0 {
+		for _, d := range diskSpace {
+			key := "root"
+			if d.Mount == "/home" {
+				key = "home"
+			} else if d.Mount == "/var" {
+				key = "var"
+			} else if d.Mount == "/boot" {
+				key = "boot"
+			} else if d.Mount != "/" {
+				continue
+			}
+			if _, ok := systemPayload["disk"]; !ok {
+				systemPayload["disk"] = map[string]interface{}{}
+			}
+			systemPayload["disk"].(map[string]interface{})[key] = map[string]interface{}{
+				"total": d.Total,
+				"free":  d.Free,
+				"used": map[string]interface{}{
+					"bytes": d.UsedBytes,
+					"pct":   d.UsedPct,
+				},
+			}
 		}
 	}
 
@@ -288,6 +370,15 @@ func (s *SystemCollector) collectAndEmit() {
 	tags := []string{"system", "metric"}
 	if memErr == nil {
 		tags = append(tags, "memory")
+	}
+	if _, ok := systemPayload["diskio"]; ok {
+		tags = append(tags, "diskio")
+	}
+	if _, ok := systemPayload["netio"]; ok {
+		tags = append(tags, "netio")
+	}
+	if _, ok := systemPayload["disk"]; ok {
+		tags = append(tags, "disk")
 	}
 	if hasCpuDelta {
 		tags = append(tags, "cpu")
