@@ -14,11 +14,14 @@ type Config struct {
 	ControlPlaneURL       string   `json:"control_plane_url"`
 	EnrollmentPath        string   `json:"enrollment_path"`
 	HeartbeatPath         string   `json:"heartbeat_path"`
-	EnrollmentToken       string   `json:"enrollment_token"`
+	EventsPath            string   `json:"events_path"`
 	PolicyID              string   `json:"policy_id"`
 	Tags                  []string `json:"tags"`
 	EnrollIntervalSeconds int      `json:"enroll_interval_seconds"`
+	HeartbeatIntervalSeconds int   `json:"heartbeat_interval_seconds"`
 	RequestTimeoutSeconds int      `json:"request_timeout_seconds"`
+	EventBufferSize       int      `json:"event_buffer_size"`
+	ShipIntervalSeconds   int      `json:"ship_interval_seconds"`
 	StatePath             string   `json:"state_path"`
 	InsecureSkipTLSVerify bool     `json:"insecure_skip_tls_verify"`
 
@@ -54,6 +57,9 @@ func Load(path string) (Config, error) {
 	if cfg.HeartbeatPath == "" {
 		cfg.HeartbeatPath = "/api/v1/agents/heartbeat"
 	}
+	if cfg.EventsPath == "" {
+		cfg.EventsPath = "/api/v1/agents/events"
+	}
 	if cfg.PolicyID == "" {
 		return cfg, fmt.Errorf("policy_id is required")
 	}
@@ -62,6 +68,15 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.RequestTimeoutSeconds <= 0 {
 		return cfg, fmt.Errorf("request_timeout_seconds must be > 0")
+	}
+	if cfg.HeartbeatIntervalSeconds <= 0 {
+		cfg.HeartbeatIntervalSeconds = 30
+	}
+	if cfg.EventBufferSize <= 0 {
+		cfg.EventBufferSize = 4096
+	}
+	if cfg.ShipIntervalSeconds <= 0 {
+		cfg.ShipIntervalSeconds = 10
 	}
 	if cfg.StatePath == "" {
 		return cfg, fmt.Errorf("state_path is required")
@@ -88,7 +103,11 @@ func (c Config) RequestTimeout() time.Duration {
 }
 
 func (c Config) HeartbeatInterval() time.Duration {
-	return 30 * time.Second
+	return time.Duration(c.HeartbeatIntervalSeconds) * time.Second
+}
+
+func (c Config) ShipInterval() time.Duration {
+	return time.Duration(c.ShipIntervalSeconds) * time.Second
 }
 
 // TelemetryBaseURL returns the base URL for shipping telemetry data.

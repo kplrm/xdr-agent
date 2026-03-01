@@ -183,7 +183,6 @@ Sample: `config/config.json`
   "control_plane_url": "http://localhost:5601",
   "enrollment_path": "/api/v1/agents/enroll",
   "heartbeat_path": "/api/v1/agents/heartbeat",
-  "enrollment_token": "",
   "policy_id": "default-endpoint",
   "tags": ["linux", "xdr-agent"],
   "enroll_interval_seconds": 30,
@@ -202,7 +201,6 @@ Sample: `config/config.json`
 | `control_plane_url` | Yes | XDR manager URL (e.g. `https://xdr-manager.example.com`) |
 | `enrollment_path` | Yes | Enrollment API path |
 | `heartbeat_path` | No | Heartbeat API path (default: `/api/v1/agents/heartbeat`) |
-| `enrollment_token` | No | Bearer token for enrollment auth |
 | `policy_id` | Yes | Security policy to apply |
 | `tags` | No | Agent tags for grouping |
 | `enroll_interval_seconds` | Yes | Retry interval for enrollment (> 0) |
@@ -214,6 +212,8 @@ Sample: `config/config.json`
 | `telemetry_interval_seconds` | No | Telemetry collection interval in seconds (default: `60`) |
 | `telemetry_ship_interval_seconds` | No | Max linger before shipping buffered events (default: `1`). Events also ship immediately on arrival. |
 
+> **Note:** The enrollment token is stored in `state.json` automatically after a successful enrollment.
+
 ## CLI commands
 
 ```
@@ -221,7 +221,6 @@ xdr-agent run        Run the long-lived agent process
 xdr-agent enroll     Perform one enrollment attempt and exit
 xdr-agent remove     Remove xdr-agent files and systemd service (requires root)
 xdr-agent version    Print build version
-xdr-agent completion bash   Output bash completion script
 xdr-agent help       Show usage information
 ```
 
@@ -268,9 +267,9 @@ ARCHES="amd64 arm64" FORMATS="deb rpm" bash ./packaging/build_multi_arch.sh
 sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
 ```
 
-The package does **not** auto-start the service. Recommended flow:
+Deployment recommended flow:
 
-1. Edit `/etc/xdr-agent/config.json` with your `control_plane_url`, `policy_id`, and `enrollment_token`.
+1. Edit `/etc/xdr-agent/config.json` with your `control_plane_url` and `policy_id`.
 2. Enroll:
    ```bash
    sudo xdr-agent enroll <token> --config /etc/xdr-agent/config.json
@@ -298,7 +297,7 @@ After `.deb` installation, completion is installed at `/usr/share/bash-completio
 From a local build:
 
 ```bash
-source <(./dist/xdr-agent completion bash)
+source ./packaging/bash_completion/xdr-agent
 ```
 
 Supports `xdr-agent <TAB>` and `sudo xdr-agent <TAB>`.
@@ -362,9 +361,9 @@ dependency order, and stops them in reverse order on shutdown.
 1. Generate an enrollment token from the plugin UI (**Enroll XDR** flyout).
 2. Set `control_plane_url` to OpenSearch Dashboards (default: `http://localhost:5601`).
 3. Set `enrollment_path` to `/api/v1/agents/enroll`.
-4. Set `enrollment_token` to the generated token.
-5. Set `policy_id` to match the token's policy.
-6. Set `heartbeat_path` to `/api/v1/agents/heartbeat`.
+4. Set `policy_id` to match the token's policy.
+5. Set `heartbeat_path` to `/api/v1/agents/heartbeat`.
+6. Enroll: `sudo xdr-agent enroll <token> --config /etc/xdr-agent/config.json`
 
 ## Troubleshooting
 
@@ -372,7 +371,7 @@ dependency order, and stops them in reverse order on shutdown.
 |---|---|
 | `go: command not found` | `sudo apt-get install -y golang-go` |
 | Service not found after install | `sudo systemctl daemon-reload` |
-| Enrollment rejected | Verify `enrollment_token` and `policy_id` match the control plane |
+| Enrollment rejected | Verify the enrollment token CLI argument and `policy_id` match the control plane |
 | Config file not found | Check path with `--config` flag; default is `/etc/xdr-agent/config.json` |
 
 ## License
