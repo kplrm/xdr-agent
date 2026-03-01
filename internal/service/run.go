@@ -16,6 +16,7 @@ import (
 	"xdr-agent/internal/telemetry/file"
 	"xdr-agent/internal/telemetry/network"
 	"xdr-agent/internal/telemetry/process"
+	"xdr-agent/internal/telemetry/session"
 	"xdr-agent/internal/telemetry/system"
 )
 
@@ -156,6 +157,26 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("fim collector start failed: %v", err)
 	} else {
 		log.Printf("capability started: %s", fimCollector.Name())
+	}
+
+	// DNS query/response monitoring (raw AF_PACKET socket; requires CAP_NET_RAW)
+	dnsCollector := network.NewDNSCollector(pipeline, state.AgentID, state.Hostname)
+	if err := dnsCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("dns collector init failed: %v", err)
+	} else if err := dnsCollector.Start(ctx); err != nil {
+		log.Printf("dns collector start failed (degraded — CAP_NET_RAW required): %v", err)
+	} else {
+		log.Printf("capability started: %s", dnsCollector.Name())
+	}
+
+	// User / session monitoring (utmp polling + auth log tailing)
+	sessionCollector := session.NewSessionCollector(pipeline, state.AgentID, state.Hostname, 0)
+	if err := sessionCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("session collector init failed: %v", err)
+	} else if err := sessionCollector.Start(ctx); err != nil {
+		log.Printf("session collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", sessionCollector.Name())
 	}
 
 	for {

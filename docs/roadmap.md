@@ -76,8 +76,8 @@ This section consolidates all security capabilities organized by development pha
 - ✅ File integrity monitoring (FIM) — inotify on critical paths with BoltDB baseline and SHA256 periodic rescan — `internal/telemetry/file/`
 - ✅ Network connection monitoring — Track all inbound/outbound TCP/UDP connections with ECS source/destination fields, Community ID v1, username/PID enrichment — `internal/telemetry/network/`
 - ✅ System/interface telemetry — Network interface stats (packets, drops, multicast) — `internal/telemetry/system/netio.go`
-- ❌ DNS query monitoring — Log and analyze DNS queries for C2, DGA, exfiltration — `internal/telemetry/dns/`
-- ❌ User / session monitoring — Track logons, logoffs, `su`/`sudo` usage, privilege changes — `internal/telemetry/session/`
+- ✅ DNS query monitoring — Captures UDP DNS queries+responses via raw AF_PACKET socket; PID enrichment via /proc/net/udp; ECS dns.* fields; transaction correlation — `internal/telemetry/network/dns.go`
+- ✅ User / session monitoring — utmp binary polling (logon/logoff events) + auth log tailing (SSH, sudo, su) with ECS authentication fields — `internal/telemetry/session/`
 - ❌ Auditd / syslog collection — Forward system logs and audit trail — `internal/telemetry/audit/`
 - ❌ Scheduled task monitoring — Monitor cron, at, systemd timers for persistence — `internal/telemetry/scheduled/`
 - ✅ Linux platform wrappers (procfs, netlink, inotify) — `internal/platform/linux/`
