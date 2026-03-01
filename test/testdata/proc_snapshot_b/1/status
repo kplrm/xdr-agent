@@ -9,3 +9,6 @@ Uid:	0	0	0	0
 Gid:	0	0	0	0
 FDSize:	128
 Threads:	1
+VmSize:	 51200 kB
+VmRSS:	 12800 kB
+CapEff:	 0000000000000000

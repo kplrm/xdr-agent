@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,17 +33,50 @@ const (
 )
 
 // ProcessInfo holds metadata about a running process read from /proc/[pid].
+// Fields map to ECS process.* unless noted.
 type ProcessInfo struct {
-	PID        int    `json:"pid"`
-	PPID       int    `json:"ppid"`
-	Name       string `json:"name"`
-	Executable string `json:"executable"`
-	CmdLine    string `json:"command_line"`
-	State      string `json:"state"`
-	UID        int    `json:"uid"`
-	GID        int    `json:"gid"`
-	Threads    int    `json:"threads"`
-	StartTime  uint64 `json:"start_time"` // clock ticks since boot
+	// ── Core identity ────────────────────────────────────────────────────────
+	PID        int      `json:"pid"`            // process.pid
+	PPID       int      `json:"ppid"`           // process.parent.pid
+	Name       string   `json:"name"`           // process.name
+	Executable string   `json:"executable"`     // process.executable
+	CmdLine    string   `json:"command_line"`   // process.command_line
+	Args       []string `json:"args,omitempty"` // process.args
+	State      string   `json:"state"`          // process.state (R/S/D/Z/T)
+	StartTime  uint64   `json:"start_time"`     // process.start (clock ticks since boot)
+	EntityID   string   `json:"entity_id"`      // process.entity_id (computed at emit)
+
+	// ── Session / terminal ───────────────────────────────────────────────────
+	SessionID int `json:"session_id"` // process.session_leader.pid approx
+	TTY       int `json:"tty"`        // process.tty.char_device.major (raw tty_nr)
+
+	// ── User / group context ─────────────────────────────────────────────────
+	UID       int    `json:"uid"`      // process.user.id
+	GID       int    `json:"gid"`      // process.group.id
+	EUID      int    `json:"euid"`     // process.effective_user.id (privilege escalation)
+	EGID      int    `json:"egid"`     // process.effective_group.id
+	Username  string `json:"username"` // process.user.name   (resolved at process.start)
+	GroupName string `json:"group"`    // process.group.name  (resolved at process.start)
+
+	// ── Security ─────────────────────────────────────────────────────────────
+	CapEff    string `json:"cap_eff"`    // Linux effective capability bitmask
+	ExeSHA256 string `json:"exe_sha256"` // process.hash.sha256 (computed at process.start)
+
+	// ── Resource metrics ─────────────────────────────────────────────────────
+	Threads      int    `json:"threads"`        // process.threads.count
+	FDCount      int    `json:"fd_count"`       // open file descriptor count
+	MemRSSBytes  int64  `json:"mem_rss_bytes"`  // process.memory.rss (resident set)
+	MemVMSBytes  int64  `json:"mem_vms_bytes"`  // process.memory.vms (virtual memory)
+	IOReadBytes  uint64 `json:"io_read_bytes"`  // process.io.read_bytes (cumulative)
+	IOWriteBytes uint64 `json:"io_write_bytes"` // process.io.write_bytes (cumulative)
+
+	// ── Raw CPU ticks (for delta-based cpu.pct computation) ─────────────────
+	UTime uint64 `json:"-"` // /proc/[pid]/stat field 14 (utime)
+	STime uint64 `json:"-"` // /proc/[pid]/stat field 15 (stime)
+
+	// ── Context ──────────────────────────────────────────────────────────────
+	CWD         string `json:"working_directory"` // process.working_directory
+	ContainerID string `json:"container_id"`      // container.id (empty for bare-metal)
 }
 
 // ProcessCollector monitors process creation and termination by periodically
@@ -59,6 +93,15 @@ type ProcessCollector struct {
 	cancel   context.CancelFunc
 	known    map[int]ProcessInfo
 	baseline bool // true after the first scan completes
+
+	tree *ProcessTree // in-memory process lineage tree
+	uids *uidCache    // UID → username cache
+	gids *gidCache    // GID → group name cache
+
+	// CPU delta tracking
+	prevCPU      map[int][2]uint64 // pid → [utime, stime] from last scan
+	prevSysTotal uint64            // total system CPU ticks from last scan
+	latestCPUPct map[int]float64   // pid → cpu% from most recent delta computation
 }
 
 // NewProcessCollector creates a new process telemetry collector.
@@ -73,13 +116,18 @@ func NewProcessCollector(pipeline *events.Pipeline, agentID, hostname string, in
 		interval = defaultProcInterval
 	}
 	return &ProcessCollector{
-		pipeline: pipeline,
-		agentID:  agentID,
-		hostname: hostname,
-		interval: interval,
-		procRoot: defaultProcRoot,
-		health:   capability.HealthStopped,
-		known:    make(map[int]ProcessInfo),
+		pipeline:     pipeline,
+		agentID:      agentID,
+		hostname:     hostname,
+		interval:     interval,
+		procRoot:     defaultProcRoot,
+		health:       capability.HealthStopped,
+		known:        make(map[int]ProcessInfo),
+		tree:         NewProcessTree(),
+		uids:         newUIDCache(),
+		gids:         newGIDCache(),
+		prevCPU:      make(map[int][2]uint64),
+		latestCPUPct: make(map[int]float64),
 	}
 }
 
@@ -155,6 +203,17 @@ func (p *ProcessCollector) scan() {
 		return
 	}
 
+	// Run fast enrichment for every visible process (CWD, args, FDs, IO, container).
+	for pid, info := range snapshot {
+		enrichProcessInfo(p.procRoot, &info)
+		snapshot[pid] = info
+	}
+
+	// Always keep the tree up to date so parent lookups are available at emit time.
+	for _, info := range snapshot {
+		p.tree.Update(info)
+	}
+
 	p.mu.Lock()
 	prevKnown := p.known
 	wasBaseline := p.baseline
@@ -167,26 +226,202 @@ func (p *ProcessCollector) scan() {
 		// First scan: establish baseline without emitting events for every
 		// existing process (that would flood the pipeline on agent start).
 		log.Printf("process collector: baseline established with %d processes", len(snapshot))
+		// Seed CPU tracking state so the next scan has a delta to compare against.
+		seedCPU := make(map[int][2]uint64, len(snapshot))
+		for pid, info := range snapshot {
+			seedCPU[pid] = [2]uint64{info.UTime, info.STime}
+		}
+		p.mu.Lock()
+		p.prevCPU = seedCPU
+		p.prevSysTotal = readSysTotalCPU(p.procRoot)
+		p.mu.Unlock()
 		return
 	}
 
-	// New processes (in snapshot but not in previous)
-	for pid, info := range snapshot {
-		if _, existed := prevKnown[pid]; !existed {
-			p.emitEvent("process.start", info)
+	// ── Compute per-process CPU deltas before emitting any lifecycle events so
+	// that process.end events can carry the last-known cpu.pct of the process.
+	p.mu.Lock()
+	prevCPU := p.prevCPU
+	prevSysTotal := p.prevSysTotal
+	p.mu.Unlock()
+
+	cpuPctByPID := make(map[int]float64)
+	sysTotal := readSysTotalCPU(p.procRoot)
+	if prevSysTotal > 0 && sysTotal > prevSysTotal {
+		sysDelta := float64(sysTotal - prevSysTotal)
+		for pid, info := range snapshot {
+			if prev, ok := prevCPU[pid]; ok {
+				utimeDelta := info.UTime - prev[0]
+				stimeDelta := info.STime - prev[1]
+				pct := math.Round(float64(utimeDelta+stimeDelta)/sysDelta*10000) / 100
+				if pct >= 0.01 {
+					cpuPctByPID[pid] = pct
+				}
+			}
 		}
 	}
 
-	// Terminated processes (in previous but not in snapshot)
+	// Persist latest CPU% per PID for next lifecycle event lookups.
+	p.mu.Lock()
+	for pid, pct := range cpuPctByPID {
+		p.latestCPUPct[pid] = pct
+	}
+	newPrevCPU := make(map[int][2]uint64, len(snapshot))
+	for pid, info := range snapshot {
+		newPrevCPU[pid] = [2]uint64{info.UTime, info.STime}
+	}
+	p.prevCPU = newPrevCPU
+	p.prevSysTotal = sysTotal
+	p.mu.Unlock()
+
+	// New processes (in snapshot but not in previous).
+	// New processes have no prior CPU sample, so cpuPct = 0 (field omitted).
+	for pid, info := range snapshot {
+		if _, existed := prevKnown[pid]; !existed {
+			enrichNewProcess(&info, p.uids, p.gids)
+			p.emitEvent("process.start", info, 0)
+		}
+	}
+
+	// Terminated processes (in previous but not in snapshot).
+	// Include the last known cpu.pct so the final event is fully enriched.
 	for pid, info := range prevKnown {
 		if _, exists := snapshot[pid]; !exists {
-			p.emitEvent("process.end", info)
+			p.mu.Lock()
+			cpuPct := p.latestCPUPct[pid]
+			delete(p.latestCPUPct, pid)
+			p.mu.Unlock()
+			p.emitEvent("process.end", info, cpuPct)
+			p.tree.Remove(pid)
 		}
 	}
 }
 
 // emitEvent publishes a process lifecycle event into the pipeline.
-func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo) {
+// cpuPct is the process CPU % from the most recent delta (0 = not yet measured;
+// the field is omitted from the payload when cpuPct <= 0).
+func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct float64) {
+	// ── Entity ID (stable process instance identifier) ───────────────────────
+	entityID := buildEntityID(p.hostname, info.PID, info.StartTime)
+
+	// ── Process lineage from tree ────────────────────────────────────────────
+	parentPayload := map[string]interface{}{}
+	if parent, ok := p.tree.GetParent(info.PID); ok {
+		parentEntityID := buildEntityID(p.hostname, parent.PID, parent.StartTime)
+		parentPayload = map[string]interface{}{
+			"pid":          parent.PID,
+			"ppid":         parent.PPID,
+			"name":         parent.Name,
+			"executable":   parent.Executable,
+			"command_line": parent.CmdLine,
+			"args":         parent.Args,
+			"entity_id":    parentEntityID,
+		}
+	}
+
+	// Ancestor chain (ordered from direct parent → root).
+	rawAncestors := p.tree.Ancestors(info.PID)
+	ancestorsPayload := make([]map[string]interface{}, 0, len(rawAncestors))
+	for _, anc := range rawAncestors {
+		ancEntityID := buildEntityID(p.hostname, anc.PID, anc.StartTime)
+		ancestorsPayload = append(ancestorsPayload, map[string]interface{}{
+			"pid":        anc.PID,
+			"ppid":       anc.PPID,
+			"name":       anc.Name,
+			"executable": anc.Executable,
+			"entity_id":  ancEntityID,
+		})
+	}
+
+	// Group leader (session leader approximation).
+	groupLeaderPayload := map[string]interface{}{}
+	if leader, ok := p.tree.GetGroupLeader(info.PID); ok {
+		leaderEntityID := buildEntityID(p.hostname, leader.PID, leader.StartTime)
+		groupLeaderPayload = map[string]interface{}{
+			"pid":       leader.PID,
+			"name":      leader.Name,
+			"entity_id": leaderEntityID,
+		}
+	}
+
+	// ── Assemble process payload (ECS-aligned) ───────────────────────────────
+	proc := map[string]interface{}{
+		// Core identity
+		"pid":               info.PID,
+		"ppid":              info.PPID,
+		"name":              info.Name,
+		"executable":        info.Executable,
+		"command_line":      info.CmdLine,
+		"args":              info.Args,
+		"working_directory": info.CWD,
+		"state":             info.State,
+		"start_time":        info.StartTime, // raw clock ticks; convert to timestamp with SC_CLK_TCK + /proc/uptime
+		"entity_id":         entityID,
+
+		// Session / terminal
+		"session_id": info.SessionID,
+		"tty":        info.TTY,
+
+		// User / group context
+		"user": map[string]interface{}{
+			"id":   info.UID,
+			"name": info.Username,
+		},
+		"group": map[string]interface{}{
+			"id":   info.GID,
+			"name": info.GroupName,
+		},
+		"effective_user": map[string]interface{}{
+			"id": info.EUID,
+		},
+		"effective_group": map[string]interface{}{
+			"id": info.EGID,
+		},
+
+		// Security
+		"cap_eff": info.CapEff,
+		"hash": map[string]interface{}{
+			"sha256": info.ExeSHA256,
+		},
+
+		// Resource metrics
+		"threads": map[string]interface{}{
+			"count": info.Threads,
+		},
+		"fd_count": info.FDCount,
+		"memory": map[string]interface{}{
+			"rss": info.MemRSSBytes,
+			"vms": info.MemVMSBytes,
+		},
+		"io": map[string]interface{}{
+			"read_bytes":  info.IOReadBytes,
+			"write_bytes": info.IOWriteBytes,
+		},
+
+		// Lineage
+		"parent":       parentPayload,
+		"ancestors":    ancestorsPayload,
+		"group_leader": groupLeaderPayload,
+	}
+
+	// Embed cpu.pct only when a measured delta is available.
+	if cpuPct > 0 {
+		proc["cpu"] = map[string]interface{}{
+			"pct": cpuPct,
+		}
+	}
+
+	payload := map[string]interface{}{
+		"process": proc,
+	}
+
+	// Container context — only include when detected (avoids empty object noise).
+	if info.ContainerID != "" {
+		payload["container"] = map[string]interface{}{
+			"id": info.ContainerID,
+		}
+	}
+
 	event := events.Event{
 		ID:        fmt.Sprintf("proc-%s-%d-%d", eventType, info.PID, time.Now().UnixNano()),
 		Timestamp: time.Now().UTC(),
@@ -197,21 +432,8 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo) {
 		Module:    "telemetry.process",
 		AgentID:   p.agentID,
 		Hostname:  p.hostname,
-		Payload: map[string]interface{}{
-			"process": map[string]interface{}{
-				"pid":          info.PID,
-				"ppid":         info.PPID,
-				"name":         info.Name,
-				"executable":   info.Executable,
-				"command_line": info.CmdLine,
-				"state":        info.State,
-				"uid":          info.UID,
-				"gid":          info.GID,
-				"threads":      info.Threads,
-				"start_time":   info.StartTime,
-			},
-		},
-		Tags: []string{"process", "telemetry"},
+		Payload:   payload,
+		Tags:      []string{"process", "telemetry"},
 	}
 
 	p.pipeline.Emit(event)
@@ -272,9 +494,15 @@ func ReadProcessInfo(procRoot string, pid int) (ProcessInfo, error) {
 	return info, nil
 }
 
-// parseStatFile parses /proc/[pid]/stat for name, state, ppid, and starttime.
-// The comm field is enclosed in parentheses and may contain spaces, so we
-// locate the last ')' to split reliably.
+// parseStatFile parses /proc/[pid]/stat for name, state, ppid, session,
+// tty_nr, and starttime.  The comm field is enclosed in parentheses and may
+// contain spaces, so we locate the last ')' to split reliably.
+//
+// /proc/[pid]/stat field layout (after comm):
+//
+//	[0]  state        [1]  ppid          [2]  pgrp
+//	[3]  session      [4]  tty_nr        ...
+//	[19] starttime    (field 22 in the kernel's numbering)
 func parseStatFile(path string, info *ProcessInfo) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -290,7 +518,7 @@ func parseStatFile(path string, info *ProcessInfo) error {
 
 	info.Name = content[openParen+1 : closeParen]
 
-	// Fields after the closing paren: state(0) ppid(1) ... starttime(19)
+	// Fields after the closing paren: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) ... starttime(19)
 	rest := strings.Fields(content[closeParen+2:])
 	if len(rest) < 20 {
 		return fmt.Errorf("stat has too few fields (%d): %s", len(rest), path)
@@ -301,6 +529,22 @@ func parseStatFile(path string, info *ProcessInfo) error {
 	if ppid, err := strconv.Atoi(rest[1]); err == nil {
 		info.PPID = ppid
 	}
+	// rest[3] = session (process group session leader PID)
+	if sid, err := strconv.Atoi(rest[3]); err == nil {
+		info.SessionID = sid
+	}
+	// rest[4] = tty_nr (controlling terminal, encoded as major/minor device)
+	if tty, err := strconv.Atoi(rest[4]); err == nil {
+		info.TTY = tty
+	}
+	// rest[11] = utime, rest[12] = stime (cumulative CPU ticks)
+	if ut, err := strconv.ParseUint(rest[11], 10, 64); err == nil {
+		info.UTime = ut
+	}
+	if st, err := strconv.ParseUint(rest[12], 10, 64); err == nil {
+		info.STime = st
+	}
+
 	// rest[19] is field 22 (starttime — clock ticks since boot)
 	if st, err := strconv.ParseUint(rest[19], 10, 64); err == nil {
 		info.StartTime = st
@@ -309,8 +553,18 @@ func parseStatFile(path string, info *ProcessInfo) error {
 	return nil
 }
 
-// parseStatusFile reads /proc/[pid]/status for UID, GID, and thread count.
+// parseStatusFile reads /proc/[pid]/status for UID, GID, effective UID/GID,
+// thread count, resident/virtual memory sizes, and Linux capability bitmask.
 // Errors are silently ignored — the data is optional enrichment.
+//
+// Relevant status fields:
+//
+//	Uid:     ruid  euid  ssuid  fsuid
+//	Gid:     rgid  egid  sgid   fsgid
+//	Threads: N
+//	VmRSS:   N kB   ← resident set size
+//	VmSize:  N kB   ← virtual memory size
+//	CapEff:  <hex>  ← effective capability bitmask
 func parseStatusFile(path string, info *ProcessInfo) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -327,18 +581,66 @@ func parseStatusFile(path string, info *ProcessInfo) {
 			if len(fields) >= 2 {
 				info.UID, _ = strconv.Atoi(fields[1])
 			}
+			if len(fields) >= 3 {
+				info.EUID, _ = strconv.Atoi(fields[2])
+			}
 		case strings.HasPrefix(line, "Gid:"):
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				info.GID, _ = strconv.Atoi(fields[1])
+			}
+			if len(fields) >= 3 {
+				info.EGID, _ = strconv.Atoi(fields[2])
 			}
 		case strings.HasPrefix(line, "Threads:"):
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				info.Threads, _ = strconv.Atoi(fields[1])
 			}
+		case strings.HasPrefix(line, "VmRSS:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, _ := strconv.ParseInt(fields[1], 10, 64)
+				info.MemRSSBytes = kb * 1024
+			}
+		case strings.HasPrefix(line, "VmSize:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, _ := strconv.ParseInt(fields[1], 10, 64)
+				info.MemVMSBytes = kb * 1024
+			}
+		case strings.HasPrefix(line, "CapEff:"):
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				info.CapEff = fields[1]
+			}
 		}
 	}
+}
+
+// readSysTotalCPU reads the first "cpu" line of /proc/stat and returns the
+// sum of all CPU tick fields (user+nice+system+idle+iowait+irq+softirq+steal).
+// Returns 0 on any error.
+func readSysTotalCPU(procRoot string) uint64 {
+	f, err := os.Open(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return 0
+	}
+	fields := strings.Fields(scanner.Text())
+	if len(fields) < 2 || fields[0] != "cpu" {
+		return 0
+	}
+	var total uint64
+	for _, field := range fields[1:] {
+		v, _ := strconv.ParseUint(field, 10, 64)
+		total += v
+	}
+	return total
 }
 
 // readCmdline reads /proc/[pid]/cmdline, trims trailing NUL bytes, and

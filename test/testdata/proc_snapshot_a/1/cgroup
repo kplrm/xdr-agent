@@ -1,0 +1,5 @@
+12:perf_event:/
+11:pids:/system.slice
+10:memory:/system.slice
+9:blkio:/system.slice
+0::/system.slice

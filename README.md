@@ -231,7 +231,7 @@ xdr-agent help       Show usage information
 
 ```bash
 chmod +x packaging/deb/build.sh packaging/deb/postinst packaging/deb/prerm
-make deb
+make clean; make deb
 ls -lh dist/*.deb
 ```
 

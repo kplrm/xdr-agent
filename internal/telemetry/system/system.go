@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sort"
 	"sync"
 	"time"
 
@@ -251,7 +250,6 @@ func (s *SystemCollector) collectAndEmit() {
 
 	s.mu.Lock()
 	prevSys := s.prevSys
-	prevProc := s.prevProc
 	prevDiskIO := s.prevDiskIO
 	prevNetIO := s.prevNetIO
 	if cpuErr == nil {
@@ -407,71 +405,5 @@ func (s *SystemCollector) collectAndEmit() {
 	} else {
 		log.Printf("system collector: emitted system.metrics (memory only, used_pct=%.1f%%)",
 			memInfo.UsedPercent)
-	}
-
-	// ── Per-process CPU events (unchanged behavior) ─────────────────────
-	if !hasCpuDelta || proc == nil || prevProc == nil {
-		return
-	}
-
-	type procCpu struct {
-		info   ProcessCpuSnapshot
-		cpuPct float64
-	}
-
-	var ranked []procCpu
-	fd := float64(totalDelta)
-	for pid, curr := range proc {
-		prev, ok := prevProc[pid]
-		if !ok {
-			continue
-		}
-		utimeDelta := curr.UTime - prev.UTime
-		stimeDelta := curr.STime - prev.STime
-		pct := round2(float64(utimeDelta+stimeDelta) / fd * 100)
-		if pct < 0.01 {
-			continue
-		}
-		ranked = append(ranked, procCpu{info: curr, cpuPct: pct})
-	}
-
-	sort.Slice(ranked, func(i, j int) bool {
-		return ranked[i].cpuPct > ranked[j].cpuPct
-	})
-
-	limit := s.topN
-	if limit > len(ranked) {
-		limit = len(ranked)
-	}
-
-	for _, entry := range ranked[:limit] {
-		procEvent := events.Event{
-			ID:        fmt.Sprintf("cpu-proc-%d-%d", entry.info.PID, time.Now().UnixNano()),
-			Timestamp: time.Now().UTC(),
-			Type:      "process.cpu",
-			Category:  "process",
-			Kind:      "metric",
-			Severity:  events.SeverityInfo,
-			Module:    "telemetry.system",
-			AgentID:   s.agentID,
-			Hostname:  s.hostname,
-			Payload: map[string]interface{}{
-				"process": map[string]interface{}{
-					"pid":          entry.info.PID,
-					"name":         entry.info.Name,
-					"executable":   entry.info.Executable,
-					"command_line": entry.info.CommandLine,
-					"cpu": map[string]interface{}{
-						"pct": entry.cpuPct,
-					},
-				},
-			},
-			Tags: []string{"cpu", "process", "metric"},
-		}
-		s.pipeline.Emit(procEvent)
-	}
-
-	if limit > 0 {
-		log.Printf("system collector: emitted %d process.cpu events (top by CPU%%)", limit)
 	}
 }

@@ -156,15 +156,13 @@ func TestSystemCollector_EmitsCombinedEvent(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Expected: 1 baseline + 1 combined system.metrics + 2 process.cpu = 4
+	// Expected: 1 baseline (memory only) + 1 combined system.metrics = 2 total.
+	// process.cpu events are no longer emitted by SystemCollector — they are
+	// emitted by ProcessCollector (telemetry.process module) instead.
 	var sysMetrics []events.Event
-	var procCpuEvents []events.Event
 	for _, e := range received {
-		switch e.Type {
-		case "system.metrics":
+		if e.Type == "system.metrics" {
 			sysMetrics = append(sysMetrics, e)
-		case "process.cpu":
-			procCpuEvents = append(procCpuEvents, e)
 		}
 	}
 
@@ -213,22 +211,6 @@ func TestSystemCollector_EmitsCombinedEvent(t *testing.T) {
 	if !tagSet["system"] {
 		t.Error("combined event missing 'system' tag")
 	}
-
-	// ── process.cpu events (same as before: firefox + nginx) ─────────
-	if len(procCpuEvents) != 2 {
-		t.Fatalf("expected 2 process.cpu events, got %d", len(procCpuEvents))
-	}
-
-	// Sorted by CPU% descending: firefox first
-	ff := procCpuEvents[0].Payload["process"].(map[string]interface{})
-	assertInt(t, "ff.pid", ff["pid"].(int), 1234)
-	assertStr(t, "ff.name", ff["name"].(string), "firefox")
-	assertFloat(t, "ff.cpu.pct", ff["cpu"].(map[string]interface{})["pct"].(float64), 49.3, 0.2)
-	assertStr(t, "ff.command_line", ff["command_line"].(string), "/usr/lib/firefox/firefox --no-remote --profile /home/user/.mozilla")
-
-	ng := procCpuEvents[1].Payload["process"].(map[string]interface{})
-	assertInt(t, "ng.pid", ng["pid"].(int), 5678)
-	assertFloat(t, "ng.cpu_pct", ng["cpu"].(map[string]interface{})["pct"].(float64), 7.4, 0.2)
 }
 
 func TestSystemCollector_MemFailCpuOk(t *testing.T) {

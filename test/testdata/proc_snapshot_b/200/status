@@ -5,3 +5,6 @@ PPid:	1
 Uid:	33	33	33	33
 Gid:	33	33	33	33
 Threads:	4
+VmSize:	 51200 kB
+VmRSS:	 12800 kB
+CapEff:	 0000000000000000
