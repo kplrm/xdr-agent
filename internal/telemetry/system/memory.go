@@ -163,16 +163,24 @@ func (m *MemoryCollector) collectAndEmit() {
 		Payload: map[string]interface{}{
 			"system": map[string]interface{}{
 				"memory": map[string]interface{}{
-					"total_bytes":     info.TotalBytes,
-					"used_bytes":      info.UsedBytes,
-					"free_bytes":      info.FreeBytes,
-					"available_bytes": info.AvailableBytes,
-					"buffers_bytes":   info.BuffersBytes,
-					"cached_bytes":    info.CachedBytes,
-					"swap_total_bytes": info.SwapTotalBytes,
-					"swap_free_bytes": info.SwapFreeBytes,
-					"swap_used_bytes": info.SwapUsedBytes,
-					"used_percent":    info.UsedPercent,
+					"total":  info.TotalBytes,
+					"free":   info.FreeBytes,
+					"cached": info.CachedBytes,
+					"buffer": info.BuffersBytes,
+					"used": map[string]interface{}{
+						"bytes": info.UsedBytes,
+						"pct":   info.UsedPercent,
+					},
+					"actual": map[string]interface{}{
+						"free": info.AvailableBytes,
+					},
+					"swap": map[string]interface{}{
+						"total": info.SwapTotalBytes,
+						"free":  info.SwapFreeBytes,
+						"used": map[string]interface{}{
+							"bytes": info.SwapUsedBytes,
+						},
+					},
 				},
 			},
 		},

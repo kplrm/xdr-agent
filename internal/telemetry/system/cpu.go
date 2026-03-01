@@ -51,17 +51,17 @@ const defaultTopN = 20
 //
 // ECS field mapping (within payload):
 //
-//	system.cpu.total_pct    → total CPU usage (0–100)
-//	system.cpu.user_pct     → user-mode CPU (0–100)
-//	system.cpu.system_pct   → kernel-mode CPU (0–100)
-//	system.cpu.idle_pct     → idle (0–100)
-//	system.cpu.iowait_pct   → I/O wait (0–100)
-//	system.cpu.steal_pct    → steal (0–100)
+//	system.cpu.total.pct    → total CPU usage (0–100)
+//	system.cpu.user.pct     → user-mode CPU (0–100)
+//	system.cpu.system.pct   → kernel-mode CPU (0–100)
+//	system.cpu.idle.pct     → idle (0–100)
+//	system.cpu.iowait.pct   → I/O wait (0–100)
+//	system.cpu.steal.pct    → steal (0–100)
 //	system.cpu.cores        → online core count
 //	process.pid             → process ID
 //	process.name            → process name (comm)
 //	process.executable      → executable path
-//	process.cpu_pct         → per-process CPU usage (0–100)
+//	process.cpu.pct         → per-process CPU usage (0–100)
 type CpuCollector struct {
 	pipeline *events.Pipeline
 	agentID  string
@@ -242,13 +242,13 @@ func (c *CpuCollector) collectAndEmit() {
 		Payload: map[string]interface{}{
 			"system": map[string]interface{}{
 				"cpu": map[string]interface{}{
-					"total_pct":  totalPct,
-					"user_pct":   userPct,
-					"system_pct": systemPct,
-					"idle_pct":   idlePct,
-					"iowait_pct": iowaitPct,
-					"steal_pct":  stealPct,
-					"cores":      sys.Cores,
+					"total":  map[string]interface{}{"pct": totalPct},
+					"user":   map[string]interface{}{"pct": userPct},
+					"system": map[string]interface{}{"pct": systemPct},
+					"idle":   map[string]interface{}{"pct": idlePct},
+					"iowait": map[string]interface{}{"pct": iowaitPct},
+					"steal":  map[string]interface{}{"pct": stealPct},
+					"cores":  sys.Cores,
 				},
 			},
 		},
@@ -305,7 +305,9 @@ func (c *CpuCollector) collectAndEmit() {
 					"name":         entry.info.Name,
 					"executable":   entry.info.Executable,
 					"command_line": entry.info.CommandLine,
-					"cpu_pct":      entry.cpuPct,
+					"cpu": map[string]interface{}{
+						"pct": entry.cpuPct,
+					},
 				},
 			},
 			Tags: []string{"cpu", "process", "metric"},

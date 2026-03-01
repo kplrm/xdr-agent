@@ -358,9 +358,9 @@ func TestCpuCollector_EmitsEvents(t *testing.T) {
 	assertStr(t, "Hostname", sysCpu.Hostname, "test-host")
 
 	cpuPayload := sysCpu.Payload["system"].(map[string]interface{})["cpu"].(map[string]interface{})
-	assertFloat(t, "total_pct", cpuPayload["total_pct"].(float64), 60.1, 0.2)
-	assertFloat(t, "user_pct", cpuPayload["user_pct"].(float64), 49.3, 0.2)
-	assertFloat(t, "system_pct", cpuPayload["system_pct"].(float64), 9.9, 0.2)
+	assertFloat(t, "total.pct", cpuPayload["total"].(map[string]interface{})["pct"].(float64), 60.1, 0.2)
+	assertFloat(t, "user.pct", cpuPayload["user"].(map[string]interface{})["pct"].(float64), 49.3, 0.2)
+	assertFloat(t, "system.pct", cpuPayload["system"].(map[string]interface{})["pct"].(float64), 9.9, 0.2)
 	assertInt(t, "cores", cpuPayload["cores"].(int), 2)
 
 	// ── process.cpu event assertions ─────────────────────────────────
@@ -375,13 +375,13 @@ func TestCpuCollector_EmitsEvents(t *testing.T) {
 	ffProc := ff.Payload["process"].(map[string]interface{})
 	assertInt(t, "ff.pid", ffProc["pid"].(int), 1234)
 	assertStr(t, "ff.name", ffProc["name"].(string), "firefox")
-	assertFloat(t, "ff.cpu_pct", ffProc["cpu_pct"].(float64), 49.3, 0.2)
+	assertFloat(t, "ff.cpu.pct", ffProc["cpu"].(map[string]interface{})["pct"].(float64), 49.3, 0.2)
 	assertStr(t, "ff.command_line", ffProc["command_line"].(string), "/usr/lib/firefox/firefox --no-remote --profile /home/user/.mozilla")
 
 	ng := procCpuEvents[1]
 	ngProc := ng.Payload["process"].(map[string]interface{})
 	assertInt(t, "ng.pid", ngProc["pid"].(int), 5678)
 	assertStr(t, "ng.name", ngProc["name"].(string), "nginx")
-	assertFloat(t, "ng.cpu_pct", ngProc["cpu_pct"].(float64), 7.4, 0.2)
+	assertFloat(t, "ng.cpu.pct", ngProc["cpu"].(map[string]interface{})["pct"].(float64), 7.4, 0.2)
 	assertStr(t, "ng.command_line", ngProc["command_line"].(string), "/usr/sbin/nginx -g daemon off;")
 }

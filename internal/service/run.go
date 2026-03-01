@@ -117,14 +117,14 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	// ── Telemetry collectors ────────────────────────────────────────────
 
-	// Memory (system metrics)
-	memCollector := system.NewMemoryCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
-	if err := memCollector.Init(capability.Dependencies{}); err != nil {
-		log.Printf("memory collector init failed: %v", err)
-	} else if err := memCollector.Start(ctx); err != nil {
-		log.Printf("memory collector start failed: %v", err)
+	// Combined system metrics (memory + CPU in a single document)
+	sysCollector := system.NewSystemCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
+	if err := sysCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("system collector init failed: %v", err)
+	} else if err := sysCollector.Start(ctx); err != nil {
+		log.Printf("system collector start failed: %v", err)
 	} else {
-		log.Printf("capability started: %s", memCollector.Name())
+		log.Printf("capability started: %s", sysCollector.Name())
 	}
 
 	// Process monitoring (procfs polling)
@@ -145,16 +145,6 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("network collector start failed: %v", err)
 	} else {
 		log.Printf("capability started: %s", netCollector.Name())
-	}
-
-	// CPU metrics (system-wide + per-process)
-	cpuCollector := system.NewCpuCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval())
-	if err := cpuCollector.Init(capability.Dependencies{}); err != nil {
-		log.Printf("cpu collector init failed: %v", err)
-	} else if err := cpuCollector.Start(ctx); err != nil {
-		log.Printf("cpu collector start failed: %v", err)
-	} else {
-		log.Printf("capability started: %s", cpuCollector.Name())
 	}
 
 	for {

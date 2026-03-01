@@ -198,12 +198,12 @@ func TestMemoryCollector_EmitsEvent(t *testing.T) {
 		if !ok {
 			t.Fatal("payload missing 'system.memory' key")
 		}
-		totalBytes, ok := mem["total_bytes"].(uint64)
+		totalBytes, ok := mem["total"].(uint64)
 		if !ok {
-			t.Fatal("payload missing 'system.memory.total_bytes'")
+			t.Fatal("payload missing 'system.memory.total'")
 		}
 		if totalBytes == 0 {
-			t.Error("total_bytes should be > 0")
+			t.Error("total should be > 0")
 		}
 
 	case <-time.After(3 * time.Second):
