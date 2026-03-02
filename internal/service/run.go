@@ -14,10 +14,15 @@ import (
 	"xdr-agent/internal/events"
 	"xdr-agent/internal/identity"
 	"xdr-agent/internal/telemetry/file"
+	"xdr-agent/internal/telemetry/injection"
+	"xdr-agent/internal/telemetry/kernel"
+	"xdr-agent/internal/telemetry/library"
 	"xdr-agent/internal/telemetry/network"
 	"xdr-agent/internal/telemetry/process"
+	"xdr-agent/internal/telemetry/scheduled"
 	"xdr-agent/internal/telemetry/session"
 	"xdr-agent/internal/telemetry/system"
+	"xdr-agent/internal/telemetry/tty"
 )
 
 func Run(ctx context.Context, configPath string, once bool, enrollmentToken string) error {
@@ -177,6 +182,58 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("session collector start failed: %v", err)
 	} else {
 		log.Printf("capability started: %s", sessionCollector.Name())
+	}
+
+	// ── Phase 2b: Critical gap telemetry ───────────────────────────────────────
+
+	// Shared library / SO loading monitor (LD_PRELOAD, library hijacking)
+	soCollector := library.NewSOCollector(pipeline, state.AgentID, state.Hostname, nil, 0)
+	if err := soCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("library collector init failed: %v", err)
+	} else if err := soCollector.Start(ctx); err != nil {
+		log.Printf("library collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", soCollector.Name())
+	}
+
+	// Kernel module load/unload monitor (rootkit / LKRG detection)
+	moduleCollector := kernel.NewModuleCollector(pipeline, state.AgentID, state.Hostname, 0)
+	if err := moduleCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("kernel module collector init failed: %v", err)
+	} else if err := moduleCollector.Start(ctx); err != nil {
+		log.Printf("kernel module collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", moduleCollector.Name())
+	}
+
+	// TTY / terminal session monitor (interactive shell detection)
+	ttyCollector := tty.NewTTYCollector(pipeline, state.AgentID, state.Hostname, 0)
+	if err := ttyCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("tty collector init failed: %v", err)
+	} else if err := ttyCollector.Start(ctx); err != nil {
+		log.Printf("tty collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", ttyCollector.Name())
+	}
+
+	// Scheduled task / cron monitor (persistence via cron / systemd timers)
+	schedCollector := scheduled.NewScheduledTaskCollector(pipeline, state.AgentID, state.Hostname, 0)
+	if err := schedCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("scheduled collector init failed: %v", err)
+	} else if err := schedCollector.Start(ctx); err != nil {
+		log.Printf("scheduled collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", schedCollector.Name())
+	}
+
+	// Process injection monitor (ptrace attach + anonymous exec regions)
+	injectionCollector := injection.NewInjectionCollector(pipeline, state.AgentID, state.Hostname, 0)
+	if err := injectionCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("injection collector init failed: %v", err)
+	} else if err := injectionCollector.Start(ctx); err != nil {
+		log.Printf("injection collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", injectionCollector.Name())
 	}
 
 	for {
