@@ -15,6 +15,7 @@ import (
 	"xdr-agent/internal/identity"
 	"xdr-agent/internal/telemetry/file"
 	"xdr-agent/internal/telemetry/injection"
+	"xdr-agent/internal/telemetry/ipc"
 	"xdr-agent/internal/telemetry/kernel"
 	"xdr-agent/internal/telemetry/library"
 	"xdr-agent/internal/telemetry/network"
@@ -234,6 +235,30 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("injection collector start failed: %v", err)
 	} else {
 		log.Printf("capability started: %s", injectionCollector.Name())
+	}
+
+	// ── Phase 2c: High-value telemetry gap closure ────────────────────────────
+	// NOTE: Environment variable capture and script content capture are integrated
+	// directly into the process collector and require no separate registration.
+
+	// File access monitor (credential harvesting detection: /etc/shadow, SSH keys)
+	fileAccessCollector := file.NewFileAccessCollector(pipeline, state.AgentID, state.Hostname, nil)
+	if err := fileAccessCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("file access collector init failed: %v", err)
+	} else if err := fileAccessCollector.Start(ctx); err != nil {
+		log.Printf("file access collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", fileAccessCollector.Name())
+	}
+
+	// IPC monitor (Unix domain sockets + named pipes)
+	ipcCollector := ipc.NewIPCCollector(pipeline, state.AgentID, state.Hostname, nil, 0)
+	if err := ipcCollector.Init(capability.Dependencies{}); err != nil {
+		log.Printf("ipc collector init failed: %v", err)
+	} else if err := ipcCollector.Start(ctx); err != nil {
+		log.Printf("ipc collector start failed: %v", err)
+	} else {
+		log.Printf("capability started: %s", ipcCollector.Name())
 	}
 
 	for {

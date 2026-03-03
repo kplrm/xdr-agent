@@ -411,6 +411,20 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 		}
 	}
 
+	// ── Phase 2c: process.start enrichment ───────────────────────────────────
+	if eventType == "process.start" {
+		// Environment variable capture — read filtered env vars from
+		// /proc/[pid]/environ (MITRE T1574.006).
+		if envVars := readEnvVars(p.procRoot, info.PID, defaultEnvAllowlist); envVars != nil {
+			proc["env"] = envVars
+		}
+		// Script content capture — when the process is an interpreter,
+		// read the first 4 KiB of the script file (MITRE T1059).
+		if sc := captureScriptPayload(info.Executable, info.Args, 4096); sc != nil {
+			proc["script"] = sc
+		}
+	}
+
 	payload := map[string]interface{}{
 		"process": proc,
 	}

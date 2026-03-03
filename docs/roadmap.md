@@ -1,6 +1,6 @@
 # XDR Agent — Development Roadmap
 
-> **Last updated:** 2026-03-02
+> **Last updated:** 2026-03-03
 
 ---
 
@@ -151,11 +151,11 @@ This section consolidates all security capabilities organized by development pha
 
 **Goal:** Add high-value telemetry that significantly improves detection fidelity.
 
-- ❌ **Environment variable capture** — Capture configurable list of env vars (default: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, `HOME`, `SHELL`) from `/proc/[pid]/environ` on process.start events (MITRE T1574.006) — `internal/telemetry/process/envvars.go`
-- ❌ **Script content capture** — On process.start where executable is an interpreter (`bash`, `sh`, `python`, `perl`, `ruby`, `node`), read the first N bytes (configurable, default 4096) of the script argument; emit as `process.script.content` (MITRE T1059) — `internal/telemetry/script/`
-- ❌ **File access (read) events on sensitive paths** — inotify `IN_ACCESS` on configurable sensitive paths (default: `/etc/shadow`, `/etc/gshadow`, `/root/.ssh/`, `/etc/ssh/ssh_host_*`) to detect credential harvesting (MITRE T1003.008, T1552.004) — extend `internal/telemetry/file/`
-- ❌ **Named pipe / Unix socket IPC monitoring** — Monitor creation and connection to Unix domain sockets and named pipes via inotify + `/proc/net/unix` polling (MITRE T1559) — `internal/telemetry/ipc/`
-- ❌ **File entropy and header byte collection** — Compute Shannon entropy and capture first 256 bytes of header on file.created/file.modified events; flag files with entropy > 7.5 as potentially encrypted/packed — extend `internal/telemetry/file/`
+- ✅ **Environment variable capture** — Capture configurable list of env vars (default: `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, `HOME`, `SHELL`) from `/proc/[pid]/environ` on process.start events (MITRE T1574.006) — `internal/telemetry/process/envvars.go`
+- ✅ **Script content capture** — On process.start where executable is an interpreter (`bash`, `sh`, `python`, `perl`, `ruby`, `node`), read the first N bytes (configurable, default 4096) of the script argument; emit as `process.script.content` (MITRE T1059) — `internal/telemetry/script/`
+- ✅ **File access (read) events on sensitive paths** — inotify `IN_ACCESS` on configurable sensitive paths (default: `/etc/shadow`, `/etc/gshadow`, `/root/.ssh/`, `/etc/ssh/ssh_host_*`) to detect credential harvesting (MITRE T1003.008, T1552.004) — `internal/telemetry/file/access.go`
+- ✅ **Named pipe / Unix socket IPC monitoring** — Monitor creation and connection to Unix domain sockets and named pipes via inotify + `/proc/net/unix` polling (MITRE T1559) — `internal/telemetry/ipc/`
+- ✅ **File entropy and header byte collection** — Compute Shannon entropy and capture first 256 bytes of header on file.created/file.modified events; flag files with entropy > 7.5 as potentially encrypted/packed — `internal/telemetry/file/fim.go`
 
 **ECS fields introduced:**
 - `process.env` (object) — environment variables

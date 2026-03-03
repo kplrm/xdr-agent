@@ -19,11 +19,13 @@ package file
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -71,15 +73,17 @@ const (
 
 // fileRecord is the schema persisted in BoltDB for each monitored file.
 type fileRecord struct {
-	Path     string `json:"path"`
-	Size     int64  `json:"size"`
-	Mode     string `json:"mode"` // octal permission string e.g. "0644"
-	UID      uint32 `json:"uid"`
-	GID      uint32 `json:"gid"`
-	MtimeSec int64  `json:"mtime_sec"` // Unix seconds
-	CtimeSec int64  `json:"ctime_sec"` // Unix seconds
-	SHA256   string `json:"sha256"`    // hex; empty for directories/symlinks
-	FileType string `json:"file_type"` // "file", "dir", or "symlink"
+	Path        string  `json:"path"`
+	Size        int64   `json:"size"`
+	Mode        string  `json:"mode"` // octal permission string e.g. "0644"
+	UID         uint32  `json:"uid"`
+	GID         uint32  `json:"gid"`
+	MtimeSec    int64   `json:"mtime_sec"`    // Unix seconds
+	CtimeSec    int64   `json:"ctime_sec"`    // Unix seconds
+	SHA256      string  `json:"sha256"`       // hex; empty for directories/symlinks
+	FileType    string  `json:"file_type"`    // "file", "dir", or "symlink"
+	Entropy     float64 `json:"entropy"`      // Shannon entropy [0,8]; 0 = unknown/dir
+	HeaderBytes string  `json:"header_bytes"` // base64-encoded first 256 bytes
 }
 
 // ── FIMCollector ──────────────────────────────────────────────────────────────
@@ -743,6 +747,13 @@ func (f *FIMCollector) emitFIMEvent(
 	if current.SHA256 != "" {
 		filePayload["hash"] = map[string]interface{}{"sha256": current.SHA256}
 	}
+	// Phase 2c: entropy and header bytes — only for regular files.
+	if current.FileType == "file" && current.Entropy > 0 {
+		filePayload["entropy"] = current.Entropy
+	}
+	if current.HeaderBytes != "" {
+		filePayload["header_bytes"] = current.HeaderBytes
+	}
 	if current.MtimeSec > 0 {
 		filePayload["mtime"] = time.Unix(current.MtimeSec, 0).UTC().Format(time.RFC3339)
 	}
@@ -781,6 +792,15 @@ func (f *FIMCollector) emitFIMEvent(
 		}
 	}
 
+	tags := []string{"fim", "file", "telemetry"}
+	// Flag potentially encrypted / packed files (entropy > 7.5 on an 8-bit scale).
+	if current.FileType == "file" && current.Entropy > 7.5 {
+		tags = append(tags, "high-entropy", "potentially-packed")
+		if severity < events.SeverityHigh {
+			severity = events.SeverityHigh
+		}
+	}
+
 	ev := events.Event{
 		ID:        fmt.Sprintf("fim-%s-%d", action, time.Now().UnixNano()),
 		Timestamp: time.Now().UTC(),
@@ -795,7 +815,7 @@ func (f *FIMCollector) emitFIMEvent(
 			"file": filePayload,
 			"fim":  fimPayload,
 		},
-		Tags: []string{"fim", "file", "telemetry"},
+		Tags: tags,
 	}
 	f.pipeline.Emit(ev)
 }
@@ -878,8 +898,12 @@ func (f *FIMCollector) buildFileRecord(path string) (*fileRecord, error) {
 		rec.FileType = "file"
 		// Limit hashing to 256 MiB to avoid latency spikes on large files.
 		if info.Size() <= 256<<20 {
-			if hash, hErr := hashFile(path); hErr == nil {
+			if hash, entropy, header, hErr := hashFileWithMeta(path); hErr == nil {
 				rec.SHA256 = hash
+				rec.Entropy = entropy
+				if len(header) > 0 {
+					rec.HeaderBytes = base64.StdEncoding.EncodeToString(header)
+				}
 			}
 		}
 	}
@@ -887,19 +911,68 @@ func (f *FIMCollector) buildFileRecord(path string) (*fileRecord, error) {
 	return rec, nil
 }
 
-// hashFile computes the SHA-256 digest of a file's content.
-func hashFile(path string) (string, error) {
+// hashFileWithMeta computes the SHA-256 digest, Shannon entropy, and the first
+// 256 header bytes of a file in a single sequential read.
+//
+// Returns (sha256hex, entropy, headerBytes, error).
+// Entropy is expressed on a [0, 8] scale (bits per byte).
+// Files with entropy > 7.5 are likely encrypted or compressed.
+func hashFileWithMeta(path string) (string, float64, []byte, error) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", 0, nil, err
 	}
 	defer fh.Close()
 
 	h := sha256.New()
-	if _, err = io.Copy(h, fh); err != nil {
-		return "", err
+	var freq [256]int64
+	var totalBytes int64
+	var header []byte
+
+	buf := make([]byte, 32*1024) // 32 KiB read buffer
+	for {
+		n, readErr := fh.Read(buf)
+		if n > 0 {
+			// SHA-256 update
+			h.Write(buf[:n])
+			// Capture header bytes (first 256 bytes)
+			if len(header) < 256 {
+				remaining := 256 - len(header)
+				if n < remaining {
+					header = append(header, buf[:n]...)
+				} else {
+					header = append(header, buf[:remaining]...)
+				}
+			}
+			// Byte frequency for Shannon entropy.
+			for _, b := range buf[:n] {
+				freq[b]++
+			}
+			totalBytes += int64(n)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", 0, nil, readErr
+		}
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+
+	// Shannon entropy H = -Σ p(x) * log2(p(x))
+	var entropy float64
+	if totalBytes > 0 {
+		for _, count := range freq {
+			if count == 0 {
+				continue
+			}
+			p := float64(count) / float64(totalBytes)
+			entropy -= p * math.Log2(p)
+		}
+		// Round to 4 decimal places for readability.
+		entropy = math.Round(entropy*10000) / 10000
+	}
+
+	return hex.EncodeToString(h.Sum(nil)), entropy, header, nil
 }
 
 // isCriticalPath returns true for paths that deserve elevated severity when
