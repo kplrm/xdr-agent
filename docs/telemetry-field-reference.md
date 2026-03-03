@@ -67,13 +67,13 @@ events.
 | `process.session_id` | `int` | ✅ | Session leader PID |
 | `process.tty` | `int` | ✅ | Raw tty_nr |
 | `process.user.id` | `int` | ✅ | UID |
-| `process.user.name` | `string` | start only | Username (resolved) |
+| `process.user.name` | `string` | ✅ | Username (resolved; empty for baseline processes on end events) |
 | `process.group.id` | `int` | ✅ | GID |
-| `process.group.name` | `string` | start only | Group name (resolved) |
+| `process.group.name` | `string` | ✅ | Group name (resolved; empty for baseline processes on end events) |
 | `process.effective_user.id` | `int` | ✅ | Effective UID |
 | `process.effective_group.id` | `int` | ✅ | Effective GID |
 | `process.cap_eff` | `string` | ✅ | Hex capabilities bitmask |
-| `process.hash.sha256` | `string` | start only | SHA-256 of executable binary |
+| `process.hash.sha256` | `string` | ✅ | SHA-256 of executable binary (empty for baseline-era processes on end events — hash intentionally skipped at startup for performance; also empty for kernel threads with no executable) |
 | `process.threads.count` | `int` | ✅ | Thread count |
 | `process.fd_count` | `int` | ✅ | Open file-descriptor count |
 | `process.memory.rss` | `int` | ✅ | Resident set size (bytes) |
@@ -92,7 +92,7 @@ events.
 | `process.group_leader.pid` | `int` | ✅ | Process group leader PID |
 | `process.group_leader.name` | `string` | ✅ | Process group leader name |
 | `process.group_leader.entity_id` | `string` | ✅ | Process group leader entity ID |
-| `process.env` | `object` | start only | Filtered env vars: LD_PRELOAD, LD_LIBRARY_PATH, PATH, HOME, SHELL, USER, SUDO_USER, SUDO_COMMAND, … |
+| `process.env` | `object` | start only | Filtered env vars: LD_PRELOAD, LD_LIBRARY_PATH, PATH, HOME, LOGNAME, SHELL, USER, SUDO_USER, SUDO_COMMAND, … |
 | `process.script.path` | `string` | ⬚ | Script path (interpreters only) |
 | `process.script.content` | `string` | ⬚ | First 4 KiB of script |
 | `process.script.length` | `int` | ⬚ | Full script file size |
@@ -114,6 +114,7 @@ ransomware / packing indicators.
 | `event.category` | `file` |
 | `event.kind` | `event` |
 | `event.type` | `file.created` · `file.modified` · `file.attrs_changed` · `file.deleted` |
+| `event.severity` | `2` (created/attrs_changed) · `2` or `3` (modified/deleted — `3` for critical paths or entropy > 7.5) |
 | `event.module` | `telemetry.file` |
 | `tags` | `["fim", "file", "telemetry"]` + `"high-entropy"`, `"potentially-packed"` when entropy > 7.5 |
 | MITRE | — |
@@ -138,11 +139,11 @@ ransomware / packing indicators.
 | `file.mtime` | `string` | ✅ | RFC 3339 modification time |
 | `file.ctime` | `string` | ✅ | RFC 3339 change time |
 | `fim.action` | `string` | ✅ | `created`, `modified`, `attributes_modified`, `deleted` |
-| `fim.previous.hash.sha256` | `string` | modified only | Previous SHA-256 |
-| `fim.previous.size` | `int` | modified only | Previous size |
-| `fim.previous.mode` | `string` | modified only | Previous mode |
-| `fim.previous.uid` | `int` | modified only | Previous UID |
-| `fim.previous.gid` | `int` | modified only | Previous GID |
+| `fim.previous.hash.sha256` | `string` | modified only | Previous SHA-256 — **omitted if hash unchanged** |
+| `fim.previous.size` | `int` | modified only | Previous size — **omitted if size unchanged** |
+| `fim.previous.mode` | `string` | modified only | Previous mode — **omitted if mode unchanged** |
+| `fim.previous.uid` | `int` | modified only | Previous UID — **omitted if uid unchanged** |
+| `fim.previous.gid` | `int` | modified only | Previous GID — **omitted if gid unchanged** |
 
 ---
 
@@ -161,7 +162,10 @@ T1552.004 — private keys).  High severity by default.
 | `event.severity` | `3` (high) |
 | `event.module` | `telemetry.file.access` |
 | `tags` | `["file", "access", "credential-access", "telemetry"]` |
-| MITRE | T1003.008, T1552.004 |
+| MITRE | T1003.008 (shadow/gshadow paths), T1552.004 (SSH paths) |
+
+The envelope `threat.technique.id` is set per accessed path: shadow/gshadow/opasswd files
+emit T1003.008; SSH key paths (`/root/.ssh`, `/etc/ssh`) emit T1552.004.
 
 ### Monitored paths (default)
 
@@ -176,7 +180,6 @@ T1552.004 — private keys).  High severity by default.
 | `file.directory` | `string` | ✅ | Parent directory |
 | `file.event.action` | `string` | ✅ | `access` |
 | `event.action` | `string` | ✅ | `file-accessed` |
-| `threat.technique.id` | `[string]` | ✅ | `["T1003.008", "T1552.004"]` |
 
 ---
 
@@ -191,6 +194,7 @@ reverse shells.  Community ID enables cross-tool correlation.
 |---|---|
 | `event.category` | `network` |
 | `event.kind` | `event` |
+| `event.severity` | `0` (informational) |
 | `event.type` | `network.connection_opened` · `network.connection_closed` |
 | `event.module` | `telemetry.network` |
 | `tags` | `["network", "telemetry"]` |
@@ -212,9 +216,9 @@ reverse shells.  Community ID enables cross-tool correlation.
 | `network.community_id` | `string` | ✅ | Community ID v1 (`1:<base64>`) |
 | `network.state` | `string` | ✅ | TCP state: ESTABLISHED, SYN_SENT, LISTEN, etc. |
 | `network.inode` | `int` | ✅ | Socket inode number |
-| `process.pid` | `int` | opened only | PID from inode resolution |
-| `process.name` | `string` | opened only | Process name |
-| `process.executable` | `string` | opened only | Executable path |
+| `process.pid` | `int` | opened; if PID resolved | PID resolved from socket inode |
+| `process.name` | `string` | opened; if PID resolved | Process name |
+| `process.executable` | `string` | opened; if PID resolved | Executable path |
 
 ---
 
@@ -229,6 +233,7 @@ DNS-based data exfiltration.  Community ID links DNS to network flows.
 |---|---|
 | `event.category` | `network` |
 | `event.kind` | `event` |
+| `event.severity` | `0` (informational) |
 | `event.type` | `dns.query` · `dns.answer` |
 | `event.module` | `telemetry.dns` |
 | `tags` | `["dns", "network", "telemetry"]` |
@@ -260,7 +265,7 @@ DNS-based data exfiltration.  Community ID links DNS to network flows.
 | `network.transport` | `string` | ✅ | `udp` |
 | `network.type` | `string` | ✅ | `ipv4` or `ipv6` |
 | `network.community_id` | `string` | ✅ | Community ID v1 |
-| `process.pid` | `int` | ⬚ | PID (best-effort, outgoing queries only) |
+| `process.pid` | `int` | ◫ | PID (best-effort): queries via socket inode; answers via pending-query correlation |
 | `process.name` | `string` | ⬚ | Process name |
 | `process.executable` | `string` | ⬚ | Executable path |
 
@@ -278,9 +283,10 @@ sudo/su, unauthorized logins, lateral movement via SSH.
 |---|---|
 | `event.category` | `authentication` |
 | `event.kind` | `event` |
+| `event.severity` | `0` (info, success events) · `2` (medium, failure events) |
 | `event.type` | `session.logged-in` · `session.logged-out` · `session.sudo` · `session.ssh-accepted` · `session.ssh-failed` · `session.su` |
 | `event.module` | `telemetry.session` |
-| `tags` | `["session", "authentication", "telemetry"]` + `"ssh"`, `"privilege"` where applicable |
+| `tags` | `["session", "authentication", "telemetry"]` + `"ssh"` on SSH events, `"privilege"` on su events |
 | MITRE | — |
 
 ### Payload fields
@@ -314,6 +320,7 @@ network I/O, disk usage.
 |---|---|
 | `event.category` | `host` |
 | `event.kind` | `metric` |
+| `event.severity` | `0` (informational) |
 | `event.type` | `system.metrics` |
 | `event.module` | `telemetry.system` |
 | `tags` | `["system", "metric"]` + `"memory"`, `"cpu"`, `"diskio"`, `"netio"`, `"disk"` |
@@ -386,11 +393,15 @@ Mount keys: `root` (/), `home` (/home), `var` (/var), `boot` (/boot).
 
 ### Per-process CPU sub-event
 
+Emitted once per collection interval for each process with CPU ≥ 0.01% (top-N by usage).
+
 | | Value |
 |---|---|
 | `event.category` | `process` |
 | `event.kind` | `metric` |
+| `event.severity` | `0` (informational) |
 | `event.type` | `process.cpu` |
+| `event.module` | `telemetry.system.cpu` |
 | `tags` | `["cpu", "process", "metric"]` |
 
 | Field path | Type | Required | Description |
@@ -415,6 +426,7 @@ fileless execution (T1055.001), malicious SOloading.
 |---|---|
 | `event.category` | `library` |
 | `event.kind` | `event` |
+| `event.severity` | `2` (medium, `library.loaded`) · `3` (high, `library.loaded_into_process` or suspicious path) |
 | `event.type` | `library.loaded` · `library.loaded_into_process` |
 | `event.module` | `telemetry.library` |
 | `tags` | `["library", "telemetry", "so-loading"]` |
@@ -484,6 +496,7 @@ to real human sessions.
 |---|---|
 | `event.category` | `process` |
 | `event.kind` | `event` |
+| `event.severity` | `0` (informational) |
 | `event.type` | `tty.session_start` · `tty.session_end` |
 | `event.module` | `telemetry.tty` |
 | `tags` | `["tty", "terminal", "session", "telemetry"]` |
@@ -534,9 +547,9 @@ timers (T1053.006) — one of the most common Linux persistence techniques.
 | `file.name` | `string` | ✅ | Base filename |
 | `xdr.scheduled_task.path` | `string` | ✅ | Task file path |
 | `xdr.scheduled_task.type` | `string` | ✅ | `cron`, `crontab`, `user-crontab`, `systemd-timer`, `systemd-unit` |
-| `xdr.scheduled_task.entries` | `[object]` | ✅ | Parsed entries (see below) |
+| `xdr.scheduled_task.entries` | `[object]\|null` | ✅ | Parsed entries; `null` when file contains only comments or variable assignments |
 | `xdr.scheduled_task.raw_content` | `string` | ✅ | Full file content (max 4096 chars) |
-| `xdr.scheduled_task.previous_content` | `string` | modified only | Previous content (max 4096) |
+| `xdr.scheduled_task.previous_content` | `string` | ✅ | Previous content (max 4096); empty string on created/deleted events |
 
 **Cron entry fields:** `line` (int), `raw` (string), `source` (string), `schedule` (string), `command` (string), `user` (string — /etc/crontab format).
 
@@ -608,7 +621,6 @@ data staging, and inter-process coordination by malware.
 | `network.type` | `string` | ✅ | `unix` |
 | `network.transport` | `string` | ✅ | `unix` |
 | `event.action` | `string` | ✅ | `unix_socket.created` |
-| `threat.technique.id` | `[string]` | ✅ | `["T1559"]` |
 
 ### 13b — Named Pipe (FIFO)
 
@@ -630,30 +642,24 @@ data staging, and inter-process coordination by malware.
 | `file.directory` | `string` | ✅ | Parent directory |
 | `file.type` | `string` | ✅ | `pipe` |
 | `event.action` | `string` | ✅ | `named_pipe.created` |
-| `threat.technique.id` | `[string]` | ✅ | `["T1559"]` |
 
 ---
 
 ## Known Issues and Notes
 
-1. **IPC duplicate `event.*` in payload (fixed v0.3.2):** The IPC collector
-   previously nested `event.category`, `event.type`, and `threat.technique.id`
-   inside `payload` in addition to the top-level envelope fields.  These
-   payload-level duplicates have been removed to match the other 12 collectors.
-
-2. **Kernel module name duplication:** `driver.name` and
+1. **Kernel module name duplication:** `driver.name` and
    `xdr.kernel_module.name` carry the same value.  This is intentional — ECS
    uses `driver.name`, while the `xdr.*` namespace groups extended module
    metadata.
 
-3. **Scheduled task `file.path` duplication:** Both `file.path` and
+2. **Scheduled task `file.path` duplication:** Both `file.path` and
    `xdr.scheduled_task.path` hold the same value.  `file.path` provides ECS
    compatibility; `xdr.scheduled_task.path` groups task-specific data.
 
-4. **`source.user.id` type in network collector:** Emitted as a `string`
+3. **`source.user.id` type in network collector:** Emitted as a `string`
    (not `int`).  This follows ECS `source.user.id` spec (ECS defines user.id
    as keyword/string).
 
 ---
 
-*Generated: 2026-03-03 — xdr-agent v0.3.1*
+*Generated: 2026-03-03 — xdr-agent v0.3.1 — Audited & corrected 2026-03-03*

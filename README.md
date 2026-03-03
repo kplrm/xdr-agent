@@ -246,6 +246,7 @@ sudo systemctl stop xdr-agent.service
 make clean; make deb
 sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
 sudo systemctl start xdr-agent.service
+sudo journalctl -u xdr-agent -f
 ```
 
 ## Telemetry verification test
@@ -279,6 +280,78 @@ Expected output on success:
 
 The test is safe — it does not push data to OpenSearch, and all files created
 during the test are automatically deleted on exit (including on failure or Ctrl+C).
+
+### Inspecting captured events
+
+After a `KEEP_LOGS=1` run, the captured events are saved in a root-owned file
+inside a temporary directory (printed at the end of the test, e.g.
+`/tmp/xdr-telemetry-test.XXXXX/captured_events.json`).
+
+Use `test/show_samples.py` to print up to 4 representative events per
+collector, with full envelope and payload fields, one field per line:
+
+```bash
+# 1. Copy to a readable location (captured file is owned by root)
+sudo cp /tmp/xdr-telemetry-test.XXXXX/captured_events.json /tmp/events.json
+sudo chmod 644 /tmp/events.json
+
+# 2. Print samples (no sudo needed)
+python3 test/show_samples.py /tmp/events.json
+```
+
+Or if you run the script as root it can read the captured file directly:
+
+```bash
+sudo python3 test/show_samples.py /tmp/xdr-telemetry-test.XXXXX/captured_events.json
+```
+
+The script will print, for each of the 13 collectors:
+
+- A header line with the collector name and total event count
+- Up to 4 events chosen to maximise diversity (different `event.type` first,
+  then events whose non-numeric field values differ from those already shown)
+- For each event:
+  - **Envelope** — `@timestamp`, `event.type`, `event.category`, `event.kind`,
+    `event.severity` (with label), `event.module`, `agent.id`, `host.hostname`,
+    `threat.tactic.name`, `threat.technique.id`, `tags`
+  - **Payload** — all remaining fields, fully expanded to dot-notation, sorted
+    alphabetically, one `field = value` per line
+
+Example output (collector 06 — Session):
+
+```
+────────────────────────────────────────────────────────────────────────
+  Collector 06  Session  (2 events)
+────────────────────────────────────────────────────────────────────────
+  types: session.sudo×1  session.ssh-failed×1
+
+  ┌─ event 1/2 ──────────────────────────────────────────────────────────
+  │  session.sudo  [INFO]  2026-03-03 21:04:32.852
+  │
+  │  ─ envelope ─
+  │  @timestamp        = 2026-03-03T21:04:32.852992647Z
+  │  event.type        = session.sudo
+  │  event.category    = authentication
+  │  event.kind        = event
+  │  event.severity    = 0  (INFO)
+  │  event.module      = telemetry.session
+  │  agent.id          = 7b39ddd4b4a8fa9b5745e96a0841c5a2
+  │  host.hostname     = laptop
+  │  tags              = ["session","authentication","telemetry"]
+  │
+  │  ─ payload ─
+  │  event.action      = sudo
+  │  event.outcome     = success
+  │  process.command_line = /usr/bin/true
+  │  related.user      = ["root","nobody"]
+  │  session.type      = tty
+  │  user.effective.name = nobody
+  │  user.name         = root
+  └────────────────────────────────────────────────────────────────────
+```
+
+Collectors with no events captured (e.g. FIM when no files changed, kernel
+modules when no module was loaded) are shown with `✗ No events captured`.
 
 ## Architecture
 

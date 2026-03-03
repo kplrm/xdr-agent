@@ -16,7 +16,9 @@
 //   - event.action: "file-accessed"        — top-level action
 //   - event.category: "file"
 //   - event.kind: "event"
-//   - threat.technique.id: ["T1003.008","T1552.004"]
+//
+// Envelope MITRE technique (threat.technique.id) is set per-path:
+//   shadow/gshadow/opasswd → T1003.008, SSH paths → T1552.004
 package file
 
 import (
@@ -281,6 +283,9 @@ func (a *FileAccessCollector) handleAccessEvent(wd int32, mask uint32, name stri
 }
 
 // emitAccessEvent emits an ECS-compatible file access event.
+// The envelope MITRE technique is set based on the accessed path:
+//   - /etc/shadow, /etc/gshadow, /etc/security/opasswd → T1003.008 (OS Credential Dumping: /etc/passwd and /etc/shadow)
+//   - SSH paths (/root/.ssh, /etc/ssh) → T1552.004 (Unsecured Credentials: Private Keys)
 func (a *FileAccessCollector) emitAccessEvent(path string) {
 	filePayload := map[string]interface{}{
 		"path":      path,
@@ -289,6 +294,12 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 		"event": map[string]interface{}{
 			"action": "access",
 		},
+	}
+
+	// Assign the most specific MITRE technique based on the accessed path.
+	technique := "T1003.008"
+	if strings.Contains(path, ".ssh") || strings.Contains(path, "/etc/ssh") {
+		technique = "T1552.004"
 	}
 
 	ev := events.Event{
@@ -302,16 +313,11 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 		AgentID:       a.agentID,
 		Hostname:      a.hostname,
 		MitreTactic:   "Credential Access",
-		MitreTechique: "T1003.008",
+		MitreTechique: technique,
 		Payload: map[string]interface{}{
 			"file": filePayload,
 			"event": map[string]interface{}{
 				"action": "file-accessed",
-			},
-			"threat": map[string]interface{}{
-				"technique": map[string]interface{}{
-					"id": []string{"T1003.008", "T1552.004"},
-				},
 			},
 		},
 		Tags: []string{"file", "access", "credential-access", "telemetry"},

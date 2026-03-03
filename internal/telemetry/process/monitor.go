@@ -222,9 +222,47 @@ func (p *ProcessCollector) scan() {
 	p.health = capability.HealthRunning
 	p.mu.Unlock()
 
+	// Carry forward immutable enrichment fields (Username, GroupName, ExeSHA256)
+	// for processes that were already known. Each scan replaces p.known with a
+	// fresh /proc snapshot, which does not re-run the expensive enrichment pass
+	// (enrichNewProcess). Without this step the enriched values are lost after
+	// the first scan cycle and process.end events emit empty strings.
+	for pid, info := range snapshot {
+		if prev, ok := prevKnown[pid]; ok {
+			changed := false
+			if info.Username == "" && prev.Username != "" {
+				info.Username = prev.Username
+				changed = true
+			}
+			if info.GroupName == "" && prev.GroupName != "" {
+				info.GroupName = prev.GroupName
+				changed = true
+			}
+			if info.ExeSHA256 == "" && prev.ExeSHA256 != "" {
+				info.ExeSHA256 = prev.ExeSHA256
+				changed = true
+			}
+			if changed {
+				snapshot[pid] = info
+			}
+		}
+	}
+
 	if !wasBaseline {
 		// First scan: establish baseline without emitting events for every
 		// existing process (that would flood the pipeline on agent start).
+		// Enrich username/groupname for all baseline processes so their eventual
+		// process.end events carry complete user/group data.
+		// (Hash computation is intentionally skipped here for all ~N processes
+		// to avoid a blocking SHA-256 pass across all executables at startup.)
+		for pid, info := range snapshot {
+			info.Username = p.uids.lookup(info.UID)
+			info.GroupName = p.gids.lookup(info.GID)
+			snapshot[pid] = info
+		}
+		p.mu.Lock()
+		p.known = snapshot // overwrite with enriched version
+		p.mu.Unlock()
 		log.Printf("process collector: baseline established with %d processes", len(snapshot))
 		// Seed CPU tracking state so the next scan has a delta to compare against.
 		seedCPU := make(map[int][2]uint64, len(snapshot))
@@ -280,6 +318,13 @@ func (p *ProcessCollector) scan() {
 		if _, existed := prevKnown[pid]; !existed {
 			enrichNewProcess(&info, p.uids, p.gids)
 			p.emitEvent("process.start", info, 0)
+			// Write the enriched info (Username, GroupName, ExeSHA256) back into
+			// p.known so that the subsequent process.end event inherits these values.
+			// Without this, process.end would use the un-enriched snapshot copy and
+			// emit empty strings for user.name, group.name, and hash.sha256.
+			p.mu.Lock()
+			p.known[pid] = info
+			p.mu.Unlock()
 		}
 	}
 
