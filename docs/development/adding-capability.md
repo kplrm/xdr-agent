@@ -63,14 +63,17 @@ func (m *MyCapability) Health() capability.HealthStatus {
 
 ## Step 3: Register in the agent
 
-Add your capability factory to `internal/agent/registry.go`:
+Add your capability to the wiring section in `internal/service/run.go`:
 
 ```go
-func DefaultCapabilities() []CapabilityFactory {
-    return []CapabilityFactory{
-        // ...existing capabilities...
-        mycapability.New,
-    }
+// Inside the Run() function, after the existing collectors:
+myCollector := mycapability.New(pipeline, state.AgentID, state.Hostname)
+if err := myCollector.Init(capability.Dependencies{}); err != nil {
+    log.Printf("mycapability init failed: %v", err)
+} else if err := myCollector.Start(ctx); err != nil {
+    log.Printf("mycapability start failed: %v", err)
+} else {
+    log.Printf("capability started: %s", myCollector.Name())
 }
 ```
 

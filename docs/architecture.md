@@ -3,8 +3,11 @@
 ## Overview
 
 The XDR Agent is a lightweight, modular endpoint security agent written in Go.
-It provides comprehensive threat detection, prevention, and response capabilities
-for Linux endpoints.
+It provides comprehensive telemetry collection for Linux endpoints, with a
+capability-based architecture designed for detection, prevention, and response
+phases to follow.
+
+**Current version:** 0.3.1 — Full endpoint telemetry (Phase 2 complete).
 
 ## Architecture Diagram
 
@@ -13,43 +16,44 @@ for Linux endpoints.
 │                           XDR Agent Process                                  │
 │                                                                              │
 │  ┌────────────┐    ┌───────────────────────────────────────────────────┐    │
-│  │  CLI / CMD  │───▶│              Agent Orchestrator                   │    │
-│  └────────────┘    │  (lifecycle, capability registry, health)          │    │
+│  │  CLI / CMD  │───▶│              Service Orchestrator                  │    │
+│  └────────────┘    │  (enrollment, heartbeat, capability wiring)         │    │
 │                    └──────────────────┬────────────────────────────────┘    │
 │                                       │                                      │
 │  ┌────────────────────────────────────┼────────────────────────────────┐    │
-│  │                        Capability Layer                              │    │
+│  │                     Telemetry Capabilities (13 active)               │    │
 │  │                                                                      │    │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ │    │
-│  │  │Telemetry │ │Detection │ │Prevention│ │ Response │ │Compliance│ │    │
-│  │  │          │ │          │ │          │ │          │ │          │ │    │
-│  │  │• Process │ │• Malware │ │• Blocker │ │• Isolate │ │• CIS     │ │    │
-│  │  │• File    │ │• Behavior│ │• R-ware  │ │• Kill    │ │• SCA     │ │    │
-│  │  │• Network │ │• Memory  │ │• Exploit │ │• Shell   │ │• Harden  │ │    │
-│  │  │• Session │ │• ThreatI │ │• Allow   │ │• Playbook│ │• Vuln    │ │    │
-│  │  │• Kernel  │ │          │ │          │ │          │ │          │ │    │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ │    │
-│  └───────┼────────────┼────────────┼────────────┼────────────┼────────┘    │
-│          │            │            │            │            │              │
-│  ┌───────▼────────────▼────────────▼────────────▼────────────▼────────┐    │
+│  │  │ Process  │ │   FIM    │ │ Network  │ │   DNS    │ │ Session  │ │    │
+│  │  │ monitor  │ │ inotify  │ │  conns   │ │AF_PACKET │ │utmp+auth │ │    │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ │    │
+│  │  │  System  │ │ Library  │ │  Kernel  │ │   TTY    │ │Scheduled │ │    │
+│  │  │ metrics  │ │ SO load  │ │ modules  │ │ sessions │ │cron/timer│ │    │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐                           │    │
+│  │  │Injection │ │  File    │ │   IPC    │   + env vars, script      │    │
+│  │  │ ptrace   │ │  access  │ │ sockets  │   capture, entropy        │    │
+│  │  └──────────┘ └──────────┘ └──────────┘   (integrated)            │    │
+│  └───────┬────────────────────────────────────────────────────────────┘    │
+│          │                                                                  │
+│  ┌───────▼────────────────────────────────────────────────────────────┐    │
 │  │                       Event Pipeline                                │    │
-│  │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────────┐  │    │
-│  │  │  Emit    │─▶│ Enrichment│─▶│  Filter  │─▶│  Buffer / Ship   │  │    │
-│  │  └──────────┘  └───────────┘  └──────────┘  └────────┬─────────┘  │    │
-│  └───────────────────────────────────────────────────────┼────────────┘    │
-│                                                           │                  │
-│  ┌───────────────────────────────────────────────────────▼────────────┐    │
+│  │  ┌──────────┐  ┌───────────┐  ┌──────────────────────────────┐    │    │
+│  │  │  Emit    │─▶│ Enrichment│─▶│  Subscribe → Shipper queue   │    │    │
+│  │  └──────────┘  └───────────┘  └──────────────┬───────────────┘    │    │
+│  └──────────────────────────────────────────────┼────────────────────┘    │
+│                                                  │                          │
+│  ┌──────────────────────────────────────────────▼────────────────────┐    │
 │  │                    Control Plane Client                             │    │
-│  │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────────┐  │    │
-│  │  │  Enroll  │  │ Heartbeat │  │  Policy  │  │  Event Shipper   │  │    │
-│  │  └──────────┘  └───────────┘  └──────────┘  └──────────────────┘  │    │
+│  │  ┌──────────┐  ┌───────────┐  ┌──────────────────────────────┐    │    │
+│  │  │  Enroll  │  │ Heartbeat │  │  Shipper (batch+gzip+retry)  │    │    │
+│  │  └──────────┘  └───────────┘  └──────────────────────────────┘    │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │                    Platform Abstraction                             │    │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐ │    │
-│  │  │  procfs  │ │ fanotify │ │  netlink │ │   eBPF   │ │ seccomp │ │    │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └─────────┘ │    │
+│  │  Future: Detection │ Prevention │ Response │ Compliance │ Cloud    │    │
+│  │          (Phase 3)   (Phase 4)   (Phase 5)   (Phase 6)  (Phase 5) │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -62,13 +66,35 @@ for Linux endpoints.
 
 ## Data Flow
 
-1. **Platform layer** collects raw OS events (process exec, file write, network connect)
-2. **Telemetry capabilities** structure raw events into ECS-compatible format
-3. **Detection engines** analyze telemetry events against rules and produce alerts
-4. **Prevention modules** block threats in real-time (fanotify deny, process kill)
-5. **Event pipeline** enriches, filters, and buffers all events
-6. **Control plane client** ships events/alerts to the XDR backend
-7. **Response manager** receives and executes commands from the control plane
+1. **Telemetry collectors** gather OS events via Linux APIs (procfs, inotify, AF_PACKET, /proc/modules, utmp, etc.)
+2. **Events** are structured into ECS-compatible format and emitted into the pipeline
+3. **Event pipeline** distributes events to subscribers (currently: the shipper)
+4. **Shipper** batches events, compresses with gzip, and ships to the control plane with retry
+5. **Control plane** (OpenSearch + OSD xdr-manager plugin) stores and visualizes events
+
+## Active Telemetry Collectors
+
+All 13 collectors implement the `Capability` interface and are wired in `internal/service/run.go`.
+
+| Collector | Package | Data Source | Key Events |
+|---|---|---|---|
+| **Process** | `telemetry/process/` | `/proc` polling | `process.start`, `process.end` with 30+ fields, ancestry, env vars, script content |
+| **FIM** | `telemetry/file/fim.go` | inotify + BoltDB baseline | `file.created`, `file.modified`, `file.deleted` with SHA-256, entropy, header bytes |
+| **File Access** | `telemetry/file/access.go` | inotify `IN_ACCESS\|IN_OPEN` | Credential harvesting detection on `/etc/shadow`, SSH keys |
+| **Network** | `telemetry/network/connections.go` | `/proc/net/{tcp,udp}` polling | `network.open`, `network.close` with Community ID, PID, direction |
+| **DNS** | `telemetry/network/dns.go` | AF_PACKET raw socket | DNS query/response with PID enrichment, transaction correlation |
+| **Session** | `telemetry/session/` | utmp binary + auth log tail | Login/logoff, SSH, sudo, su events |
+| **System Metrics** | `telemetry/system/` | `/proc/meminfo`, `/proc/stat`, `/proc/diskstats`, `/proc/net/dev` | Combined CPU, memory, disk I/O, network I/O per interval |
+| **Library Loading** | `telemetry/library/` | inotify on lib dirs + `/proc/[pid]/maps` | SO file loads with SHA-256, LD_PRELOAD detection |
+| **Kernel Modules** | `telemetry/kernel/modules.go` | `/proc/modules` polling | Module load/unload (rootkit detection) |
+| **TTY Sessions** | `telemetry/tty/` | `/proc` PTY scanning | Terminal session start/end detection |
+| **Scheduled Tasks** | `telemetry/scheduled/` | inotify on cron dirs + systemd timers | Cron/timer created, modified, deleted |
+| **Injection** | `telemetry/injection/` | `/proc/[pid]/status` + `/proc/[pid]/maps` | ptrace attach, anonymous executable memory regions |
+| **IPC** | `telemetry/ipc/` | `/proc/net/unix` + inotify | Unix domain sockets, named pipe (FIFO) creation |
+
+**Integrated into Process collector** (no separate capability):
+- Environment variable capture (`envvars.go`) — `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, etc.
+- Script content capture (`script.go` + `telemetry/script/capture.go`) — first 4096 bytes of interpreter scripts
 
 ## Capability Interface
 
@@ -84,131 +110,44 @@ type Capability interface {
 }
 ```
 
+## Core Infrastructure
+
+| Package | Purpose |
+|---|---|
+| `cmd/xdr-agent/` | CLI entry point: `run`, `enroll`, `remove`, `version`, `completion` |
+| `internal/service/` | Main orchestrator — loads config, enrolls, starts heartbeat, wires all telemetry collectors |
+| `internal/config/` | JSON configuration loader with defaults |
+| `internal/identity/` | Agent identity persistence (agent_id, machine_id, hostname, IPs) |
+| `internal/enroll/` | Control plane enrollment and heartbeat HTTP client |
+| `internal/controlplane/` | HTTP client wrapper + telemetry shipper (batch, gzip, retry) |
+| `internal/events/` | Event pipeline (buffered channel, pub/sub), Event struct, Alert struct, enrichment chain |
+| `internal/capability/` | Capability interface and HealthStatus enum |
+| `internal/buildinfo/` | Build version injection via `-ldflags` |
+| `internal/platform/common/` | File hashing utilities (SHA-256, MD5) |
+
 ## Key Design Decisions
 
 | Decision | Rationale |
 |---|---|
-| Go language | Low overhead, single binary, strong stdlib, go cross-compilation |
+| Go language | Low overhead, single binary, strong stdlib, cross-compilation |
 | Capability pattern | Modular, independently testable, policy-controlled |
-| ECS-compatible events | Interoperable with Elastic ecosystem, standard field naming |
-| eBPF preferred | Lowest overhead kernel telemetry, safe (verified programs) |
-| YARA for signatures | Industry standard, huge existing rule collection |
-| SIGMA for behaviors | Industry standard, 3000+ community rules |
-| fanotify for blocking | Kernel-level file access control, no filesystem driver needed |
+| ECS-compatible events | Interoperable with Elastic/OpenSearch ecosystem, standard field naming |
+| Direct syscall usage | Telemetry collectors use `syscall` directly for inotify, AF_PACKET, etc. — no abstraction overhead |
+| BoltDB for FIM baseline | Embedded, zero-config, crash-safe key-value store |
+| Community ID v1 | Standard network flow identifier for cross-tool correlation |
 
----
+## Scaffolded for Future Phases
 
-## Industry Telemetry Comparison
+The following packages contain architectural stubs ready for implementation:
 
-> **Last updated:** 2026-03-02
-
-This section tracks what the leading EDR/XDR solutions collect at the endpoint
-and compares it with our current telemetry coverage so we can prioritize gaps.
-
-### Competitive Telemetry Matrix
-
-| Telemetry Category | Elastic Defend | CrowdStrike Falcon | MS Defender for Endpoint | SentinelOne Singularity | **xdr-agent** |
-|---|---|---|---|---|---|
-| **Process lifecycle** (create/exec/exit) | ✅ kernel + eBPF/kprobe/Quark | ✅ kernel sensor | ✅ kernel driver | ✅ kernel agent | ✅ /proc polling |
-| **Process tree / ancestry** | ✅ (configurable depth) | ✅ full tree | ✅ | ✅ | ✅ up to 10 ancestors |
-| **Process hashing** (SHA-256/SHA-1/MD5) | ✅ all three (configurable) | ✅ | ✅ | ✅ | ✅ SHA-256 only |
-| **Command-line capture** | ✅ (adv. setting for all events) | ✅ | ✅ | ✅ | ✅ |
-| **Environment variable capture** | ✅ (up to 5 vars, Linux/macOS) | ✅ select vars | ✅ | ✅ | ❌ **GAP** |
-| **File integrity (create/modify/delete)** | ✅ fanotify + kernel | ✅ kernel | ✅ kernel driver | ✅ kernel agent | ✅ inotify + rescan |
-| **File access (read) events** | ✅ (configurable paths) | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **File hashing on events** | ✅ SHA-256 (async, configurable) | ✅ | ✅ | ✅ | ✅ SHA-256 on FIM |
-| **File entropy / header bytes** | ✅ (Linux 9.3+, macOS) | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **File origin (download source)** | ✅ Mark of the Web (Win) | ✅ | ✅ | partial | N/A (Linux focus) |
-| **Network connections** (TCP/UDP) | ✅ kernel events | ✅ kernel | ✅ kernel driver | ✅ | ✅ /proc/net polling |
-| **DNS monitoring** | ✅ integrated | ✅ | ✅ | ✅ | ✅ AF_PACKET |
-| **Network deduplication** | ✅ (8.15+, configurable) | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **Library / shared object loading** | ✅ image_load events (DLL/SO) | ✅ drivers + DLLs | ✅ DLL loads | ✅ | ❌ **GAP — CRITICAL** |
-| **Kernel module load/unload** | ✅ | ✅ driver loading | ✅ | ✅ | ❌ **GAP — CRITICAL** |
-| **User login / session tracking** | ✅ | ✅ all login types | ✅ user login activities | ✅ | ✅ utmp + auth log |
-| **TTY / terminal I/O capture** | ✅ (Linux, configurable) | ✅ | partial | partial | ❌ **GAP** |
-| **Registry monitoring** | ✅ (Windows) | ✅ | ✅ | ✅ | N/A (Linux only) |
-| **Memory threat scanning** | ✅ YARA + shellcode detection | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **Script content capture** | ✅ (macOS 9.3+) | ✅ | ✅ (AMSI) | ✅ | ❌ **GAP** |
-| **API / syscall monitoring** | ✅ ETW (Windows), eBPF (Linux) | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **ptrace / process injection** | ✅ behavioral rules | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **Scheduled task / persistence** | ✅ behavioral detection | ✅ | ✅ | ✅ | ❌ **GAP** (stub only) |
-| **Auditd / audit log forwarding** | ✅ via Elastic Agent | ✅ | ✅ | ✅ | ❌ **GAP** (stub only) |
-| **Container runtime events** | ✅ (cloud security) | ✅ Falcon Cloud | ✅ | ✅ | ❌ **GAP** (ID only) |
-| **USB / removable media** | ✅ device control (9.2+) | ✅ device control | ✅ | partial | ❌ **GAP** |
-| **Archive file operations** | partial | ✅ RAR/ZIP creation tracking | partial | partial | ❌ **GAP** |
-| **Callstack collection** | ✅ (process/file/net/registry) | ✅ | ✅ | ✅ | ❌ **GAP** |
-| **Named pipe / IPC** | ✅ | ✅ | ✅ | partial | ❌ **GAP** |
-| **System metrics** (CPU/mem/disk) | ✅ Elastic Agent metrics | partial | partial | partial | ✅ full |
-| **eBPF-based collection** | ✅ (auto kprobe/eBPF/Quark) | ✅ | N/A (Windows) | ✅ | ❌ **GAP** (planned Phase 7) |
-
-### Gap Priority Classification
-
-**CRITICAL — Must-have for competitive parity (Phase 2b):**
-
-1. **Shared library / SO loading monitoring** — Detects `LD_PRELOAD` injection, `dlopen()` hijacking (T1574.006, T1055.001)
-2. **Kernel module load/unload detection** — Detects rootkits, LKM-based persistence (T1547.006, T1014)
-3. **TTY / terminal I/O capture** — Forensic session recording for incident reconstruction
-4. **Scheduled task / cron monitoring** — Detects persistence via cron/at/systemd timers (T1053.003)
-5. **ptrace / process injection monitoring** — Detects `ptrace`, `process_vm_writev`, `memfd_create` injection (T1055)
-
-**HIGH — Significant security value (Phase 2c):**
-
-6. **Environment variable capture** — Detects `LD_PRELOAD`, `LD_LIBRARY_PATH` manipulation (T1574.006)
-7. **Script content capture** — Records shell/Python/Perl script bodies for forensic analysis
-8. **File access (read) events on sensitive paths** — Detects credential access to `/etc/shadow`, SSH keys (T1003.008)
-9. **Named pipe / Unix socket IPC monitoring** — Detects C2 channels via IPC (T1559)
-10. **File entropy and header bytes** — Enables encrypted/packed file detection without full YARA scan
-
-**MEDIUM — Enhances depth (Phase 2d):**
-
-11. **Network event deduplication** — Reduces noise, improves storage efficiency
-12. **USB / removable media monitoring** — Detects data exfiltration via USB (T1052.001)
-13. **Archive file operation tracking** — Detects staging for exfiltration (T1560)
-14. **Auditd / Linux audit integration** — Comprehensive syscall audit trail
-15. **Container runtime event monitoring** — Detects container escape, drift, exec-into (T1610, T1611)
-
----
-
-## Telemetry Data Flow (Expanded)
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              PLATFORM LAYER                                      │
-│                                                                                  │
-│  ┌───────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐ ┌──────────┐ │
-│  │  procfs   │ │ inotify  │ │AF_PACKET │ │  utmp +  │ │kprobes/│ │proc_conn │ │
-│  │  polling  │ │ watches  │ │  socket  │ │auth tail │ │  eBPF  │ │ netlink  │ │
-│  └─────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘ └────┬─────┘ │
-│        │             │            │             │            │           │        │
-│  ┌─────▼─────────────▼────────────▼─────────────▼────────────▼───────────▼──┐    │
-│  │                    TELEMETRY CAPABILITY LAYER                             │    │
-│  │                                                                           │    │
-│  │  ┌─────────┐ ┌──────┐ ┌─────────┐ ┌──────┐ ┌──────────┐ ┌───────────┐  │    │
-│  │  │ Process │ │ FIM  │ │ Network │ │ DNS  │ │ Session  │ │  System   │  │    │
-│  │  │         │ │      │ │  Conn   │ │      │ │  /Auth   │ │  Metrics  │  │    │
-│  │  └────┬────┘ └──┬───┘ └────┬────┘ └──┬───┘ └────┬─────┘ └─────┬─────┘  │    │
-│  │       │         │          │         │           │              │         │    │
-│  │  ┌────▼─────────▼──────────▼─────────▼───────────▼──────────────▼──┐     │    │
-│  │  │                  NEW TELEMETRY (Phase 2b/2c/2d)                  │     │    │
-│  │  │                                                                  │     │    │
-│  │  │ ┌─────────┐ ┌──────────┐ ┌───────┐ ┌─────────┐ ┌────────────┐ │     │    │
-│  │  │ │ SO/Lib  │ │  Kernel  │ │  TTY  │ │Scheduled│ │  ptrace /  │ │     │    │
-│  │  │ │ Loading │ │  Module  │ │  I/O  │ │  Tasks  │ │ Injection  │ │     │    │
-│  │  │ └─────────┘ └──────────┘ └───────┘ └─────────┘ └────────────┘ │     │    │
-│  │  │ ┌─────────┐ ┌──────────┐ ┌───────┐ ┌─────────┐ ┌────────────┐ │     │    │
-│  │  │ │Env Vars │ │ Script   │ │File   │ │  IPC /  │ │ Entropy /  │ │     │    │
-│  │  │ │ Capture │ │ Capture  │ │Access │ │  Pipe   │ │  Headers   │ │     │    │
-│  │  │ └─────────┘ └──────────┘ └───────┘ └─────────┘ └────────────┘ │     │    │
-│  │  └──────────────────────────────────────────────────────────────────┘     │    │
-│  └──────────────────────────────┬────────────────────────────────────────────┘    │
-│                                  │ ECS events                                     │
-│  ┌───────────────────────────────▼──────────────────────────────────────────┐     │
-│  │                         EVENT PIPELINE                                    │     │
-│  │  Emit → Enrich (host, geo, threat) → Filter → Buffer (disk) → Ship       │     │
-│  └───────────────────────────────┬──────────────────────────────────────────┘     │
-│                                  │                                                │
-│  ┌───────────────────────────────▼──────────────────────────────────────────┐     │
-│  │                    CONTROL PLANE CLIENT → OpenSearch                      │     │
-│  └──────────────────────────────────────────────────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+| Domain | Packages | Target Phase |
+|---|---|---|
+| Detection | `internal/detection/` (malware, behavioral, memory, threatintel) | Phase 3 |
+| Prevention | `internal/prevention/` (malware, ransomware, exploit, allowlist) | Phase 4 |
+| Response | `internal/response/` (isolate, kill, remediate, shell, firewall, playbook) | Phase 5 |
+| Cloud | `internal/cloud/` (container runtime, drift, K8s audit, metadata) | Phase 5 |
+| Compliance | `internal/compliance/` (CIS, SCA, hardening, inventory, audit trail) | Phase 6 |
+| Vulnerability | `internal/vulnerability/` (CVE, packages, patches, ports) | Phase 6 |
+| Rules | `rules/` (behavioral YAML, malware hashes, YARA, compliance) | Phase 3+ |
+| Public API | `pkg/eventschema/`, `pkg/ruleformat/` | Phase 3+ |
+| Platform | `internal/platform/linux/` (eBPF, fanotify, seccomp, cgroups) | Phase 4–7 |
