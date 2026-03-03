@@ -48,16 +48,16 @@ var defaultSensitiveAccessPaths = []string{
 // FileAccessCollector watches sensitive files and directories for read-access
 // events via inotify IN_ACCESS | IN_OPEN.  It implements capability.Capability.
 type FileAccessCollector struct {
-	pipeline     *events.Pipeline
-	agentID      string
-	hostname     string
-	watchPaths   []string
-	inotifyFd    int
-	inotifyMu    sync.Mutex
-	wdToPath     map[int32]string
-	mu           sync.Mutex
-	health       capability.HealthStatus
-	cancel       context.CancelFunc
+	pipeline   *events.Pipeline
+	agentID    string
+	hostname   string
+	watchPaths []string
+	inotifyFd  int
+	inotifyMu  sync.Mutex
+	wdToPath   map[int32]string
+	mu         sync.Mutex
+	health     capability.HealthStatus
+	cancel     context.CancelFunc
 }
 
 // NewFileAccessCollector creates a FileAccessCollector.
@@ -292,15 +292,17 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 	}
 
 	ev := events.Event{
-		ID:        fmt.Sprintf("faccess-%d", time.Now().UnixNano()),
-		Timestamp: time.Now().UTC(),
-		Type:      "file.access",
-		Category:  "file",
-		Kind:      "event",
-		Severity:  events.SeverityHigh,
-		Module:    "telemetry.file.access",
-		AgentID:   a.agentID,
-		Hostname:  a.hostname,
+		ID:            fmt.Sprintf("faccess-%d", time.Now().UnixNano()),
+		Timestamp:     time.Now().UTC(),
+		Type:          "file.access",
+		Category:      "file",
+		Kind:          "event",
+		Severity:      events.SeverityHigh,
+		Module:        "telemetry.file.access",
+		AgentID:       a.agentID,
+		Hostname:      a.hostname,
+		MitreTactic:   "Credential Access",
+		MitreTechique: "T1003.008",
 		Payload: map[string]interface{}{
 			"file": filePayload,
 			"event": map[string]interface{}{

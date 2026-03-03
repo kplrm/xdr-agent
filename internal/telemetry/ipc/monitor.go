@@ -227,15 +227,16 @@ func readUnixSockets() []string {
 
 func (c *IPCCollector) emitUnixSocketEvent(socketPath string) {
 	ev := events.Event{
-		ID:        fmt.Sprintf("ipc-sock-%d", time.Now().UnixNano()),
-		Timestamp: time.Now().UTC(),
-		Type:      "ipc.unix_socket.created",
-		Category:  "network",
-		Kind:      "event",
-		Severity:  events.SeverityInfo,
-		Module:    "telemetry.ipc",
-		AgentID:   c.agentID,
-		Hostname:  c.hostname,
+		ID:            fmt.Sprintf("ipc-sock-%d", time.Now().UnixNano()),
+		Timestamp:     time.Now().UTC(),
+		Type:          "ipc.unix_socket.created",
+		Category:      "network",
+		Kind:          "event",
+		Severity:      events.SeverityInfo,
+		Module:        "telemetry.ipc",
+		AgentID:       c.agentID,
+		Hostname:      c.hostname,
+		MitreTechique: "T1559",
 		Payload: map[string]interface{}{
 			"network": map[string]interface{}{
 				"unix_socket": map[string]interface{}{
@@ -245,14 +246,7 @@ func (c *IPCCollector) emitUnixSocketEvent(socketPath string) {
 				"transport": "unix",
 			},
 			"event": map[string]interface{}{
-				"action":   "unix_socket.created",
-				"category": []string{"network"},
-				"type":     []string{"connection", "start"},
-			},
-			"threat": map[string]interface{}{
-				"technique": map[string]interface{}{
-					"id": []string{"T1559"},
-				},
+				"action": "unix_socket.created",
 			},
 		},
 		Tags: []string{"ipc", "unix-socket", "network", "telemetry"},
@@ -374,15 +368,16 @@ func (c *IPCCollector) handleCreate(wd int32, name string) {
 
 func (c *IPCCollector) emitPipeEvent(pipePath string) {
 	ev := events.Event{
-		ID:        fmt.Sprintf("ipc-pipe-%d", time.Now().UnixNano()),
-		Timestamp: time.Now().UTC(),
-		Type:      "ipc.pipe.created",
-		Category:  "file",
-		Kind:      "event",
-		Severity:  events.SeverityMedium,
-		Module:    "telemetry.ipc",
-		AgentID:   c.agentID,
-		Hostname:  c.hostname,
+		ID:            fmt.Sprintf("ipc-pipe-%d", time.Now().UnixNano()),
+		Timestamp:     time.Now().UTC(),
+		Type:          "ipc.pipe.created",
+		Category:      "file",
+		Kind:          "event",
+		Severity:      events.SeverityMedium,
+		Module:        "telemetry.ipc",
+		AgentID:       c.agentID,
+		Hostname:      c.hostname,
+		MitreTechique: "T1559",
 		Payload: map[string]interface{}{
 			"process": map[string]interface{}{
 				"io": map[string]interface{}{
@@ -396,14 +391,7 @@ func (c *IPCCollector) emitPipeEvent(pipePath string) {
 				"type":      "pipe",
 			},
 			"event": map[string]interface{}{
-				"action":   "named_pipe.created",
-				"category": []string{"file"},
-				"type":     []string{"creation"},
-			},
-			"threat": map[string]interface{}{
-				"technique": map[string]interface{}{
-					"id": []string{"T1559"},
-				},
+				"action": "named_pipe.created",
 			},
 		},
 		Tags: []string{"ipc", "named-pipe", "file", "telemetry"},

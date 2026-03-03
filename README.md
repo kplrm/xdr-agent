@@ -248,6 +248,38 @@ sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
 sudo systemctl start xdr-agent.service
 ```
 
+## Telemetry verification test
+
+Verifies that all 13 telemetry collectors are actively collecting and shipping
+events. The test works by:
+
+1. Starting a local HTTP listener on a temporary port
+2. Reconfiguring the agent to ship telemetry to the listener (instead of OpenSearch)
+3. Generating real OS events that each collector should detect (files, processes, network connections, cron entries, pipes, etc.)
+4. Analyzing the captured events for coverage across all 13 collectors
+5. Restoring the original config and cleaning up all generated artifacts
+
+**Requirements:** The agent must be enrolled and running. Requires `sudo`.
+
+```bash
+sudo bash test/telemetry_verify.sh
+```
+
+To keep the captured events for inspection after the test:
+
+```bash
+sudo KEEP_LOGS=1 bash test/telemetry_verify.sh
+```
+
+Expected output on success:
+
+```
+  ALL 13/13 COLLECTORS VERIFIED ✓
+```
+
+The test is safe — it does not push data to OpenSearch, and all files created
+during the test are automatically deleted on exit (including on failure or Ctrl+C).
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for diagrams, data flow, and design decisions.
