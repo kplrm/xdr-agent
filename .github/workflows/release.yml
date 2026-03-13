@@ -110,20 +110,66 @@ jobs:
         with:
           platforms: arm64
 
-      # Both deb and rpm packaging scripts are invoked on an Ubuntu runner, so
-      # we need both tools available regardless of the target OS.
+      # Install host packaging tools.
+      # centos/arm64 builds its RPM inside a QEMU arm64 container so it does
+      # NOT need rpm-build on the host — only dpkg-dev + rpm (for other jobs).
       - name: Install host packaging tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y dpkg-dev rpm
+          if [ "${{ matrix.pkg_type }}" = "deb" ] || [ "${{ matrix.arch }}" = "amd64" ]; then
+            sudo apt-get install -y dpkg-dev rpm
+          else
+            sudo apt-get install -y dpkg-dev
+          fi
 
-      # The packaging scripts (packaging/deb/build.sh, packaging/rpm/build.sh)
-      # accept (VERSION, ARCH) and handle cross-compilation internally via
-      # CGO_ENABLED=0 + GOARCH. No separate binary build step needed.
+      # Build the package.
+      #
+      # centos/arm64 is a special case: rpmbuild --target aarch64 fails on an
+      # x86_64 host because there is no aarch64 RPM toolchain installed. The
+      # fix is to run rpmbuild *natively* inside a QEMU-emulated arm64
+      # AlmaLinux container. We:
+      #   1. Cross-compile the Go binary on the host (CGO_ENABLED=0 + GOARCH)
+      #   2. Mount the binary + sources into an arm64 almalinux:9 container
+      #   3. Run rpmbuild inside the container — it sees itself as aarch64
+      #
+      # All other combinations call the existing packaging script directly.
       - name: "Build ${{ matrix.pkg_type }} package — ${{ matrix.os }}/${{ matrix.arch }}"
         run: |
           VERSION=$(cat VERSION)
-          bash packaging/${{ matrix.pkg_type }}/build.sh "${VERSION}" "${{ matrix.arch }}"
+          if [ "${{ matrix.pkg_type }}" = "rpm" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            # Step 1: cross-compile binary on the x86_64 host
+            mkdir -p dist
+            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+              -trimpath \
+              -ldflags "-s -w -X xdr-agent/internal/buildinfo.Version=${VERSION}" \
+              -o dist/xdr-agent \
+              ./cmd/xdr-agent
+
+            # Step 2: build RPM inside native arm64 container via QEMU
+            # rpmbuild sees itself running on aarch64 — no --target hacks needed
+            docker run --rm --platform linux/arm64 \
+              -v "${PWD}:/src:ro" \
+              -v "${PWD}/dist:/out" \
+              almalinux:9 \
+              bash -c "
+                set -euo pipefail
+                dnf install -y rpm-build >/dev/null 2>&1
+                RBDIR=/tmp/rpmbuild
+                mkdir -p \${RBDIR}/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+                install -m 0755 /out/xdr-agent                        \${RBDIR}/SOURCES/xdr-agent
+                install -m 0644 /src/config/config.json               \${RBDIR}/SOURCES/config.json
+                install -m 0644 /src/systemd/xdr-agent.service        \${RBDIR}/SOURCES/xdr-agent.service
+                install -m 0644 /src/LICENSE                          \${RBDIR}/SOURCES/LICENSE
+                install -m 0644 /src/AUTHORS                          \${RBDIR}/SOURCES/AUTHORS
+                sed -e 's/@VERSION@/${VERSION}/g' -e 's/@RPM_ARCH@/aarch64/g' \
+                  /src/packaging/rpm/xdr-agent.spec.template > \${RBDIR}/SPECS/xdr-agent.spec
+                rpmbuild --define '_topdir '\${RBDIR} -bb \${RBDIR}/SPECS/xdr-agent.spec >/dev/null
+                find \${RBDIR}/RPMS -name '*.rpm' -exec cp {} /out/ \;
+                echo 'RPM built:' && find /out -maxdepth 1 -name '*.rpm'
+              "
+          else
+            bash packaging/${{ matrix.pkg_type }}/build.sh "${VERSION}" "${{ matrix.arch }}"
+          fi
 
       # Resolve the exact path of the built package so later steps don't need
       # to re-derive it.
@@ -134,7 +180,14 @@ jobs:
           if [ "${{ matrix.pkg_type }}" = "deb" ]; then
             PKG_PATH=$(ls dist/xdr-agent_${VERSION}_${{ matrix.arch }}.deb)
           else
-            PKG_PATH=$(find dist/rpmbuild/RPMS -name "*.rpm" | head -1)
+            # For centos/arm64 the RPM is in dist/ (copied by the container).
+            # For centos/amd64 it is also copied to dist/ by build.sh.
+            PKG_PATH=$(find dist -maxdepth 1 -name "*.rpm" | head -1)
+          fi
+          if [ -z "${PKG_PATH}" ]; then
+            echo "ERROR: built package not found in dist/" >&2
+            ls -la dist/ >&2
+            exit 1
           fi
           echo "path=${PKG_PATH}" >> "$GITHUB_OUTPUT"
           echo "Resolved package: ${PKG_PATH}"

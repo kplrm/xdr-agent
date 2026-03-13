@@ -76,16 +76,17 @@ sed \
   "${SPEC_TEMPLATE}" > "${SPEC_PATH}"
 
 echo "[3/4] Building rpm"
-# --target is NOT used for cross-architecture builds because it requires a
-# native aarch64 toolchain on the build host, which is not available on x86_64
-# GitHub Actions runners.  Instead we stamp the RPM arch metadata via
-# --define macros.  Go already cross-compiled the binary (CGO_ENABLED=0 +
-# GOARCH), so no native compilation happens inside rpmbuild — only packaging.
+# NOTE: This script is intended for native-arch builds only (e.g. amd64 on
+# an x86_64 host).  For cross-architecture RPM builds (e.g. aarch64 on an
+# x86_64 CI runner) use the container-native approach in the CI workflow,
+# which runs rpmbuild inside a QEMU-emulated arm64 AlmaLinux container.
 rpmbuild \
   --define "_topdir ${RPMBUILD_DIR}" \
-  --define "_arch ${RPM_ARCH}" \
-  --define "_build_arch $(uname -m)" \
+  --target "${RPM_ARCH}" \
   -bb "${SPEC_PATH}" >/dev/null
 
 echo "[4/4] Done"
-find "${RPMBUILD_DIR}/RPMS" -type f -name "*.rpm" -print
+# Copy the built RPM to DIST_DIR so callers have a consistent location to
+# find it regardless of arch subdirectory (x86_64 vs aarch64).
+find "${RPMBUILD_DIR}/RPMS" -type f -name "*.rpm" -exec cp {} "${DIST_DIR}/" \;
+find "${DIST_DIR}" -maxdepth 1 -name "*.rpm" -print
