@@ -2,112 +2,110 @@
 
 Modular XDR endpoint security agent for Linux, written in Go.
 
-Provides identity and enrollment (working today), with a full capability-based
-architecture scaffolded for threat detection, prevention, active response,
-compliance, and cloud/container security.
+Provides agent identity, control-plane enrollment, and **comprehensive endpoint
+telemetry** (13 active collectors) with a capability-based architecture scaffolded
+for detection, prevention, response, compliance, and cloud security.
 
-## Security capabilities
+## Current status — v0.3.1
 
 | Domain | Status | Description |
 |---|---|---|
 | **Identity & Enrollment** | ✅ Working | Agent ID, machine fingerprint, control-plane enrollment, heartbeat |
-| **Telemetry** | 🔲 Scaffolded | Process, file, network, session, kernel module, and audit monitoring |
-| **Malware Detection** | 🔲 Scaffolded | YARA rules, hash matching, static analysis |
-| **Behavioral Detection** | 🔲 Scaffolded | SIGMA-like rules for ransomware, credential access, persistence, lateral movement |
-| **Memory & Exploit** | 🔲 Scaffolded | Process injection, hollowing, fileless malware, ASLR/NX enforcement |
-| **Threat Intelligence** | 🔲 Scaffolded | IoC feeds, hash/IP/domain reputation matching |
-| **Malware Prevention** | 🔲 Scaffolded | fanotify-based exec blocking, quarantine vault |
-| **Ransomware Prevention** | 🔲 Scaffolded | Canary files, entropy detection, automatic rollback |
-| **Active Response** | 🔲 Scaffolded | Network isolation, process kill, file remediation, remote shell, playbooks |
-| **Cloud & Container** | 🔲 Scaffolded | Docker/containerd/CRI-O monitoring, Kubernetes audit, drift detection |
-| **Compliance** | 🔲 Scaffolded | CIS benchmarks, SCA, hardening checks, software inventory |
-| **Vulnerability** | 🔲 Scaffolded | CVE matching, package scanning, open port audit |
+| **Telemetry — Process** | ✅ Working | Process lifecycle (start/end), 30+ fields, ancestry tree, env vars, script content |
+| **Telemetry — File** | ✅ Working | FIM (inotify + BoltDB baseline + SHA-256 + entropy), file access monitoring |
+| **Telemetry — Network** | ✅ Working | TCP/UDP connections (Community ID, PID enrichment), DNS query/response |
+| **Telemetry — Session** | ✅ Working | utmp logon/logoff, auth log (SSH, sudo, su) |
+| **Telemetry — System** | ✅ Working | CPU, memory, disk I/O, network I/O combined metrics |
+| **Telemetry — Library** | ✅ Working | Shared object loading, LD_PRELOAD detection |
+| **Telemetry — Kernel** | ✅ Working | Kernel module load/unload (rootkit detection) |
+| **Telemetry — TTY** | ✅ Working | Terminal session start/end detection |
+| **Telemetry — Scheduled** | ✅ Working | Cron/systemd timer monitoring (persistence detection) |
+| **Telemetry — Injection** | ✅ Working | ptrace attach, anonymous executable memory regions |
+| **Telemetry — IPC** | ✅ Working | Unix domain sockets, named pipe creation |
+| **Event Pipeline** | ✅ Working | ECS events → enrichment → batched gzip shipping to OpenSearch |
+| **Detection** | 🔲 Scaffolded | YARA, hash matching, behavioral rules, memory, threat intel (Phase 3) |
+| **Prevention** | 🔲 Scaffolded | fanotify blocking, ransomware shield, exploit mitigation (Phase 4) |
+| **Response** | 🔲 Scaffolded | Network isolation, process kill, remote shell, playbooks (Phase 5) |
+| **Cloud & Container** | 🔲 Scaffolded | Docker/containerd monitoring, K8s audit, drift detection (Phase 5) |
+| **Compliance** | 🔲 Scaffolded | CIS benchmarks, SCA, hardening, software inventory (Phase 6) |
+| **Vulnerability** | 🔲 Scaffolded | CVE matching, package scanning, open port audit (Phase 6) |
 
 ## Project layout
 
 ```
 xdr-agent/
-├── cmd/xdr-agent/              # CLI entrypoint (run, enroll, remove, version)
+├── cmd/xdr-agent/              # CLI entrypoint (run, enroll, remove, version, completion)
 ├── internal/
-│   ├── agent/                  # Central orchestrator, capability registry, lifecycle
-│   ├── buildinfo/              # Build version injection
+│   ├── agent/                  # Orchestrator and lifecycle helpers
+│   ├── buildinfo/              # Build version injection via -ldflags
 │   ├── capability/             # Capability interface (Init/Start/Stop/Health)
-│   ├── config/                 # JSON config loader, validation, policy schema
-│   ├── controlplane/           # Control-plane HTTP client (enroll, heartbeat, policy, shipper)
-│   ├── enroll/                 # Current enrollment + heartbeat implementation
-│   ├── events/                 # Event pipeline (emit → enrich → filter → buffer → ship)
+│   ├── config/                 # JSON config loader with defaults
+│   ├── controlplane/           # HTTP client wrapper + telemetry shipper
+│   ├── enroll/                 # Enrollment + heartbeat HTTP client
+│   ├── events/                 # Event pipeline, Event/Alert structs, enrichment
 │   ├── identity/               # Agent identity and local state persistence
-│   ├── service/                # Current runtime loop (enrollment retry + heartbeat)
-│   ├── telemetry/              # Endpoint visibility
-│   │   ├── process/            #   Process creation/termination, process tree
-│   │   ├── file/               #   File integrity monitoring (FIM)
-│   │   ├── network/            #   TCP/UDP connections, DNS queries
-│   │   ├── session/            #   User logon/logoff, privilege escalation
-│   │   ├── kernel/             #   Kernel module loads, eBPF program monitoring
-│   │   ├── audit/              #   Auditd/syslog collection
-│   │   └── scheduled/          #   Cron/systemd timer monitoring
-│   ├── detection/              # Threat detection engines
-│   │   ├── malware/            #   YARA, hash, static analysis scanners
-│   │   ├── behavioral/         #   Rule-based behavioral detection (ransomware, cred access, etc.)
-│   │   ├── memory/             #   Injection, hollowing, fileless, exploit detection
-│   │   └── threatintel/        #   IoC feed ingestion and matching
-│   ├── prevention/             # Real-time threat blocking
-│   │   ├── malware/            #   fanotify exec blocker, quarantine vault
-│   │   ├── ransomware/         #   Canary files, entropy shield, rollback
-│   │   ├── exploit/            #   ASLR/NX/ptrace enforcement
+│   ├── service/                # Main runtime loop (wires all telemetry collectors)
+│   ├── telemetry/              # 13 active telemetry collectors
+│   │   ├── process/            #   Process lifecycle, tree, env vars, script capture
+│   │   ├── file/               #   FIM (inotify + BoltDB) + file access monitoring
+│   │   ├── network/            #   TCP/UDP connections + DNS (AF_PACKET)
+│   │   ├── session/            #   utmp + auth log (SSH, sudo, su)
+│   │   ├── system/             #   CPU, memory, disk I/O, network I/O
+│   │   ├── library/            #   Shared object (SO) loading detection
+│   │   ├── kernel/             #   Kernel module load/unload
+│   │   ├── tty/                #   Terminal session monitoring
+│   │   ├── scheduled/          #   Cron/systemd timer monitoring
+│   │   ├── injection/          #   ptrace / process injection detection
+│   │   ├── ipc/                #   Unix sockets + named pipe monitoring
+│   │   └── script/             #   Script content capture utility
+│   ├── detection/              # [Phase 3] Threat detection engines
+│   │   ├── malware/            #   YARA, hash, static analysis
+│   │   ├── behavioral/         #   SIGMA-like rule engine
+│   │   ├── memory/             #   Injection, hollowing, fileless, exploits
+│   │   └── threatintel/        #   IoC feeds, reputation matching
+│   ├── prevention/             # [Phase 4] Real-time threat blocking
+│   │   ├── malware/            #   fanotify exec blocker, quarantine
+│   │   ├── ransomware/         #   Canary files, rollback, shield
+│   │   ├── exploit/            #   ptrace restriction, ASLR/NX
 │   │   └── allowlist/          #   Exclusion management
-│   ├── response/               # Active response (isolate, kill, remediate, shell, playbooks)
-│   ├── cloud/                  # Cloud & container security
-│   │   ├── container/          #   Docker/containerd/CRI-O runtime, drift, inventory
-│   │   └── kubernetes/         #   K8s audit log, pod security
-│   ├── compliance/             # CIS benchmarks, SCA, hardening, software inventory
-│   ├── vulnerability/          # CVE matching, package scanning, open ports
+│   ├── response/               # [Phase 5] Active response actions
+│   ├── cloud/                  # [Phase 5] Cloud & container security
+│   │   ├── container/          #   Docker/containerd/CRI-O, drift, inventory
+│   │   └── kubernetes/         #   K8s audit, pod security
+│   ├── compliance/             # [Phase 6] CIS benchmarks, SCA, hardening
+│   ├── vulnerability/          # [Phase 6] CVE matching, packages, ports
 │   └── platform/               # OS abstraction layer
-│       ├── linux/              #   procfs, fanotify, inotify, netlink, eBPF, seccomp, cgroups, auditd
-│       └── common/             #   Cross-platform filesystem, process, hash helpers
-├── pkg/                        # Public Go packages (importable by external tools)
-│   ├── eventschema/            #   ECS-compatible event schema (Event, Process, File, Network, Alert)
-│   └── ruleformat/             #   Detection rule parsing (SIGMA-like YAML)
+│       ├── linux/              #   eBPF, fanotify, seccomp, cgroups (scaffolded)
+│       └── common/             #   File hashing (SHA-256, MD5)
+├── pkg/
+│   ├── eventschema/            # ECS-compatible event schema structs
+│   └── ruleformat/             # Detection rule parsing (SIGMA-like)
 ├── rules/                      # Detection and compliance rule files
-│   ├── behavioral/             #   SIGMA-like YAML rules (ransomware, persistence, etc.)
-│   ├── malware/                #   Known hash lists + YARA rules
-│   │   └── yara/               #     .yar files (ELF malware, webshells, cryptominers, rootkits)
-│   ├── compliance/             #   CIS/hardening check definitions
-│   └── threatintel/            #   Threat intel feed configuration
-├── config/                     # Default configuration files
-│   └── config.json             #   Sample agent config
+│   ├── behavioral/             #   SIGMA-like YAML rules
+│   ├── malware/                #   Known hashes + YARA rules
+│   ├── compliance/             #   Hardening check definitions
+│   └── threatintel/            #   Threat intel feed config
+├── config/config.json          # Default agent configuration
 ├── docs/                       # Project documentation
 │   ├── architecture.md         #   Architecture overview and diagrams
+│   ├── roadmap.md              #   Development roadmap
 │   ├── event-pipeline.md       #   Event pipeline design
 │   └── development/
-│       └── adding-capability.md  # Guide: how to add a new capability
-├── test/                       # Integration tests and fixtures
-│   ├── integration/
-│   └── fixtures/
-├── packaging/                  # OS package build scripts
-│   ├── deb/                    #   Debian package builder + maintainer scripts
-│   ├── rpm/                    #   RPM spec + build script
-│   ├── bash_completion/        #   Shell completion snippet
-│   ├── systemd-preset/         #   systemd preset for auto-enable
-│   └── build_multi_arch.sh     #   Multi-arch packaging orchestrator
+│       └── adding-capability.md  # Guide: adding a new capability
+├── test/                       # Test fixtures and integration tests
+├── packaging/                  # deb, rpm, multi-arch build scripts
 ├── systemd/                    # systemd service unit
 ├── Makefile                    # Build, run, package targets
-├── VERSION                     # Semantic version (e.g. 0.1.0)
+├── VERSION                     # Semantic version (0.3.1)
 └── go.mod                      # Go module definition
 ```
 
 ## Prerequisites
 
-- **Go 1.22+** (`go version`)
-- **Linux** (agent uses Linux-specific APIs: procfs, fanotify, netlink, eBPF)
-- `dpkg-deb` for Debian packaging (part of `dpkg`)
+- **Go 1.22+**
+- **Linux** (agent uses Linux-specific APIs: procfs, inotify, AF_PACKET, syscall)
+- `dpkg-deb` for Debian packaging
 - `rpm` / `rpmbuild` for RPM packaging
-
-Install Go on Debian/Ubuntu:
-
-```bash
-sudo apt-get update && sudo apt-get install -y golang-go
-```
 
 ## Build
 
@@ -116,39 +114,20 @@ cd xdr-agent
 make build
 ```
 
-This compiles the binary to `dist/xdr-agent` with version from the `VERSION` file
-injected via `-ldflags`.
-
-Verify:
+Compiles to `dist/xdr-agent` with version from `VERSION` injected via `-ldflags`.
 
 ```bash
 ./dist/xdr-agent version
-# 0.1.0
-```
-
-Override version without editing `VERSION`:
-
-```bash
-make build VERSION=0.2.0
+# 0.3.1
 ```
 
 ## Run
-
-### Development (foreground)
-
-```bash
-make run
-# equivalent to: ./dist/xdr-agent run --config ./config/config.json
-```
 
 ### One-shot enrollment
 
 ```bash
 ./dist/xdr-agent enroll <enrollment_token> --config ./config/config.json
 ```
-
-Exits after a single enrollment attempt. Use this to verify control-plane
-connectivity before starting the long-running service.
 
 ### Long-running mode
 
@@ -158,25 +137,22 @@ connectivity before starting the long-running service.
 
 The agent will:
 1. Load config and ensure agent identity.
-2. Attempt enrollment (retry every `enroll_interval_seconds` until successful).
-3. Send heartbeats every 30 seconds.
-4. Shut down gracefully on `SIGTERM` or `SIGINT`.
+2. Enroll with the control plane (retry until successful).
+3. Start all 13 telemetry collectors.
+4. Ship ECS-compatible events to OpenSearch via the control plane.
+5. Send heartbeats every 30 seconds.
+6. Shut down gracefully on `SIGTERM` or `SIGINT`.
 
 ### With make
 
 ```bash
-# Run in foreground (builds first):
-make run
-
-# Enroll and exit:
-make enroll ENROLLMENT_TOKEN=<token>
+make run                              # Build and run in foreground
+make enroll ENROLLMENT_TOKEN=<token>  # Enroll and exit
 ```
 
 ## Configuration
 
-Default path: `/etc/xdr-agent/config.json`
-
-Sample: `config/config.json`
+Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
 
 ```json
 {
@@ -209,10 +185,10 @@ Sample: `config/config.json`
 | `request_timeout_seconds` | Yes | HTTP request timeout (> 0) |
 | `state_path` | Yes | Path to persist agent identity state |
 | `insecure_skip_tls_verify` | No | Skip TLS verification (keep `false` in prod) |
-| `telemetry_url` | No | Telemetry shipping URL; defaults to `control_plane_url`. Set to route through Kafka, Logstash, etc. |
+| `telemetry_url` | No | Telemetry shipping URL; defaults to `control_plane_url` |
 | `telemetry_path` | No | Telemetry API path (default: `/api/v1/agents/telemetry`) |
 | `telemetry_interval_seconds` | No | Telemetry collection interval in seconds (default: `60`) |
-| `telemetry_ship_interval_seconds` | No | Max linger before shipping buffered events (default: `1`). Events also ship immediately on arrival. |
+| `telemetry_ship_interval_seconds` | No | Max linger before shipping buffered events (default: `1`) |
 
 ## CLI commands
 
@@ -230,59 +206,41 @@ xdr-agent help       Show usage information
 ### Debian (.deb)
 
 ```bash
-chmod +x packaging/deb/build.sh packaging/deb/postinst packaging/deb/prerm
 make clean; make deb
-ls -lh dist/*.deb
-```
-
-By default, staging directories are removed. To keep them for inspection/debugging:
-
-```bash
-make deb KEEP_STAGING=1
+sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
 ```
 
 ### RPM
 
 ```bash
-sudo apt install rpm   # if building on Debian/Ubuntu
-chmod +x packaging/rpm/build.sh
 make rpm
 ```
 
-### Multi-architecture (amd64 + arm64, deb + rpm)
+### Multi-architecture (amd64 + arm64)
 
 ```bash
-chmod +x packaging/build_multi_arch.sh
 bash ./packaging/build_multi_arch.sh "$(cat VERSION)"
 ```
 
-Customize:
+## Install & deploy
 
-```bash
-ARCHES="amd64 arm64" FORMATS="deb rpm" bash ./packaging/build_multi_arch.sh
-```
-
-## Install on Debian/Ubuntu
-
-```bash
-sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
-```
-
-The package does **not** auto-start the service. Recommended flow:
-
-1. Edit `/etc/xdr-agent/config.json` with your `control_plane_url`, `policy_id`, and `enrollment_token`.
-2. Enroll:
+1. Install the package:
+   ```bash
+   sudo dpkg -i dist/xdr-agent_$(cat VERSION)_amd64.deb
+   ```
+2. Edit `/etc/xdr-agent/config.json` with your `control_plane_url`, `policy_id`, and `enrollment_token`.
+3. Enroll (auto-enables and starts the systemd service):
    ```bash
    sudo xdr-agent enroll <token> --config /etc/xdr-agent/config.json
    ```
-  On successful enrollment, this command automatically runs `systemctl enable xdr-agent` and `systemctl start xdr-agent`.
-3. Verify:
+4. Verify:
    ```bash
    sudo systemctl status xdr-agent --no-pager -l
    sudo journalctl -u xdr-agent -f
    ```
 
-## Update xdr-agent to latest version:
+## Update
+
 ```bash
 sudo systemctl stop xdr-agent.service
 make clean; make deb
@@ -291,31 +249,121 @@ sudo systemctl start xdr-agent.service
 sudo journalctl -u xdr-agent -f
 ```
 
-## Bash completion
+## Telemetry verification test
 
-After `.deb` installation, completion is installed at `/usr/share/bash-completion/completions/xdr-agent` and is auto-loaded by `bash-completion` in new shell sessions.
+Verifies that all 13 telemetry collectors are actively collecting and shipping
+events. The test works by:
 
-From a local build:
+1. Starting a local HTTP listener on a temporary port
+2. Reconfiguring the agent to ship telemetry to the listener (instead of OpenSearch)
+3. Generating real OS events that each collector should detect (files, processes, network connections, cron entries, pipes, etc.)
+4. Analyzing the captured events for coverage across all 13 collectors
+5. Restoring the original config and cleaning up all generated artifacts
+
+**Requirements:** The agent must be enrolled and running. Requires `sudo`.
 
 ```bash
-source <(./dist/xdr-agent completion bash)
+sudo bash test/telemetry_verify.sh
 ```
 
-Supports `xdr-agent <TAB>` and `sudo xdr-agent <TAB>`.
+To keep the captured events for inspection after the test:
+
+```bash
+sudo KEEP_LOGS=1 bash test/telemetry_verify.sh
+```
+
+Expected output on success:
+
+```
+  ALL 13/13 COLLECTORS VERIFIED ✓
+```
+
+The test is safe — it does not push data to OpenSearch, and all files created
+during the test are automatically deleted on exit (including on failure or Ctrl+C).
+
+### Inspecting captured events
+
+After a `KEEP_LOGS=1` run, the captured events are saved in a root-owned file
+inside a temporary directory (printed at the end of the test, e.g.
+`/tmp/xdr-telemetry-test.XXXXX/captured_events.json`).
+
+Use `test/show_samples.py` to print up to 4 representative events per
+collector, with full envelope and payload fields, one field per line:
+
+```bash
+# 1. Copy to a readable location (captured file is owned by root)
+sudo cp /tmp/xdr-telemetry-test.XXXXX/captured_events.json /tmp/events.json
+sudo chmod 644 /tmp/events.json
+
+# 2. Print samples (no sudo needed)
+python3 test/show_samples.py /tmp/events.json
+```
+
+Or if you run the script as root it can read the captured file directly:
+
+```bash
+sudo python3 test/show_samples.py /tmp/xdr-telemetry-test.XXXXX/captured_events.json
+```
+
+The script will print, for each of the 13 collectors:
+
+- A header line with the collector name and total event count
+- Up to 4 events chosen to maximise diversity (different `event.type` first,
+  then events whose non-numeric field values differ from those already shown)
+- For each event:
+  - **Envelope** — `@timestamp`, `event.type`, `event.category`, `event.kind`,
+    `event.severity` (with label), `event.module`, `agent.id`, `host.hostname`,
+    `threat.tactic.name`, `threat.technique.id`, `tags`
+  - **Payload** — all remaining fields, fully expanded to dot-notation, sorted
+    alphabetically, one `field = value` per line
+
+Example output (collector 06 — Session):
+
+```
+────────────────────────────────────────────────────────────────────────
+  Collector 06  Session  (2 events)
+────────────────────────────────────────────────────────────────────────
+  types: session.sudo×1  session.ssh-failed×1
+
+  ┌─ event 1/2 ──────────────────────────────────────────────────────────
+  │  session.sudo  [INFO]  2026-03-03 21:04:32.852
+  │
+  │  ─ envelope ─
+  │  @timestamp        = 2026-03-03T21:04:32.852992647Z
+  │  event.type        = session.sudo
+  │  event.category    = authentication
+  │  event.kind        = event
+  │  event.severity    = 0  (INFO)
+  │  event.module      = telemetry.session
+  │  agent.id          = 7b39ddd4b4a8fa9b5745e96a0841c5a2
+  │  host.hostname     = laptop
+  │  tags              = ["session","authentication","telemetry"]
+  │
+  │  ─ payload ─
+  │  event.action      = sudo
+  │  event.outcome     = success
+  │  process.command_line = /usr/bin/true
+  │  related.user      = ["root","nobody"]
+  │  session.type      = tty
+  │  user.effective.name = nobody
+  │  user.name         = root
+  └────────────────────────────────────────────────────────────────────
+```
+
+Collectors with no events captured (e.g. FIM when no files changed, kernel
+modules when no module was loaded) are shown with `✗ No events captured`.
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for the full architecture overview
-with diagrams, data flow, and design decisions.
+See [docs/architecture.md](docs/architecture.md) for diagrams, data flow, and design decisions.
+
+See [docs/roadmap.md](docs/roadmap.md) for the full development roadmap.
 
 See [docs/event-pipeline.md](docs/event-pipeline.md) for event pipeline design.
 
-See [docs/development/adding-capability.md](docs/development/adding-capability.md)
-for a step-by-step guide on adding new security capabilities.
+See [docs/development/adding-capability.md](docs/development/adding-capability.md) for adding new capabilities.
 
 ### Capability interface
-
-Every security module implements:
 
 ```go
 type Capability interface {
@@ -327,10 +375,14 @@ type Capability interface {
 }
 ```
 
-The agent orchestrator manages all capability lifecycles, starts them in
-dependency order, and stops them in reverse order on shutdown.
-
 ## Control-plane compatibility
+
+### OpenSearch Dashboards xdr-manager-plugin
+
+1. Generate an enrollment token from the plugin UI.
+2. Set `control_plane_url` to OpenSearch Dashboards (default: `http://localhost:5601`).
+3. Set `enrollment_token` to the generated token.
+4. Set `policy_id` to match the token's policy.
 
 ### Enrollment request
 
@@ -344,27 +396,9 @@ dependency order, and stops them in reverse order on shutdown.
   "ip_addresses": ["10.0.0.12"],
   "policy_id": "default-endpoint",
   "tags": ["linux", "xdr-agent"],
-  "agent_version": "0.1.0"
+  "agent_version": "0.3.1"
 }
 ```
-
-### Expected response
-
-```json
-{
-  "enrollment_id": "server-generated-id",
-  "message": "enrolled"
-}
-```
-
-### OpenSearch Dashboards xdr-manager-plugin
-
-1. Generate an enrollment token from the plugin UI (**Enroll XDR** flyout).
-2. Set `control_plane_url` to OpenSearch Dashboards (default: `http://localhost:5601`).
-3. Set `enrollment_path` to `/api/v1/agents/enroll`.
-4. Set `enrollment_token` to the generated token.
-5. Set `policy_id` to match the token's policy.
-6. Set `heartbeat_path` to `/api/v1/agents/heartbeat`.
 
 ## Troubleshooting
 
@@ -374,6 +408,7 @@ dependency order, and stops them in reverse order on shutdown.
 | Service not found after install | `sudo systemctl daemon-reload` |
 | Enrollment rejected | Verify `enrollment_token` and `policy_id` match the control plane |
 | Config file not found | Check path with `--config` flag; default is `/etc/xdr-agent/config.json` |
+| DNS collector fails to start | Requires `CAP_NET_RAW` — run as root or grant the capability |
 
 ## License
 

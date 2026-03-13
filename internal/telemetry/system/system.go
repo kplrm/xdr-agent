@@ -308,10 +308,46 @@ func (s *SystemCollector) collectAndEmit() {
 	// ── Network I/O delta ───────────────────────────────────────────────
 	if currNetIO != nil && prevNetIO != nil {
 		n := SumNetIODelta(prevNetIO, currNetIO)
-		systemPayload["netio"] = map[string]interface{}{
-			"in":  map[string]interface{}{"bytes": n.InBytes, "errors": n.InErrors},
-			"out": map[string]interface{}{"bytes": n.OutBytes, "errors": n.OutErrors},
+
+		// Aggregate (all interfaces summed)
+		netioPayload := map[string]interface{}{
+			"in": map[string]interface{}{
+				"bytes":   n.InBytes,
+				"packets": n.InPackets,
+				"errors":  n.InErrors,
+				"dropped": n.InDrops,
+			},
+			"out": map[string]interface{}{
+				"bytes":   n.OutBytes,
+				"packets": n.OutPackets,
+				"errors":  n.OutErrors,
+				"dropped": n.OutDrops,
+			},
 		}
+
+		// Per-interface breakdown
+		if len(n.ByInterface) > 0 {
+			ifaces := make(map[string]interface{}, len(n.ByInterface))
+			for iface, s := range n.ByInterface {
+				ifaces[iface] = map[string]interface{}{
+					"in": map[string]interface{}{
+						"bytes":   s.InBytes,
+						"packets": s.InPackets,
+						"errors":  s.InErrors,
+						"dropped": s.InDrops,
+					},
+					"out": map[string]interface{}{
+						"bytes":   s.OutBytes,
+						"packets": s.OutPackets,
+						"errors":  s.OutErrors,
+						"dropped": s.OutDrops,
+					},
+				}
+			}
+			netioPayload["interfaces"] = ifaces
+		}
+
+		systemPayload["netio"] = netioPayload
 	}
 
 	// ── Disk space ──────────────────────────────────────────────────────
