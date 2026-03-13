@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"xdr-agent/internal/buildinfo"
@@ -24,6 +25,7 @@ import (
 	"xdr-agent/internal/telemetry/session"
 	"xdr-agent/internal/telemetry/system"
 	"xdr-agent/internal/telemetry/tty"
+	"xdr-agent/internal/upgrade"
 )
 
 func Run(ctx context.Context, configPath string, once bool, enrollmentToken string) error {
@@ -59,13 +61,33 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		return nil
 	}
 
-	heartbeatAttempt := func() error {
-		if err := enroll.Heartbeat(ctx, cfg, state, buildinfo.Version); err != nil {
-			return err
+	heartbeatAttempt := func() (enroll.HeartbeatResponse, error) {
+		hbResp, err := enroll.Heartbeat(ctx, cfg, state, buildinfo.Version)
+		if err != nil {
+			return enroll.HeartbeatResponse{}, err
 		}
 
 		log.Printf("heartbeat successful: agent_id=%s", state.AgentID)
-		return nil
+		return hbResp, nil
+	}
+
+	// handleHeartbeatCommands processes any commands returned by the control
+	// plane in the heartbeat response (e.g. upgrade:0.3.2).
+	handleHeartbeatCommands := func(resp enroll.HeartbeatResponse) {
+		for _, cmd := range resp.PendingCommands {
+			if strings.HasPrefix(cmd, "upgrade:") {
+				targetVersion := strings.TrimPrefix(cmd, "upgrade:")
+				if targetVersion == "" || targetVersion == buildinfo.Version {
+					continue
+				}
+				log.Printf("upgrade command received: target_version=%s current_version=%s", targetVersion, buildinfo.Version)
+				if err := upgrade.Perform(ctx, targetVersion); err != nil {
+					log.Printf("upgrade failed (will retry on next heartbeat): %v", err)
+				}
+				// If upgrade succeeded, systemd will restart us. If it failed,
+				// we continue running and will retry on the next heartbeat cycle.
+			}
+		}
 	}
 
 	if once {
@@ -100,8 +122,10 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		}
 	}
 
-	if err := heartbeatAttempt(); err != nil {
+	if hbResp, err := heartbeatAttempt(); err != nil {
 		log.Printf("initial heartbeat failed: %v", err)
+	} else {
+		handleHeartbeatCommands(hbResp)
 	}
 
 	// ── Event pipeline ──────────────────────────────────────────────────
@@ -267,8 +291,10 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			log.Printf("xdr-agent stopping")
 			return ctx.Err()
 		case <-heartbeatTicker.C: // On each tick, send heartbeat.
-			if err := heartbeatAttempt(); err != nil {
+			if hbResp, err := heartbeatAttempt(); err != nil {
 				log.Printf("heartbeat failed: %v", err)
+			} else {
+				handleHeartbeatCommands(hbResp)
 			}
 		}
 	}
