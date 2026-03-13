@@ -6,7 +6,7 @@ Provides agent identity, control-plane enrollment, and **comprehensive endpoint
 telemetry** (13 active collectors) with a capability-based architecture scaffolded
 for detection, prevention, response, compliance, and cloud security.
 
-## Current status — v0.3.1
+## Current status — v0.3.2
 
 | Domain | Status | Description |
 |---|---|---|
@@ -96,7 +96,7 @@ xdr-agent/
 ├── packaging/                  # deb, rpm, multi-arch build scripts
 ├── systemd/                    # systemd service unit
 ├── Makefile                    # Build, run, package targets
-├── VERSION                     # Semantic version (0.3.1)
+├── VERSION                     # Semantic version (0.3.2)
 └── go.mod                      # Go module definition
 ```
 
@@ -118,7 +118,7 @@ Compiles to `dist/xdr-agent` with version from `VERSION` injected via `-ldflags`
 
 ```bash
 ./dist/xdr-agent version
-# 0.3.1
+# 0.3.2
 ```
 
 ## Run
@@ -396,7 +396,7 @@ type Capability interface {
   "ip_addresses": ["10.0.0.12"],
   "policy_id": "default-endpoint",
   "tags": ["linux", "xdr-agent"],
-  "agent_version": "0.3.1"
+  "agent_version": "0.3.2"
 }
 ```
 

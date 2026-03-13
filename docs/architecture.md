@@ -7,7 +7,7 @@ It provides comprehensive telemetry collection for Linux endpoints, with a
 capability-based architecture designed for detection, prevention, and response
 phases to follow.
 
-**Current version:** 0.3.1 — Full endpoint telemetry (Phase 2 complete).
+**Current version:** 0.3.2 — Full endpoint telemetry (Phase 2 complete).
 
 ## Architecture Diagram
 

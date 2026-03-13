@@ -1,6 +1,6 @@
 # Telemetry Field Reference
 
-> **Version:** 0.3.1 — Phase 2 (Endpoint Telemetry)
+> **Version:** 0.3.2 — Phase 2 (Endpoint Telemetry)
 >
 > This document describes every field emitted by each of the 13 active
 > telemetry collectors.  It is the single source of truth for field names,
@@ -662,4 +662,4 @@ data staging, and inter-process coordination by malware.
 
 ---
 
-*Generated: 2026-03-03 — xdr-agent v0.3.1 — Audited & corrected 2026-03-03*
+*Generated: 2026-03-03 — xdr-agent v0.3.2 — Audited & corrected 2026-03-03*

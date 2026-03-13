@@ -1271,7 +1271,7 @@ class TelemetryAnalyzer:
         """Write machine-readable JSON report."""
         cov = len([c for c in COVERAGE_COLLECTORS if c in self.stats["collectors_seen"]])
         report = {
-            "version": "0.3.1",
+            "version": "0.3.2",
             "total_events": self.stats["total_events"],
             "collectors_seen": sorted(self.stats["collectors_seen"]),
             "collectors_expected": COVERAGE_COLLECTORS,
