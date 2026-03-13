@@ -1,7 +1,5 @@
 # Telemetry Field Reference
 
-> **Version:** 0.3.2 — Phase 2 (Endpoint Telemetry)
->
 > This document describes every field emitted by each of the 13 active
 > telemetry collectors.  It is the single source of truth for field names,
 > types, ECS compliance, and MITRE ATT&CK mappings.
@@ -661,5 +659,3 @@ data staging, and inter-process coordination by malware.
    as keyword/string).
 
 ---
-
-*Generated: 2026-03-03 — xdr-agent v0.3.2 — Audited & corrected 2026-03-03*
