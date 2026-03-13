@@ -36,7 +36,7 @@ the service orchestrator, and will be enabled/disabled via policy from the contr
 | Phase | Version | Status | Description |
 |---|---|---|---|
 | 1 | v0.1.0–v0.2.0 | ✅ Complete | Foundation: capability interface, event pipeline, enrollment, control plane |
-| 2 | v0.3.0–v0.3.1 | ✅ Complete | Endpoint telemetry: 13 collectors covering process, file, network, session, kernel, and more |
+| 2 | v0.3.0–v0.3.2 | ✅ Complete | Endpoint telemetry: 13 collectors covering process, file, network, session, kernel, and more |
 | 3 | v0.4.0 | ❌ Next | Detection: malware (YARA, hash), behavioral (SIGMA rules), memory, threat intel |
 | 4 | v0.5.0 | ❌ Planned | Prevention: malware blocking (fanotify), ransomware shield, exploit mitigation |
 | 5 | v0.6.0 | ❌ Planned | Active response & cloud: network isolation, remote shell, container monitoring |
@@ -61,7 +61,7 @@ the service orchestrator, and will be enabled/disabled via policy from the contr
 
 ---
 
-## Phase 2 — Endpoint Telemetry (v0.3.0 → v0.3.1) ✅
+## Phase 2 — Endpoint Telemetry (v0.3.0 → v0.3.2) ✅
 
 **Goal:** Comprehensive endpoint visibility — collect and ship all telemetry to OpenSearch.
 
