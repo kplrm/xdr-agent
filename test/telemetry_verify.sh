@@ -337,7 +337,7 @@ info "All trigger events generated. Waiting ${WAIT_SECONDS}s for collection + sh
 wait "$IPC_SOCKET_PID" 2>/dev/null || true
 sleep "$WAIT_SECONDS"
 
-# ── Step 5: Stop listener and analyze captured events ────────────────────────
+# ── Step 5: Stop listener ────────────────────────────────────────────────────
 # Stop the listener BEFORE reading the file to avoid race conditions
 # (the listener rewrites the file on every batch)
 if [[ -f "$LISTENER_PID_FILE" ]]; then
@@ -345,6 +345,20 @@ if [[ -f "$LISTENER_PID_FILE" ]]; then
     sleep 1          # let final write complete
 fi
 
+# ── Step 6: Restore original config and restart agent ────────────────────────
+info "Restoring original agent configuration..."
+if [[ -f "$ORIGINAL_CONFIG" ]]; then
+    cp "$ORIGINAL_CONFIG" "$CONFIG_PATH"
+    rm -f "$ORIGINAL_CONFIG"   # prevent double-restore in cleanup
+    ok "Config restored: $CONFIG_PATH"
+else
+    warn "Original config backup not found — skipping restore"
+fi
+info "Restarting xdr-agent with original config..."
+systemctl restart xdr-agent 2>/dev/null && ok "xdr-agent restarted" || warn "xdr-agent restart failed"
+echo ""
+
+# ── Step 7: Analyze captured events ──────────────────────────────────────────
 info "Analyzing captured events..."
 echo ""
 
