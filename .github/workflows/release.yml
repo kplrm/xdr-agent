@@ -1,0 +1,112 @@
+name: Release
+
+# Triggered every time a commit lands on main (i.e., after a PR is merged).
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    name: Build & Publish GitHub Release
+    runs-on: ubuntu-latest
+
+    # Required so the workflow can create tags and publish releases.
+    permissions:
+      contents: write
+
+    steps:
+      # ── 1. Checkout full history so we can tag ────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Read VERSION ───────────────────────────────────────────────────
+      - name: Read version
+        id: version
+        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      # ── 3. Skip if this tag already exists (e.g. hotfix re-push) ─────────
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── 4. Set up Go (version read from go.mod) ───────────────────────────
+      - name: Set up Go
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # ── 5. Install Linux packaging tools ─────────────────────────────────
+      - name: Install packaging tools
+        if: steps.tag_check.outputs.exists == 'false'
+        run: sudo apt-get update -qq && sudo apt-get install -y dpkg-dev rpm
+
+      # ── 6. Build artifacts ────────────────────────────────────────────────
+      - name: Build binary (amd64)
+        if: steps.tag_check.outputs.exists == 'false'
+        run: make build
+
+      - name: Build .deb (amd64)
+        if: steps.tag_check.outputs.exists == 'false'
+        run: make deb
+
+      - name: Build .rpm (amd64)
+        if: steps.tag_check.outputs.exists == 'false'
+        run: make rpm
+
+      # Cross-compile the arm64 binary (no CGo needed for this project).
+      - name: Build binary (arm64)
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          GOARCH: arm64
+          GOOS: linux
+          CGO_ENABLED: "0"
+        run: |
+          VERSION=$(cat VERSION)
+          go build \
+            -trimpath \
+            -ldflags "-s -w -X xdr-agent/internal/buildinfo.Version=${VERSION}" \
+            -o dist/xdr-agent-linux-arm64 \
+            ./cmd/xdr-agent
+
+      # Create compressed tarballs for both architectures.
+      - name: Create archives
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          VERSION=$(cat VERSION)
+          cp dist/xdr-agent dist/xdr-agent-linux-amd64
+          tar -czf dist/xdr-agent_${VERSION}_linux_amd64.tar.gz \
+              -C dist xdr-agent-linux-amd64
+          tar -czf dist/xdr-agent_${VERSION}_linux_arm64.tar.gz \
+              -C dist xdr-agent-linux-arm64
+
+      # ── 7. Tag the commit ─────────────────────────────────────────────────
+      - name: Create and push git tag
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      # ── 8. Publish GitHub Release with all artifacts ──────────────────────
+      - name: Publish GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: xdr-agent v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true   # auto-fills from merged PR titles
+          files: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
