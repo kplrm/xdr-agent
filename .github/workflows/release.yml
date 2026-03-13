@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+# Opt into Node.js 24 now to silence the Node.js 20 deprecation warnings from
+# actions/checkout, actions/setup-go, actions/upload-artifact, etc.
+# Remove once those actions ship native Node.js 24 support (expected mid-2026).
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
   # Stage 1 — Detect the version and whether a release already exists.
