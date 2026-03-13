@@ -1,112 +1,240 @@
 name: Release
 
-# Triggered every time a commit lands on main (i.e., after a PR is merged).
+# Triggered every time a commit lands on main (i.e., after a PR is merged and approved).
 on:
   push:
     branches: [main]
 
 jobs:
-  release:
-    name: Build & Publish GitHub Release
+  # ────────────────────────────────────────────────────────────────────────────
+  # Stage 1 — Detect the version and whether a release already exists.
+  # ────────────────────────────────────────────────────────────────────────────
+  version:
+    name: Read version
     runs-on: ubuntu-latest
-
-    # Required so the workflow can create tags and publish releases.
-    permissions:
-      contents: write
-
+    outputs:
+      version:    ${{ steps.v.outputs.version }}
+      tag_exists: ${{ steps.tag.outputs.exists }}
     steps:
-      # ── 1. Checkout full history so we can tag ────────────────────────────
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── 2. Read VERSION ───────────────────────────────────────────────────
-      - name: Read version
-        id: version
+      - name: Read VERSION file
+        id: v
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
-      # ── 3. Skip if this tag already exists (e.g. hotfix re-push) ─────────
-      - name: Check if tag already exists
-        id: tag_check
+      - name: Check if release tag already exists
+        id: tag
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          if git rev-parse "v$(cat VERSION)" >/dev/null 2>&1; then
             echo "exists=true"  >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag v$(cat VERSION) already exists — skipping release."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── 4. Set up Go (version read from go.mod) ───────────────────────────
-      - name: Set up Go
-        if: steps.tag_check.outputs.exists == 'false'
-        uses: actions/setup-go@v5
+  # ────────────────────────────────────────────────────────────────────────────
+  # Stage 2 — Build & smoke-test all four target combinations.
+  #
+  #   OS      × arch   package   test container
+  #   ──────────────────────────────────────────
+  #   Debian    amd64  .deb      debian:stable-slim  (native)
+  #   Debian    arm64  .deb      debian:stable-slim  (QEMU)
+  #   CentOS    amd64  .rpm      almalinux:9         (native)
+  #   CentOS    arm64  .rpm      almalinux:9         (QEMU)
+  #
+  # ALL four jobs must pass before the release stage is allowed to run.
+  # fail-fast: true means a single failure cancels the other three immediately.
+  # ────────────────────────────────────────────────────────────────────────────
+  build-test:
+    name: "[${{ matrix.os }}/${{ matrix.arch }}] build & smoke-test"
+    needs: version
+    if: needs.version.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # ── Debian / x86_64 ────────────────────────────────────────────────
+          - os: debian
+            arch: amd64
+            pkg_type: deb
+            pkg_install: "dpkg -i --force-depends"
+            test_image: debian:stable-slim
+            platform: linux/amd64
+
+          # ── Debian / arm64 ─────────────────────────────────────────────────
+          - os: debian
+            arch: arm64
+            pkg_type: deb
+            pkg_install: "dpkg -i --force-depends"
+            test_image: debian:stable-slim
+            platform: linux/arm64
+
+          # ── CentOS Stream (AlmaLinux 9) / x86_64 ───────────────────────────
+          - os: centos
+            arch: amd64
+            pkg_type: rpm
+            pkg_install: "rpm -i --nodeps"
+            test_image: almalinux:9
+            platform: linux/amd64
+
+          # ── CentOS Stream (AlmaLinux 9) / arm64 ────────────────────────────
+          - os: centos
+            arch: arm64
+            pkg_type: rpm
+            pkg_install: "rpm -i --nodeps"
+            test_image: almalinux:9
+            platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      # ── 5. Install Linux packaging tools ─────────────────────────────────
-      - name: Install packaging tools
-        if: steps.tag_check.outputs.exists == 'false'
-        run: sudo apt-get update -qq && sudo apt-get install -y dpkg-dev rpm
+      # Enable QEMU binfmt_misc so the x86_64 runner can execute arm64
+      # container images transparently via Docker.
+      - name: Set up QEMU (arm64 only)
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
-      # ── 6. Build artifacts ────────────────────────────────────────────────
-      - name: Build binary (amd64)
-        if: steps.tag_check.outputs.exists == 'false'
-        run: make build
+      # Both deb and rpm packaging scripts are invoked on an Ubuntu runner, so
+      # we need both tools available regardless of the target OS.
+      - name: Install host packaging tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y dpkg-dev rpm
 
-      - name: Build .deb (amd64)
-        if: steps.tag_check.outputs.exists == 'false'
-        run: make deb
-
-      - name: Build .rpm (amd64)
-        if: steps.tag_check.outputs.exists == 'false'
-        run: make rpm
-
-      # Cross-compile the arm64 binary (no CGo needed for this project).
-      - name: Build binary (arm64)
-        if: steps.tag_check.outputs.exists == 'false'
-        env:
-          GOARCH: arm64
-          GOOS: linux
-          CGO_ENABLED: "0"
+      # The packaging scripts (packaging/deb/build.sh, packaging/rpm/build.sh)
+      # accept (VERSION, ARCH) and handle cross-compilation internally via
+      # CGO_ENABLED=0 + GOARCH. No separate binary build step needed.
+      - name: "Build ${{ matrix.pkg_type }} package — ${{ matrix.os }}/${{ matrix.arch }}"
         run: |
           VERSION=$(cat VERSION)
-          go build \
-            -trimpath \
-            -ldflags "-s -w -X xdr-agent/internal/buildinfo.Version=${VERSION}" \
-            -o dist/xdr-agent-linux-arm64 \
-            ./cmd/xdr-agent
+          bash packaging/${{ matrix.pkg_type }}/build.sh "${VERSION}" "${{ matrix.arch }}"
 
-      # Create compressed tarballs for both architectures.
-      - name: Create archives
-        if: steps.tag_check.outputs.exists == 'false'
+      # Resolve the exact path of the built package so later steps don't need
+      # to re-derive it.
+      - name: Locate built package
+        id: pkg
         run: |
           VERSION=$(cat VERSION)
-          cp dist/xdr-agent dist/xdr-agent-linux-amd64
-          tar -czf dist/xdr-agent_${VERSION}_linux_amd64.tar.gz \
-              -C dist xdr-agent-linux-amd64
-          tar -czf dist/xdr-agent_${VERSION}_linux_arm64.tar.gz \
-              -C dist xdr-agent-linux-arm64
+          if [ "${{ matrix.pkg_type }}" = "deb" ]; then
+            PKG_PATH=$(ls dist/xdr-agent_${VERSION}_${{ matrix.arch }}.deb)
+          else
+            PKG_PATH=$(find dist/rpmbuild/RPMS -name "*.rpm" | head -1)
+          fi
+          echo "path=${PKG_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Resolved package: ${PKG_PATH}"
 
-      # ── 7. Tag the commit ─────────────────────────────────────────────────
-      - name: Create and push git tag
-        if: steps.tag_check.outputs.exists == 'false'
+      # Install the package inside the exact target container and run
+      # `xdr-agent version` to verify the binary is functional.
+      # --nodeps / --force-depends: systemd is declared as a dep but is not
+      # running inside a container — we only need the binary to execute.
+      - name: "Smoke test — ${{ matrix.os }}/${{ matrix.arch }}"
+        run: |
+          cp "${{ steps.pkg.outputs.path }}" dist/smoke-test-pkg
+          docker run --rm \
+            --platform ${{ matrix.platform }} \
+            -v "${PWD}/dist:/pkg:ro" \
+            ${{ matrix.test_image }} \
+            sh -c "
+              set -e
+              echo '==> Installing package'
+              ${{ matrix.pkg_install }} /pkg/smoke-test-pkg
+              echo '==> Running: xdr-agent version'
+              /usr/bin/xdr-agent version
+              echo '==> Smoke test PASSED'
+            "
+
+      # Upload the built package so the release job can attach it to the
+      # GitHub Release without rebuilding.
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ steps.pkg.outputs.path }}
+          retention-days: 1
+
+      # Upload the cross-compiled binary once per arch (only the debian job
+      # does this; centos produces the identical binary for the same arch).
+      # The release job uses these to create the .tar.gz archives.
+      - name: Upload binary artifact
+        if: matrix.os == 'debian'
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.arch }}
+          path: dist/xdr-agent
+          retention-days: 1
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Stage 3 — Publish the GitHub Release.
+  #
+  # This job runs ONLY when every build-test matrix entry is green.
+  # If any of the four combinations failed, this job is skipped and GitHub
+  # marks the overall workflow run as failed — no partial releases.
+  # ────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: [version, build-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Pull every artifact uploaded by the build-test matrix.
+      # merge-multiple: false preserves per-artifact sub-directories.
+      - name: Download all packages and binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          merge-multiple: false
+          path: release-artifacts
+
+      # Build tarballs from the pre-built, already-tested binaries.
+      - name: Create binary tarballs
+        run: |
+          VERSION=$(cat VERSION)
+          for arch in amd64 arm64; do
+            SRC="release-artifacts/binary-${arch}/xdr-agent"
+            TAR="release-artifacts/xdr-agent_${VERSION}_linux_${arch}.tar.gz"
+            cp "${SRC}" release-artifacts/xdr-agent
+            tar -czf "${TAR}" -C release-artifacts xdr-agent
+            rm release-artifacts/xdr-agent
+            echo "Created tarball: ${TAR}"
+          done
+
+      # Tag the exact commit that passed all tests.
+      - name: Create and push release tag
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git tag "v${{ needs.version.outputs.version }}"
+          git push origin "v${{ needs.version.outputs.version }}"
 
-      # ── 8. Publish GitHub Release with all artifacts ──────────────────────
+      # Publish the GitHub Release, attaching all four packages and both tarballs.
+      # generate_release_notes: true auto-populates from merged PR titles.
+      # fail_on_unmatched_files: true prevents a silent empty-files release.
       - name: Publish GitHub Release
-        if: steps.tag_check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: xdr-agent v${{ steps.version.outputs.version }}
+          tag_name: v${{ needs.version.outputs.version }}
+          name: xdr-agent v${{ needs.version.outputs.version }}
           draft: false
           prerelease: false
-          generate_release_notes: true   # auto-fills from merged PR titles
+          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            dist/*.deb
-            dist/*.rpm
-            dist/*.tar.gz
+            release-artifacts/**/*.deb
+            release-artifacts/**/*.rpm
+            release-artifacts/**/*.tar.gz
