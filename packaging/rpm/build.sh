@@ -76,7 +76,16 @@ sed \
   "${SPEC_TEMPLATE}" > "${SPEC_PATH}"
 
 echo "[3/4] Building rpm"
-rpmbuild --define "_topdir ${RPMBUILD_DIR}" --target "${RPM_ARCH}" -bb "${SPEC_PATH}" >/dev/null
+# --target is NOT used for cross-architecture builds because it requires a
+# native aarch64 toolchain on the build host, which is not available on x86_64
+# GitHub Actions runners.  Instead we stamp the RPM arch metadata via
+# --define macros.  Go already cross-compiled the binary (CGO_ENABLED=0 +
+# GOARCH), so no native compilation happens inside rpmbuild — only packaging.
+rpmbuild \
+  --define "_topdir ${RPMBUILD_DIR}" \
+  --define "_arch ${RPM_ARCH}" \
+  --define "_build_arch $(uname -m)" \
+  -bb "${SPEC_PATH}" >/dev/null
 
 echo "[4/4] Done"
 find "${RPMBUILD_DIR}/RPMS" -type f -name "*.rpm" -print
