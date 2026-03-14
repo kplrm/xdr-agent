@@ -18,8 +18,15 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
   systemctl preset xdr-agent.service || true
-  systemctl disable xdr-agent.service || true
-  systemctl stop xdr-agent.service || true
+
+  # $2 is the previously-installed version (set by dpkg on upgrade, empty on
+  # fresh install).  On upgrade we must re-enable and start the service so the
+  # new binary takes over.  On a fresh install the service stays disabled
+  # (per the systemd preset) until the administrator explicitly enrolls.
+  if [ -n "$2" ]; then
+    systemctl enable xdr-agent.service || true
+    systemctl start xdr-agent.service  || true
+  fi
 fi
 
 exit 0

@@ -156,10 +156,12 @@ Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
   "control_plane_url": "http://localhost:5601",
   "enrollment_path": "/api/v1/agents/enroll",
   "heartbeat_path": "/api/v1/agents/heartbeat",
+  "commands_path": "/api/v1/agents/commands",
   "enrollment_token": "",
   "policy_id": "default-endpoint",
   "tags": ["linux", "xdr-agent"],
   "enroll_interval_seconds": 30,
+  "command_poll_interval_seconds": 5,
   "request_timeout_seconds": 10,
   "state_path": "/var/lib/xdr-agent/state.json",
   "insecure_skip_tls_verify": false,
@@ -175,10 +177,12 @@ Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
 | `control_plane_url` | Yes | XDR manager URL (e.g. `https://xdr-manager.example.com`) |
 | `enrollment_path` | Yes | Enrollment API path |
 | `heartbeat_path` | No | Heartbeat API path (default: `/api/v1/agents/heartbeat`) |
+| `commands_path` | No | Fast command poll path (default: `/api/v1/agents/commands`) |
 | `enrollment_token` | No | Bearer token for enrollment auth |
 | `policy_id` | Yes | Security policy to apply |
 | `tags` | No | Agent tags for grouping |
 | `enroll_interval_seconds` | Yes | Retry interval for enrollment (> 0) |
+| `command_poll_interval_seconds` | No | How often to poll for urgent commands, e.g. upgrades (default: `5`) |
 | `request_timeout_seconds` | Yes | HTTP request timeout (> 0) |
 | `state_path` | Yes | Path to persist agent identity state |
 | `insecure_skip_tls_verify` | No | Skip TLS verification (keep `false` in prod) |

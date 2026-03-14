@@ -29,6 +29,11 @@ type Config struct {
 	TelemetryPath                 string `json:"telemetry_path,omitempty"`
 	TelemetryIntervalSeconds      int    `json:"telemetry_interval_seconds,omitempty"`
 	TelemetryShipIntervalSeconds  int    `json:"telemetry_ship_interval_seconds,omitempty"`
+
+	// Command polling — lightweight endpoint polled frequently to deliver
+	// upgrade and other commands without waiting for the full heartbeat cycle.
+	CommandsPath                string `json:"commands_path,omitempty"`
+	CommandPollIntervalSeconds  int    `json:"command_poll_interval_seconds,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -53,6 +58,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.HeartbeatPath == "" {
 		cfg.HeartbeatPath = "/api/v1/agents/heartbeat"
+	}
+	if cfg.CommandsPath == "" {
+		cfg.CommandsPath = "/api/v1/agents/commands"
 	}
 	if cfg.PolicyID == "" {
 		return cfg, fmt.Errorf("policy_id is required")
@@ -89,6 +97,16 @@ func (c Config) RequestTimeout() time.Duration {
 
 func (c Config) HeartbeatInterval() time.Duration {
 	return 30 * time.Second
+}
+
+// CommandPollInterval returns how often the agent polls the lightweight
+// /commands endpoint for urgent tasks such as upgrades.
+// Default: 5 seconds.
+func (c Config) CommandPollInterval() time.Duration {
+	if c.CommandPollIntervalSeconds > 0 {
+		return time.Duration(c.CommandPollIntervalSeconds) * time.Second
+	}
+	return 5 * time.Second
 }
 
 // TelemetryBaseURL returns the base URL for shipping telemetry data.

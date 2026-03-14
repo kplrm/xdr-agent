@@ -106,6 +106,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	heartbeatTicker := time.NewTicker(cfg.HeartbeatInterval())
 	defer heartbeatTicker.Stop()
 
+	// commandPollTicker fires more frequently than heartbeatTicker so that
+	// urgent commands (e.g. upgrades) are delivered within seconds rather
+	// than waiting for the next full heartbeat cycle.
+	commandPollTicker := time.NewTicker(cfg.CommandPollInterval())
+	defer commandPollTicker.Stop()
+
 	for {
 		if state.Enrolled {
 			break
@@ -295,6 +301,13 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				log.Printf("heartbeat failed: %v", err)
 			} else {
 				handleHeartbeatCommands(hbResp)
+			}
+		case <-commandPollTicker.C: // Fast command poll — delivers upgrades within seconds.
+			cmdResp, err := enroll.PollCommands(ctx, cfg, state, buildinfo.Version)
+			if err != nil {
+				log.Printf("command poll failed: %v", err)
+			} else if len(cmdResp.PendingCommands) > 0 {
+				handleHeartbeatCommands(cmdResp)
 			}
 		}
 	}
