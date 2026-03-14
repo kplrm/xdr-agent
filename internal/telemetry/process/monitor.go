@@ -405,7 +405,13 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 
 		// Session / terminal
 		"session_id": info.SessionID,
-		"tty":        info.TTY,
+		// tty is emitted as an ECS-compatible object {nr, name} so it matches
+		// the index mapping established by the TTY collector (which also uses
+		// payload.process.tty as an object).  Sending a plain integer here
+		// would cause a mapper_parsing_exception that rejects the document.
+		"tty": map[string]interface{}{
+			"nr": info.TTY,
+		},
 
 		// User / group context
 		"user": map[string]interface{}{
