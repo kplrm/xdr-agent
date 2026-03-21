@@ -1,6 +1,6 @@
 Name:           xdr-agent
 Version:        @VERSION@
-Release:        1%{?dist}
+Release:        1
 Summary:        Lightweight XDR agent (identity and enrollment)
 License:        AGPL-3.0
 URL:            https://example.com/xdr-agent
