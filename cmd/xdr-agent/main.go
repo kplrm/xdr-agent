@@ -73,6 +73,13 @@ func runCommand(command string, args []string) error {
 		flags.SetOutput(os.Stdout)
 		configPath := flags.String("config", config.DefaultConfigPath, "path to config json")
 
+		// Config override flags — when set, these values override the config
+		// file and are persisted back so subsequent runs use them.
+		controlPlaneURL := flags.String("control-plane-url", "", "override control_plane_url")
+		policyIDFlag := flags.String("policy-id", "", "override policy_id")
+		tagsFlag := flags.String("tags", "", "override tags (comma-separated)")
+		insecureSkipTLS := flags.Bool("insecure-skip-tls-verify", false, "override insecure_skip_tls_verify")
+
 		enrollmentToken := ""
 		parseArgs := args
 		if command == "enroll" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -88,11 +95,11 @@ func runCommand(command string, args []string) error {
 			rest := flags.Args()
 			if enrollmentToken == "" {
 				if len(rest) != 1 {
-					return fmt.Errorf("usage: xdr-agent enroll <enrollment_token> [--config path]")
+					return fmt.Errorf("usage: xdr-agent enroll <enrollment_token> [--config path] [--control-plane-url url] [--policy-id id] [--tags t1,t2]")
 				}
 				enrollmentToken = strings.TrimSpace(rest[0])
 			} else if len(rest) != 0 {
-				return fmt.Errorf("usage: xdr-agent enroll <enrollment_token> [--config path]")
+				return fmt.Errorf("usage: xdr-agent enroll <enrollment_token> [--config path] [--control-plane-url url] [--policy-id id] [--tags t1,t2]")
 			}
 			if enrollmentToken == "" {
 				return fmt.Errorf("enrollment_token cannot be empty")
@@ -107,6 +114,37 @@ func runCommand(command string, args []string) error {
 				return fmt.Errorf("config file not found: %s", *configPath)
 			}
 			return fmt.Errorf("cannot access config file %s: %w", *configPath, err)
+		}
+
+		// Apply CLI overrides to the config file before loading.
+		overridesSet := false
+		if *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS {
+			cfg, err := config.LoadRaw(*configPath)
+			if err != nil {
+				return err
+			}
+			if *controlPlaneURL != "" {
+				cfg.ControlPlaneURL = *controlPlaneURL
+				overridesSet = true
+			}
+			if *policyIDFlag != "" {
+				cfg.PolicyID = *policyIDFlag
+				overridesSet = true
+			}
+			if *tagsFlag != "" {
+				cfg.Tags = splitTags(*tagsFlag)
+				overridesSet = true
+			}
+			if *insecureSkipTLS {
+				cfg.InsecureSkipTLSVerify = true
+				overridesSet = true
+			}
+			if overridesSet {
+				if err := config.Save(*configPath, cfg); err != nil {
+					return fmt.Errorf("save config overrides: %w", err)
+				}
+				fmt.Fprintln(os.Stdout, "config overrides saved to", *configPath)
+			}
 		}
 
 		// Use signal.NotifyContext to handle graceful shutdown on SIGTERM and SIGINT
@@ -131,6 +169,18 @@ func runCommand(command string, args []string) error {
 	default:
 		return fmt.Errorf("unsupported command %q", command)
 	}
+}
+
+// splitTags splits a comma-separated string into a trimmed slice, discarding empty entries.
+func splitTags(s string) []string {
+	var tags []string
+	for _, t := range strings.Split(s, ",") {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
 }
 
 func enableAndStartServiceAfterEnroll() error {
@@ -198,6 +248,13 @@ func printHelp() {
 	fmt.Println("  enroll     Perform one enrollment attempt and exit")
 	fmt.Println("  completion Output shell completion script")
 	fmt.Println("  remove     Remove xdr-agent files and service")
+	fmt.Println()
+	fmt.Println("Config overrides (for run and enroll):")
+	fmt.Println("  --config <path>              Path to config JSON (default: /etc/xdr-agent/config.json)")
+	fmt.Println("  --control-plane-url <url>    Override control_plane_url and save to config")
+	fmt.Println("  --policy-id <id>             Override policy_id and save to config")
+	fmt.Println("  --tags <t1,t2,...>           Override tags (comma-separated) and save to config")
+	fmt.Println("  --insecure-skip-tls-verify   Set insecure_skip_tls_verify=true and save to config")
 	fmt.Println("  version    Print build version")
 	fmt.Println()
 	fmt.Printf("Examples:\n")

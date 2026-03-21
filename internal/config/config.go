@@ -25,15 +25,29 @@ type Config struct {
 	// Telemetry shipping — optional fields.
 	// When TelemetryURL is empty the agent ships telemetry to ControlPlaneURL.
 	// Setting a different URL allows routing through Kafka, Logstash, etc.
-	TelemetryURL                  string `json:"telemetry_url,omitempty"`
-	TelemetryPath                 string `json:"telemetry_path,omitempty"`
-	TelemetryIntervalSeconds      int    `json:"telemetry_interval_seconds,omitempty"`
-	TelemetryShipIntervalSeconds  int    `json:"telemetry_ship_interval_seconds,omitempty"`
+	TelemetryURL                 string `json:"telemetry_url,omitempty"`
+	TelemetryPath                string `json:"telemetry_path,omitempty"`
+	TelemetryIntervalSeconds     int    `json:"telemetry_interval_seconds,omitempty"`
+	TelemetryShipIntervalSeconds int    `json:"telemetry_ship_interval_seconds,omitempty"`
 
 	// Command polling — lightweight endpoint polled frequently to deliver
 	// upgrade and other commands without waiting for the full heartbeat cycle.
-	CommandsPath                string `json:"commands_path,omitempty"`
-	CommandPollIntervalSeconds  int    `json:"command_poll_interval_seconds,omitempty"`
+	CommandsPath               string `json:"commands_path,omitempty"`
+	CommandPollIntervalSeconds int    `json:"command_poll_interval_seconds,omitempty"`
+}
+
+// LoadRaw reads a config file and unmarshals it without validation.
+// Useful for applying CLI overrides before saving back.
+func LoadRaw(path string) (Config, error) {
+	var cfg Config
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := json.Unmarshal(content, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	return cfg, nil
 }
 
 func Load(path string) (Config, error) {
@@ -85,6 +99,19 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Save writes the config back to the given path as indented JSON.
+func Save(path string, cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	return nil
 }
 
 func (c Config) EnrollInterval() time.Duration {
