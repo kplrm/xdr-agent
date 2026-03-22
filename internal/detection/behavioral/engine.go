@@ -6,13 +6,72 @@
 // Inspired by: Elastic EQL, SIGMA rules, CrowdStrike IOA
 package behavioral
 
-// Engine evaluates behavioral rules against incoming telemetry events.
+import (
+	"context"
+	"log"
+	"sync"
+	"time"
 
-// TODO: Implement behavioral engine
-// - Load rules from rules/behavioral/*.yml
-// - Support rule conditions: process name, command-line regex, parent process,
-//   file path, network destination, user, sequence of events
-// - Evaluate rules against each incoming telemetry event
-// - Support stateful rules (correlate events over time windows)
-// - Support SIGMA rule format (industry standard)
-// - Emit alerts with MITRE ATT&CK mapping
+	"xdr-agent/internal/events"
+)
+
+type Engine struct {
+	rulesDir string
+	reload   time.Duration
+
+	mu    sync.RWMutex
+	rules []Rule
+}
+
+func NewEngine(rulesDir string) (*Engine, error) {
+	e := &Engine{
+		rulesDir: rulesDir,
+		reload:   30 * time.Second,
+	}
+	if err := e.Reload(); err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func (e *Engine) Reload() error {
+	rules, err := LoadRulesFromDir(e.rulesDir)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.rules = rules
+	e.mu.Unlock()
+	log.Printf("behavioral: loaded %d rules from %s", len(rules), e.rulesDir)
+	return nil
+}
+
+func (e *Engine) StartAutoReload(ctx context.Context) {
+	ticker := time.NewTicker(e.reload)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := e.Reload(); err != nil {
+				log.Printf("behavioral: reload failed: %v", err)
+			}
+		}
+	}
+}
+
+func (e *Engine) Match(event events.Event) []Rule {
+	e.mu.RLock()
+	rules := make([]Rule, len(e.rules))
+	copy(rules, e.rules)
+	e.mu.RUnlock()
+
+	matches := make([]Rule, 0, 4)
+	for _, rule := range rules {
+		if rule.Match(event) {
+			matches = append(matches, rule)
+		}
+	}
+	return matches
+}

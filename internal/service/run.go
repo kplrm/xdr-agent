@@ -4,16 +4,20 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 
+	"xdr-agent/internal/agentlog"
 	"xdr-agent/internal/buildinfo"
 	"xdr-agent/internal/capability"
 	"xdr-agent/internal/config"
 	"xdr-agent/internal/controlplane"
+	"xdr-agent/internal/detection"
 	"xdr-agent/internal/enroll"
 	"xdr-agent/internal/events"
 	"xdr-agent/internal/identity"
+	"xdr-agent/internal/prevention"
 	"xdr-agent/internal/telemetry/file"
 	"xdr-agent/internal/telemetry/injection"
 	"xdr-agent/internal/telemetry/ipc"
@@ -38,6 +42,15 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		cfg.EnrollmentToken = enrollmentToken
 	}
 
+	postureState := controlplane.DefensePosture{}
+	if cachedPosture, postureErr := controlplane.LoadDefensePosture(cfg.DefensePosturePath); postureErr == nil {
+		controlplane.ApplyDefensePosture(&cfg, cachedPosture)
+		postureState = cachedPosture
+		log.Printf("Defense Posture cache loaded: policy_id=%s version=%d mode=%s", cachedPosture.PolicyID, cachedPosture.Version, cachedPosture.Mode)
+	} else if !os.IsNotExist(postureErr) {
+		log.Printf("warning: failed to load Defense Posture cache: %v", postureErr)
+	}
+
 	// Ensure identity State from 'state_path' is initialized and load current state
 	state, err := identity.Ensure(cfg.StatePath)
 	if err != nil {
@@ -45,6 +58,8 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	}
 
 	log.Printf("xdr-agent starting: agent_id=%s machine_id=%s hostname=%s", state.AgentID, state.MachineID, state.Hostname)
+
+	controlPlaneClient := controlplane.NewClient(cfg.ControlPlaneURL, cfg.EnrollmentToken, cfg.RequestTimeout(), cfg.InsecureSkipTLSVerify)
 
 	enrollAttempt := func() error {
 		resp, enrollErr := enroll.Enroll(ctx, cfg, state, buildinfo.Version) // Attempt enrollment with the current state and configuration
@@ -100,6 +115,71 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		}
 	}
 
+	syncDefensePosture := func() bool {
+		fetchedPosture, postureErr := controlPlaneClient.FetchDefensePosture(ctx, cfg.PolicyID)
+		if postureErr != nil {
+			log.Printf("warning: Defense Posture fetch failed: %v", postureErr)
+			return false
+		}
+
+		if !controlplane.ShouldApplyDefensePosture(postureState, fetchedPosture) {
+			return false
+		}
+
+		controlplane.ApplyDefensePosture(&cfg, fetchedPosture)
+		if err := controlplane.SaveDefensePosture(cfg.DefensePosturePath, fetchedPosture); err != nil {
+			log.Printf("warning: failed to persist Defense Posture: %v", err)
+		}
+
+		postureState = fetchedPosture
+		log.Printf("Defense Posture updated: policy_id=%s version=%d mode=%s", fetchedPosture.PolicyID, fetchedPosture.Version, fetchedPosture.Mode)
+
+		ackErr := controlPlaneClient.AckDefensePosture(ctx, cfg.DefensePostureAckPath, controlplane.DefensePostureAckRequest{
+			AgentID:        state.AgentID,
+			PolicyID:       cfg.PolicyID,
+			PostureVersion: fetchedPosture.Version,
+			Hostname:       state.Hostname,
+		})
+		if ackErr != nil {
+			log.Printf("warning: Defense Posture ACK failed: %v", ackErr)
+			return true
+		}
+		log.Printf("Defense Posture ACK sent: policy_id=%s version=%d", cfg.PolicyID, fetchedPosture.Version)
+		return true
+	}
+
+	// Sync YARA rules bundle from xdr-defense.
+	syncYaraBundle := func() bool {
+		// Only fetch if YARA detection is enabled
+		if !cfg.DetectionPrevention.Capabilities.Malware.YaraDetection {
+			return false
+		}
+
+		bundle, err := controlPlaneClient.FetchSignedYaraBundle(ctx, cfg.PolicyID)
+		if err != nil {
+			log.Printf("warning: failed to fetch YARA bundle: %v", err)
+			return false
+		}
+
+		// Get public key for signature verification
+		publicKeyB64, err := controlplane.GetPublicKeyForPolicy(cfg.PolicyID)
+		if err != nil {
+			log.Printf("warning: failed to get signing public key: %v", err)
+			return false
+		}
+
+		// Activate bundle (verifies signature, validates rules, saves to disk)
+		rulesDir := "/etc/xdr-agent/rules/malware/yara"
+		metadataPath := "/etc/xdr-agent/state/yara-bundle-metadata.json"
+		if err := controlplane.ActivateYaraBundle(bundle, publicKeyB64, rulesDir, metadataPath); err != nil {
+			log.Printf("warning: failed to activate YARA bundle: %v", err)
+			return false
+		}
+
+		log.Printf("YARA bundle activated: policy_id=%s bundle_version=%d enabled_rules=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.ActiveChecksums))
+		return true
+	}
+
 	enrollTicker := time.NewTicker(cfg.EnrollInterval())
 	defer enrollTicker.Stop()
 
@@ -111,6 +191,9 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	// than waiting for the next full heartbeat cycle.
 	commandPollTicker := time.NewTicker(cfg.CommandPollInterval())
 	defer commandPollTicker.Stop()
+
+	defensePostureTicker := time.NewTicker(cfg.DefensePosturePollInterval())
+	defer defensePostureTicker.Stop()
 
 	for {
 		if state.Enrolled {
@@ -134,8 +217,11 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		handleHeartbeatCommands(hbResp)
 	}
 
+	_ = syncDefensePosture()
+
 	// ── Event pipeline ──────────────────────────────────────────────────
 	pipeline := events.NewPipeline(4096)
+	logPipeline := events.NewPipeline(1024)
 
 	// ── Telemetry shipper ──────────────────────────────────────────────
 	shipper := controlplane.NewShipper(controlplane.ShipperConfig{
@@ -149,9 +235,44 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	})
 	pipeline.Subscribe(shipper.Enqueue)
 
+	logShipper := controlplane.NewShipper(controlplane.ShipperConfig{
+		TelemetryURL:    cfg.LogsBaseURL(),
+		TelemetryPath:   cfg.LogsEndpointPath(),
+		AgentID:         state.AgentID,
+		Interval:        cfg.LogsShipInterval(),
+		BatchSize:       300,
+		RequestTimeout:  cfg.RequestTimeout(),
+		InsecureSkipTLS: cfg.InsecureSkipTLSVerify,
+	})
+	logPipeline.Subscribe(logShipper.Enqueue)
+
+	agentLogger := agentlog.New(cfg.Logging.Level, state.AgentID, state.Hostname, logPipeline)
+
 	go pipeline.Run(ctx)
 	go shipper.Run(ctx)
+	go logPipeline.Run(ctx)
+	if cfg.Logging.Ship.Enabled {
+		go logShipper.Run(ctx)
+	}
 	log.Printf("event pipeline and shipper started")
+	agentLogger.Info("service", "detection/prevention runtime enabled", map[string]interface{}{
+		"mode": cfg.DetectionPrevention.Mode,
+	})
+
+	detectionEngine, err := detection.NewEngine(cfg, pipeline)
+	if err != nil {
+		log.Printf("detection engine init failed: %v", err)
+		agentLogger.Error("detection", "detection engine initialization failed", map[string]interface{}{"error": err.Error()})
+	} else {
+		detectionEngine.Start(ctx)
+		agentLogger.Info("detection", "detection engine started", nil)
+	}
+
+	preventionManager := prevention.NewManager(cfg, pipeline)
+	pipeline.Subscribe(preventionManager.Handle)
+	agentLogger.Info("prevention", "prevention manager registered", map[string]interface{}{
+		"enabled": cfg.DetectionPrevention.Capabilities.Prevention.Enabled,
+	})
 
 	// ── Telemetry collectors ────────────────────────────────────────────
 
@@ -308,6 +429,17 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				log.Printf("command poll failed: %v", err)
 			} else if len(cmdResp.PendingCommands) > 0 {
 				handleHeartbeatCommands(cmdResp)
+			}
+		case <-defensePostureTicker.C:
+			if syncDefensePosture() {
+				if detectionEngine != nil {
+					detectionEngine.UpdateDefensePosture(cfg.DetectionPrevention)
+				}
+				preventionManager.UpdateDefensePosture(cfg.DetectionPrevention)
+			}
+			// Sync YARA rules bundle after posture update
+			if syncYaraBundle() && detectionEngine != nil {
+				detectionEngine.ReloadMalwareRules()
 			}
 		}
 	}
