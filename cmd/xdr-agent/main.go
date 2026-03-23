@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 
 	"xdr-agent/internal/buildinfo"
 	"xdr-agent/internal/config"
+	"xdr-agent/internal/controlplane"
 	"xdr-agent/internal/service"
 )
 
@@ -44,7 +46,7 @@ func run() error {
 	}
 
 	switch os.Args[1] {
-	case "run", "enroll", "remove", "version", "completion":
+	case "run", "enroll", "remove", "version", "completion", "defense-posture":
 		return runCommand(os.Args[1], os.Args[2:])
 	case "-h", "--help", "help":
 		printHelp()
@@ -64,6 +66,38 @@ func runCommand(command string, args []string) error {
 			return fmt.Errorf("usage: xdr-agent completion bash")
 		}
 		printBashCompletion()
+		return nil
+	case "defense-posture":
+		flags := flag.NewFlagSet(command, flag.ContinueOnError)
+		flags.SetOutput(os.Stdout)
+		configPath := flags.String("config", config.DefaultConfigPath, "path to config json")
+		if err := flags.Parse(args); err != nil {
+			return err
+		}
+
+		rawCfg, err := config.LoadRaw(*configPath)
+		if err != nil {
+			return err
+		}
+		posturePath := rawCfg.DefensePosturePath
+		if posturePath == "" {
+			posturePath = config.DefaultDefensePosturePath
+		}
+
+		posture, err := controlplane.LoadDefensePosture(posturePath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintln(os.Stdout, "{}")
+				return nil
+			}
+			return err
+		}
+
+		output, err := json.MarshalIndent(posture, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, string(output))
 		return nil
 	case "remove":
 		return removeInstallation()
@@ -118,10 +152,14 @@ func runCommand(command string, args []string) error {
 
 		// Apply CLI overrides to the config file before loading.
 		overridesSet := false
-		if *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS {
+		if *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS || (command == "enroll" && enrollmentToken != "") {
 			cfg, err := config.LoadRaw(*configPath)
 			if err != nil {
 				return err
+			}
+			if command == "enroll" && enrollmentToken != "" {
+				cfg.EnrollmentToken = enrollmentToken
+				overridesSet = true
 			}
 			if *controlPlaneURL != "" {
 				cfg.ControlPlaneURL = *controlPlaneURL
@@ -201,11 +239,13 @@ func enableAndStartServiceAfterEnroll() error {
 	if err := exec.Command(systemctlPath, "enable", "xdr-agent.service").Run(); err != nil {
 		return fmt.Errorf("systemctl enable xdr-agent.service failed: %w", err)
 	}
-	if err := exec.Command(systemctlPath, "start", "xdr-agent.service").Run(); err != nil {
-		return fmt.Errorf("systemctl start xdr-agent.service failed: %w", err)
+	// Restart guarantees the running service process reloads the config that was
+	// just updated by `xdr-agent enroll` (notably enrollment_token overrides).
+	if err := exec.Command(systemctlPath, "restart", "xdr-agent.service").Run(); err != nil {
+		return fmt.Errorf("systemctl restart xdr-agent.service failed: %w", err)
 	}
 
-	fmt.Fprintln(os.Stdout, "xdr-agent.service enabled and started")
+	fmt.Fprintln(os.Stdout, "xdr-agent.service enabled and restarted")
 	return nil
 }
 
@@ -246,6 +286,7 @@ func printHelp() {
 	fmt.Println("Commands:")
 	fmt.Println("  run        Run the long-lived agent process")
 	fmt.Println("  enroll     Perform one enrollment attempt and exit")
+	fmt.Println("  defense-posture Show cached local Defense Posture JSON")
 	fmt.Println("  completion Output shell completion script")
 	fmt.Println("  remove     Remove xdr-agent files and service")
 	fmt.Println()
@@ -260,6 +301,7 @@ func printHelp() {
 	fmt.Printf("Examples:\n")
 	fmt.Printf("  xdr-agent run --config %s\n", config.DefaultConfigPath)
 	fmt.Printf("  xdr-agent enroll <enrollment_token> --config %s\n", config.DefaultConfigPath)
+	fmt.Printf("  xdr-agent defense-posture --config %s\n", config.DefaultConfigPath)
 	fmt.Printf("  xdr-agent completion bash\n")
 	fmt.Printf("  sudo xdr-agent remove\n")
 }
@@ -271,12 +313,12 @@ _xdr_agent_completion() {
 	cur="${COMP_WORDS[COMP_CWORD]}"
 
 	if [[ ${COMP_CWORD} -eq 1 ]]; then
-		COMPREPLY=( $(compgen -W "run enroll remove version completion help" -- "${cur}") )
+		COMPREPLY=( $(compgen -W "run enroll defense-posture remove version completion help" -- "${cur}") )
 		return 0
 	fi
 
 	case "${COMP_WORDS[1]}" in
-		run|enroll)
+		run|enroll|defense-posture)
 			COMPREPLY=( $(compgen -W "--config -h --help" -- "${cur}") )
 			;;
 		completion)

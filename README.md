@@ -80,7 +80,7 @@ xdr-agent/
 │   └── ruleformat/             # Detection rule parsing (SIGMA-like)
 ├── rules/                      # Detection and compliance rule files
 │   ├── behavioral/             #   SIGMA-like YAML rules
-│   ├── malware/                #   Known hashes + YARA rules
+│   ├── malware/                #   Known hashes + control-plane-delivered YARA rules
 │   ├── compliance/             #   Hardening check definitions
 │   └── threatintel/            #   Threat intel feed config
 ├── config/config.json          # Default agent configuration
@@ -151,6 +151,10 @@ make enroll ENROLLMENT_TOKEN=<token>  # Enroll and exit
 
 Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
 
+The agent package ships without bundled YARA rules. The YARA rules directory at
+`/etc/xdr-agent/rules/malware/yara` is populated only after `xdr-defense`
+imports and distributes rule bundles for the agent's assigned policy.
+
 ```json
 {
   "control_plane_url": "http://localhost:5601",
@@ -164,11 +168,17 @@ Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
   "command_poll_interval_seconds": 5,
   "request_timeout_seconds": 10,
   "state_path": "/var/lib/xdr-agent/state.json",
+  "defense_posture_path": "/var/lib/xdr-agent/defense_posture.json",
+  "defense_posture_poll_interval_seconds": 30,
+  "defense_posture_ack_path": "/api/xdr-defense/policy-rollouts/ack",
   "insecure_skip_tls_verify": false,
   "telemetry_url": "",
   "telemetry_path": "/api/v1/agents/telemetry",
   "telemetry_interval_seconds": 60,
-  "telemetry_ship_interval_seconds": 1
+  "telemetry_ship_interval_seconds": 1,
+  "security_url": "",
+  "security_path": "/api/v1/agents/security",
+  "security_ship_interval_seconds": 1
 }
 ```
 
@@ -185,17 +195,24 @@ Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
 | `command_poll_interval_seconds` | No | How often to poll for urgent commands, e.g. upgrades (default: `5`) |
 | `request_timeout_seconds` | Yes | HTTP request timeout (> 0) |
 | `state_path` | Yes | Path to persist agent identity state |
+| `defense_posture_path` | No | Local Defense Posture state JSON path (default: `/var/lib/xdr-agent/defense_posture.json`) |
+| `defense_posture_poll_interval_seconds` | No | Poll interval for Defense Posture overlays (default: `30`) |
+| `defense_posture_ack_path` | No | ACK API path for delivered Defense Posture versions (default: `/api/xdr-defense/policy-rollouts/ack`) |
 | `insecure_skip_tls_verify` | No | Skip TLS verification (keep `false` in prod) |
 | `telemetry_url` | No | Telemetry shipping URL; defaults to `control_plane_url` |
 | `telemetry_path` | No | Telemetry API path (default: `/api/v1/agents/telemetry`) |
 | `telemetry_interval_seconds` | No | Telemetry collection interval in seconds (default: `60`) |
 | `telemetry_ship_interval_seconds` | No | Max linger before shipping buffered events (default: `1`) |
+| `security_url` | No | Security-event shipping URL; defaults to `telemetry_url` or `control_plane_url` |
+| `security_path` | No | Security-event API path (default: `/api/v1/agents/security`) |
+| `security_ship_interval_seconds` | No | Max linger before shipping buffered security events (default: `telemetry_ship_interval_seconds`) |
 
 ## CLI commands
 
 ```
 xdr-agent run        Run the long-lived agent process
 xdr-agent enroll     Perform one enrollment attempt and exit
+xdr-agent defense-posture   Show cached local Defense Posture JSON
 xdr-agent remove     Remove xdr-agent files and systemd service (requires root)
 xdr-agent version    Print build version
 xdr-agent completion bash   Output bash completion script
