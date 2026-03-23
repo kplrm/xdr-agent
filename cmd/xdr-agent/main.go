@@ -152,10 +152,14 @@ func runCommand(command string, args []string) error {
 
 		// Apply CLI overrides to the config file before loading.
 		overridesSet := false
-		if *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS {
+		if *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS || (command == "enroll" && enrollmentToken != "") {
 			cfg, err := config.LoadRaw(*configPath)
 			if err != nil {
 				return err
+			}
+			if command == "enroll" && enrollmentToken != "" {
+				cfg.EnrollmentToken = enrollmentToken
+				overridesSet = true
 			}
 			if *controlPlaneURL != "" {
 				cfg.ControlPlaneURL = *controlPlaneURL
@@ -235,11 +239,13 @@ func enableAndStartServiceAfterEnroll() error {
 	if err := exec.Command(systemctlPath, "enable", "xdr-agent.service").Run(); err != nil {
 		return fmt.Errorf("systemctl enable xdr-agent.service failed: %w", err)
 	}
-	if err := exec.Command(systemctlPath, "start", "xdr-agent.service").Run(); err != nil {
-		return fmt.Errorf("systemctl start xdr-agent.service failed: %w", err)
+	// Restart guarantees the running service process reloads the config that was
+	// just updated by `xdr-agent enroll` (notably enrollment_token overrides).
+	if err := exec.Command(systemctlPath, "restart", "xdr-agent.service").Run(); err != nil {
+		return fmt.Errorf("systemctl restart xdr-agent.service failed: %w", err)
 	}
 
-	fmt.Fprintln(os.Stdout, "xdr-agent.service enabled and started")
+	fmt.Fprintln(os.Stdout, "xdr-agent.service enabled and restarted")
 	return nil
 }
 

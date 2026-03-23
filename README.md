@@ -175,7 +175,10 @@ imports and distributes rule bundles for the agent's assigned policy.
   "telemetry_url": "",
   "telemetry_path": "/api/v1/agents/telemetry",
   "telemetry_interval_seconds": 60,
-  "telemetry_ship_interval_seconds": 1
+  "telemetry_ship_interval_seconds": 1,
+  "security_url": "",
+  "security_path": "/api/v1/agents/security",
+  "security_ship_interval_seconds": 1
 }
 ```
 
@@ -200,6 +203,9 @@ imports and distributes rule bundles for the agent's assigned policy.
 | `telemetry_path` | No | Telemetry API path (default: `/api/v1/agents/telemetry`) |
 | `telemetry_interval_seconds` | No | Telemetry collection interval in seconds (default: `60`) |
 | `telemetry_ship_interval_seconds` | No | Max linger before shipping buffered events (default: `1`) |
+| `security_url` | No | Security-event shipping URL; defaults to `telemetry_url` or `control_plane_url` |
+| `security_path` | No | Security-event API path (default: `/api/v1/agents/security`) |
+| `security_ship_interval_seconds` | No | Max linger before shipping buffered security events (default: `telemetry_ship_interval_seconds`) |
 
 ## CLI commands
 

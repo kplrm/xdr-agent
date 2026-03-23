@@ -148,7 +148,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		return true
 	}
 
-	// Sync YARA rules bundle from xdr-defense.
+	// Sync YARA rules bundle from xdr-defense with per-rule tracking.
 	syncYaraBundle := func() bool {
 		// Only fetch if YARA detection is enabled
 		if !cfg.DetectionPrevention.Capabilities.Malware.YaraDetection {
@@ -168,15 +168,69 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			return false
 		}
 
-		// Activate bundle (verifies signature, validates rules, saves to disk)
+		// Activate bundle with per-rule tracking
 		rulesDir := "/etc/xdr-agent/rules/malware/yara"
 		metadataPath := "/etc/xdr-agent/state/yara-bundle-metadata.json"
-		if err := controlplane.ActivateYaraBundle(bundle, publicKeyB64, rulesDir, metadataPath); err != nil {
-			log.Printf("warning: failed to activate YARA bundle: %v", err)
+		failedRulesMap, activateErr := controlplane.ActivateBundleWithTracking(bundle, publicKeyB64, rulesDir, metadataPath)
+
+		// Determine overall state: "acked" (all loaded) | "partial" (some failed) | "failed" (activation error)
+		activationState := "acked"
+		loadedCount := 0
+		failedRulesList := make([]controlplane.RuleActivationStatus, 0)
+		for _, status := range failedRulesMap {
+			if status.Status == "loaded" {
+				loadedCount++
+			}
+			if status.Status == "failed" {
+				failedRulesList = append(failedRulesList, status)
+			}
+		}
+
+		if activateErr != nil {
+			activationState = "failed"
+		} else if len(failedRulesList) > 0 {
+			activationState = "partial"
+		} else if len(bundle.Rules) > 0 {
+			// Backward safety: if activation succeeded but status map is unexpectedly empty,
+			// treat all bundle rules as loaded.
+			loadedCount = len(bundle.Rules)
+		}
+
+		// Report per-rule status to control plane
+		mpID := bundle.ManagerPolicyID
+		if mpID == "" {
+			mpID = bundle.PolicyID
+		}
+
+		statusReport := &controlplane.YaraRolloutStatusReport{
+			ManagerPolicyID: mpID,
+			AgentID:         state.AgentID,
+			State:           activationState,
+			TotalRules:      len(bundle.Rules),
+			LoadedRules:     loadedCount,
+			FailedRules:     failedRulesList,
+			ReportedAt:      time.Now().Unix(),
+		}
+
+		if reportErr := controlPlaneClient.ReportYaraRuleStatus(ctx, cfg.YaraRuleStatusPath, statusReport); reportErr != nil {
+			log.Printf("warning: failed to report YARA rule status: %v", reportErr)
+		} else {
+			log.Printf("YARA rule status reported: state=%s loaded=%d failed=%d", activationState, loadedCount, len(failedRulesList))
+		}
+
+		if activateErr != nil {
+			log.Printf("warning: failed to activate YARA bundle: %v", activateErr)
 			return false
 		}
 
-		log.Printf("YARA bundle activated: policy_id=%s bundle_version=%d enabled_rules=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.ActiveChecksums))
+		log.Printf("YARA bundle activated: policy_id=%s bundle_version=%d total_rules=%d loaded_rules=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules), loadedCount)
+
+		// Update agent state with loaded rule count
+		state.LoadedRuleCount = loadedCount
+		if err := identity.Save(cfg.StatePath, state); err != nil {
+			log.Printf("warning: failed to save agent state with loaded rule count: %v", err)
+		}
+
 		return true
 	}
 
@@ -194,6 +248,55 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	defensePostureTicker := time.NewTicker(cfg.DefensePosturePollInterval())
 	defer defensePostureTicker.Stop()
+
+	yaraBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
+	defer yaraBundleTicker.Stop()
+
+	yaraInventoryTicker := time.NewTicker(cfg.YaraInventoryCheckInterval())
+	defer yaraInventoryTicker.Stop()
+
+	// Periodic rule inventory check to detect degradation
+	reportRuleInventory := func() bool {
+		// Only report if YARA detection is enabled
+		if !cfg.DetectionPrevention.Capabilities.Malware.YaraDetection {
+			return false
+		}
+
+		rulesDir := "/etc/xdr-agent/rules/malware/yara"
+		entries, err := os.ReadDir(rulesDir)
+		if err != nil && !os.IsNotExist(err) {
+			log.Printf("warning: failed to check rule inventory: %v", err)
+			return false
+		}
+
+		// Count actual rule files
+		ruleCount := 0
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".yar") {
+				ruleCount++
+			}
+		}
+
+		inventory := &controlplane.PeriodicRuleInventory{
+			AgentID:         state.AgentID,
+			LoadedRuleCount: ruleCount,
+			FailedRules:     []controlplane.RuleActivationStatus{},
+			CheckedAt:       time.Now().Unix(),
+		}
+
+		// Report inventory (non-fatal on error)
+		if reportErr := controlPlaneClient.ReportRuleInventory(ctx, cfg.YaraRuleInventoryPath, inventory); reportErr != nil {
+			log.Printf("warning: failed to report rule inventory: %v", reportErr)
+		} else {
+			log.Printf("rule inventory reported: count=%d", ruleCount)
+			state.LastYaraInventoryAt = time.Now().UTC().Format(time.RFC3339)
+			if err := identity.Save(cfg.StatePath, state); err != nil {
+				log.Printf("warning: failed to save agent state after inventory report: %v", err)
+			}
+		}
+
+		return true
+	}
 
 	for {
 		if state.Enrolled {
@@ -221,7 +324,17 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	// ── Event pipeline ──────────────────────────────────────────────────
 	pipeline := events.NewPipeline(4096)
+	telemetryPipeline := events.NewPipeline(4096)
+	securityPipeline := events.NewPipeline(2048)
 	logPipeline := events.NewPipeline(1024)
+
+	pipeline.Subscribe(func(event events.Event) {
+		if isSecurityClassifiedEvent(event) {
+			securityPipeline.Emit(event)
+			return
+		}
+		telemetryPipeline.Emit(event)
+	})
 
 	// ── Telemetry shipper ──────────────────────────────────────────────
 	shipper := controlplane.NewShipper(controlplane.ShipperConfig{
@@ -233,7 +346,18 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		RequestTimeout:  cfg.RequestTimeout(),
 		InsecureSkipTLS: cfg.InsecureSkipTLSVerify,
 	})
-	pipeline.Subscribe(shipper.Enqueue)
+	telemetryPipeline.Subscribe(shipper.Enqueue)
+
+	securityShipper := controlplane.NewShipper(controlplane.ShipperConfig{
+		TelemetryURL:    cfg.SecurityBaseURL(),
+		TelemetryPath:   cfg.SecurityEndpointPath(),
+		AgentID:         state.AgentID,
+		Interval:        cfg.SecurityShipInterval(),
+		BatchSize:       500,
+		RequestTimeout:  cfg.RequestTimeout(),
+		InsecureSkipTLS: cfg.InsecureSkipTLSVerify,
+	})
+	securityPipeline.Subscribe(securityShipper.Enqueue)
 
 	logShipper := controlplane.NewShipper(controlplane.ShipperConfig{
 		TelemetryURL:    cfg.LogsBaseURL(),
@@ -249,7 +373,10 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	agentLogger := agentlog.New(cfg.Logging.Level, state.AgentID, state.Hostname, logPipeline)
 
 	go pipeline.Run(ctx)
+	go telemetryPipeline.Run(ctx)
+	go securityPipeline.Run(ctx)
 	go shipper.Run(ctx)
+	go securityShipper.Run(ctx)
 	go logPipeline.Run(ctx)
 	if cfg.Logging.Ship.Enabled {
 		go logShipper.Run(ctx)
@@ -273,6 +400,11 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	agentLogger.Info("prevention", "prevention manager registered", map[string]interface{}{
 		"enabled": cfg.DetectionPrevention.Capabilities.Prevention.Enabled,
 	})
+
+	// Initial YARA sync on startup to avoid waiting for the first periodic tick.
+	if syncYaraBundle() && detectionEngine != nil {
+		detectionEngine.ReloadMalwareRules()
+	}
 
 	// ── Telemetry collectors ────────────────────────────────────────────
 
@@ -437,10 +569,28 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				}
 				preventionManager.UpdateDefensePosture(cfg.DetectionPrevention)
 			}
-			// Sync YARA rules bundle after posture update
+		case <-yaraBundleTicker.C:
+			// Sync YARA rules frequently so delete/activate rollouts are applied quickly,
+			// instead of waiting for the slower defense posture poll loop.
 			if syncYaraBundle() && detectionEngine != nil {
 				detectionEngine.ReloadMalwareRules()
 			}
+		case <-yaraInventoryTicker.C:
+			reportRuleInventory()
 		}
 	}
+}
+
+func isSecurityClassifiedEvent(event events.Event) bool {
+	if event.Kind == "alert" || event.Category == "intrusion_detection" {
+		return true
+	}
+
+	for _, prefix := range []string{"detection.", "prevention.", "response."} {
+		if strings.HasPrefix(event.Module, prefix) {
+			return true
+		}
+	}
+
+	return false
 }
