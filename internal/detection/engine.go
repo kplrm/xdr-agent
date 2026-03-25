@@ -82,8 +82,16 @@ func (e *Engine) ReloadMalwareRules() {
 	if e.malware != nil {
 		if err := e.malware.Reload(e.cfg.Rules.HashesFile, e.cfg.Rules.YaraDir); err != nil {
 			log.Printf("warning: failed to reload malware rules: %v", err)
-		} else {
-			log.Printf("malware rules reloaded from disk")
+		}
+	}
+}
+
+func (e *Engine) ReloadBehavioralRules() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.behavioral != nil {
+		if err := e.behavioral.Reload(); err != nil {
+			log.Printf("warning: failed to reload behavioral rules: %v", err)
 		}
 	}
 }

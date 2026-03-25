@@ -2,9 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,6 +36,123 @@ import (
 	"xdr-agent/internal/telemetry/tty"
 	"xdr-agent/internal/upgrade"
 )
+
+type bundleSyncState struct {
+	name                 string
+	lastAppliedVersion   int
+	lastAppliedDigest    string
+	lastAppliedCount     int
+	lastAppliedChecksums []string
+	lastAppliedSource    string
+	lastSkippedDuplicate int
+	lastFailureSignature string
+	lastFailureCount     int
+	lastOutcome          string
+}
+
+func bundleDigest(bundle *controlplane.SignedYaraBundle) string {
+	if bundle == nil {
+		return ""
+	}
+
+	type digestRule struct {
+		ID       string `json:"id"`
+		Filename string `json:"filename"`
+		SHA256   string `json:"sha256"`
+		Enabled  bool   `json:"enabled"`
+	}
+
+	rules := make([]digestRule, 0, len(bundle.Rules))
+	for _, rule := range bundle.Rules {
+		rules = append(rules, digestRule{
+			ID:       rule.ID,
+			Filename: rule.Filename,
+			SHA256:   strings.ToLower(strings.TrimSpace(rule.SHA256)),
+			Enabled:  rule.Enabled,
+		})
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Filename == rules[j].Filename {
+			return rules[i].ID < rules[j].ID
+		}
+		return rules[i].Filename < rules[j].Filename
+	})
+
+	checksums := append([]string(nil), bundle.ActiveChecksums...)
+	sort.Strings(checksums)
+
+	payload := struct {
+		PolicyID       string       `json:"policy_id"`
+		BundleVersion  int          `json:"bundle_version"`
+		GeneratedAt    string       `json:"generated_at"`
+		SigningAlg     string       `json:"signing_alg"`
+		Rules          []digestRule `json:"rules"`
+		ActiveChecksum []string     `json:"active_checksums"`
+	}{
+		PolicyID:       bundle.PolicyID,
+		BundleVersion:  bundle.BundleVersion,
+		GeneratedAt:    bundle.GeneratedAt,
+		SigningAlg:     bundle.SigningAlg,
+		Rules:          rules,
+		ActiveChecksum: checksums,
+	}
+
+	serialized, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	hash := sha256.Sum256(serialized)
+	return hex.EncodeToString(hash[:])
+}
+
+func loadInitialBundleState(name, metadataPath string) bundleSyncState {
+	state := bundleSyncState{name: name, lastOutcome: "unknown"}
+	meta, err := controlplane.LoadBundleMetadata(metadataPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			state.lastOutcome = "metadata_error"
+		}
+		return state
+	}
+	state.lastAppliedVersion = meta.BundleVersion
+	state.lastAppliedCount = meta.RuleCount
+	state.lastAppliedChecksums = append([]string(nil), meta.ActiveChecksums...)
+	sort.Strings(state.lastAppliedChecksums)
+	state.lastAppliedSource = "metadata"
+	state.lastOutcome = "active"
+	return state
+}
+
+func (s bundleSyncState) summaryLabel() string {
+	if s.lastOutcome == "disabled" {
+		return "disabled"
+	}
+	if s.lastAppliedVersion > 0 || s.lastAppliedSource != "" {
+		return fmt.Sprintf("v%d,count=%d,state=%s", s.lastAppliedVersion, s.lastAppliedCount, s.lastOutcome)
+	}
+	return fmt.Sprintf("state=%s", s.lastOutcome)
+}
+
+func shouldSkipApply(state bundleSyncState, bundle *controlplane.SignedYaraBundle, digest string) bool {
+	if bundle == nil {
+		return false
+	}
+	if state.lastAppliedVersion <= 0 {
+		return false
+	}
+	if digest != "" && state.lastAppliedDigest != "" {
+		return state.lastAppliedVersion == bundle.BundleVersion && state.lastAppliedDigest == digest
+	}
+	if state.lastAppliedVersion != bundle.BundleVersion || state.lastAppliedCount != len(bundle.Rules) {
+		return false
+	}
+	if len(state.lastAppliedChecksums) == 0 && len(bundle.ActiveChecksums) == 0 {
+		return true
+	}
+	bundleChecksums := append([]string(nil), bundle.ActiveChecksums...)
+	sort.Strings(bundleChecksums)
+	return strings.Join(state.lastAppliedChecksums, ",") == strings.Join(bundleChecksums, ",")
+}
 
 func Run(ctx context.Context, configPath string, once bool, enrollmentToken string) error {
 	// Load configuration from config.json
@@ -115,12 +237,42 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		}
 	}
 
+	yaraMetadataPath := "/etc/xdr-agent/state/yara-bundle-metadata.json"
+	hashesMetadataPath := "/etc/xdr-agent/state/hashes-bundle-metadata.json"
+	behavioralMetadataPath := "/etc/xdr-agent/state/behavioral-bundle-metadata.json"
+
+	yaraState := loadInitialBundleState("yara", yaraMetadataPath)
+	hashesState := loadInitialBundleState("hashes", hashesMetadataPath)
+	behavioralState := loadInitialBundleState("behavioral", behavioralMetadataPath)
+	postureStatus := "active"
+	if postureState.Version == 0 {
+		postureStatus = "unknown"
+	}
+
+	logHeartbeatContentSummary := func() {
+		log.Printf("heartbeat content summary: posture=%s yara=%s hashes=%s behavioral=%s", postureStatus, yaraState.summaryLabel(), hashesState.summaryLabel(), behavioralState.summaryLabel())
+	}
+
 	syncDefensePosture := func() bool {
 		fetchedPosture, postureErr := controlPlaneClient.FetchDefensePosture(ctx, cfg.PolicyID)
 		if postureErr != nil {
+			var fetchErr *controlplane.DefensePostureFetchError
+			if errors.As(postureErr, &fetchErr) && fetchErr.StatusCode == 404 {
+				if postureStatus != "optional-404" {
+					log.Printf("Defense Posture endpoint not configured (status=404); posture sync is optional and will stay quiet until status changes")
+				}
+				postureStatus = "optional-404"
+				return false
+			}
+			postureStatus = "error"
 			log.Printf("warning: Defense Posture fetch failed: %v", postureErr)
 			return false
 		}
+
+		if postureStatus != "active" && postureStatus != "unknown" {
+			log.Printf("Defense Posture endpoint is available again")
+		}
+		postureStatus = "active"
 
 		if !controlplane.ShouldApplyDefensePosture(postureState, fetchedPosture) {
 			return false
@@ -148,32 +300,51 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		return true
 	}
 
+	resolveBundleVerificationKey := func(bundleType string) (string, error) {
+		keyResp, err := controlPlaneClient.FetchSigningPublicKey(ctx)
+		if err == nil {
+			return keyResp.PublicKeyB64, nil
+		}
+
+		log.Printf("warning: failed to fetch signing public key from control plane for %s bundle: %v", bundleType, err)
+
+		publicKeyB64, fallbackErr := controlplane.GetPublicKeyForPolicy(cfg.PolicyID)
+		if fallbackErr != nil {
+			return "", fallbackErr
+		}
+
+		return publicKeyB64, nil
+	}
+
 	// Sync YARA rules bundle from xdr-defense with per-rule tracking.
 	syncYaraBundle := func() bool {
-		// Only fetch if YARA detection is enabled
 		if !cfg.DetectionPrevention.Capabilities.Malware.YaraDetection {
+			yaraState.lastOutcome = "disabled"
 			return false
 		}
 
 		bundle, err := controlPlaneClient.FetchSignedYaraBundle(ctx, cfg.PolicyID)
 		if err != nil {
+			yaraState.lastOutcome = "fetch_error"
 			log.Printf("warning: failed to fetch YARA bundle: %v", err)
 			return false
 		}
 
-		// Get public key for signature verification
-		publicKeyB64, err := controlplane.GetPublicKeyForPolicy(cfg.PolicyID)
-		if err != nil {
-			log.Printf("warning: failed to get signing public key: %v", err)
+		digest := bundleDigest(bundle)
+		if shouldSkipApply(yaraState, bundle, digest) {
+			yaraState.lastSkippedDuplicate++
+			yaraState.lastOutcome = "unchanged"
 			return false
 		}
 
-		// Activate bundle with per-rule tracking
-		rulesDir := "/etc/xdr-agent/rules/malware/yara"
-		metadataPath := "/etc/xdr-agent/state/yara-bundle-metadata.json"
-		failedRulesMap, activateErr := controlplane.ActivateBundleWithTracking(bundle, publicKeyB64, rulesDir, metadataPath)
+		publicKeyB64, err := resolveBundleVerificationKey("yara")
+		if err != nil {
+			yaraState.lastOutcome = "key_error"
+			log.Printf("warning: failed to resolve signing public key: %v", err)
+			return false
+		}
 
-		// Determine overall state: "acked" (all loaded) | "partial" (some failed) | "failed" (activation error)
+		failedRulesMap, activateErr := controlplane.ActivateBundleWithTracking(bundle, publicKeyB64, cfg.Rules.YaraDir, yaraMetadataPath)
 		activationState := "acked"
 		loadedCount := 0
 		failedRulesList := make([]controlplane.RuleActivationStatus, 0)
@@ -191,17 +362,32 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		} else if len(failedRulesList) > 0 {
 			activationState = "partial"
 		} else if len(bundle.Rules) > 0 {
-			// Backward safety: if activation succeeded but status map is unexpectedly empty,
-			// treat all bundle rules as loaded.
 			loadedCount = len(bundle.Rules)
 		}
 
-		// Report per-rule status to control plane
+		if activateErr != nil {
+			yaraState.lastOutcome = "failed"
+			failureSignature := fmt.Sprintf("bundle=%d digest=%s reason=%s", bundle.BundleVersion, digest, activateErr.Error())
+			if failureSignature != yaraState.lastFailureSignature {
+				yaraState.lastFailureSignature = failureSignature
+				yaraState.lastFailureCount = 1
+				log.Printf("warning: failed to activate YARA bundle: %v", activateErr)
+			} else {
+				yaraState.lastFailureCount++
+				if yaraState.lastFailureCount%10 == 0 {
+					log.Printf("warning: repeated YARA activation failure suppressed: bundle_version=%d repeats=%d reason=%v", bundle.BundleVersion, yaraState.lastFailureCount-1, activateErr)
+				}
+			}
+			return false
+		}
+
+		yaraState.lastFailureSignature = ""
+		yaraState.lastFailureCount = 0
+
 		mpID := bundle.ManagerPolicyID
 		if mpID == "" {
 			mpID = bundle.PolicyID
 		}
-
 		statusReport := &controlplane.YaraRolloutStatusReport{
 			ManagerPolicyID: mpID,
 			AgentID:         state.AgentID,
@@ -211,26 +397,114 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			FailedRules:     failedRulesList,
 			ReportedAt:      time.Now().Unix(),
 		}
-
 		if reportErr := controlPlaneClient.ReportYaraRuleStatus(ctx, cfg.YaraRuleStatusPath, statusReport); reportErr != nil {
 			log.Printf("warning: failed to report YARA rule status: %v", reportErr)
-		} else {
-			log.Printf("YARA rule status reported: state=%s loaded=%d failed=%d", activationState, loadedCount, len(failedRulesList))
 		}
 
-		if activateErr != nil {
-			log.Printf("warning: failed to activate YARA bundle: %v", activateErr)
-			return false
-		}
+		yaraState.lastAppliedVersion = bundle.BundleVersion
+		yaraState.lastAppliedDigest = digest
+		yaraState.lastAppliedCount = loadedCount
+		yaraState.lastAppliedChecksums = append([]string(nil), bundle.ActiveChecksums...)
+		sort.Strings(yaraState.lastAppliedChecksums)
+		yaraState.lastAppliedSource = "runtime"
+		yaraState.lastOutcome = activationState
+		log.Printf("YARA bundle activated: policy_id=%s bundle_version=%d total_rules=%d loaded_rules=%d failed_rules=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules), loadedCount, len(failedRulesList))
 
-		log.Printf("YARA bundle activated: policy_id=%s bundle_version=%d total_rules=%d loaded_rules=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules), loadedCount)
-
-		// Update agent state with loaded rule count
 		state.LoadedRuleCount = loadedCount
 		if err := identity.Save(cfg.StatePath, state); err != nil {
 			log.Printf("warning: failed to save agent state with loaded rule count: %v", err)
 		}
 
+		return true
+	}
+
+	// Sync signed hash content bundle from xdr-defense.
+	syncHashesBundle := func() bool {
+		if !cfg.DetectionPrevention.Capabilities.Malware.HashDetection {
+			hashesState.lastOutcome = "disabled"
+			return false
+		}
+
+		bundle, err := controlPlaneClient.FetchSignedHashesBundle(ctx, cfg.PolicyID)
+		if err != nil {
+			hashesState.lastOutcome = "fetch_error"
+			log.Printf("warning: failed to fetch hashes bundle: %v", err)
+			return false
+		}
+
+		digest := bundleDigest(bundle)
+		if shouldSkipApply(hashesState, bundle, digest) {
+			hashesState.lastSkippedDuplicate++
+			hashesState.lastOutcome = "unchanged"
+			return false
+		}
+
+		publicKeyB64, err := resolveBundleVerificationKey("hashes")
+		if err != nil {
+			hashesState.lastOutcome = "key_error"
+			log.Printf("warning: failed to resolve signing public key for hashes bundle: %v", err)
+			return false
+		}
+
+		if err := controlplane.ActivateSignedContentBundle(bundle, publicKeyB64, cfg.Rules.HashesFile, hashesMetadataPath); err != nil {
+			hashesState.lastOutcome = "failed"
+			log.Printf("warning: failed to activate hashes bundle: %v", err)
+			return false
+		}
+
+		hashesState.lastAppliedVersion = bundle.BundleVersion
+		hashesState.lastAppliedDigest = digest
+		hashesState.lastAppliedCount = len(bundle.Rules)
+		hashesState.lastAppliedChecksums = append([]string(nil), bundle.ActiveChecksums...)
+		sort.Strings(hashesState.lastAppliedChecksums)
+		hashesState.lastAppliedSource = "runtime"
+		hashesState.lastOutcome = "active"
+		log.Printf("hashes bundle activated: policy_id=%s bundle_version=%d entries=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules))
+		return true
+	}
+
+	// Sync signed behavioral rules bundle from xdr-defense.
+	syncBehavioralBundle := func() bool {
+		if !cfg.DetectionPrevention.Capabilities.Behavioral.Rules {
+			behavioralState.lastOutcome = "disabled"
+			return false
+		}
+
+		bundle, err := controlPlaneClient.FetchSignedBehavioralBundle(ctx, cfg.PolicyID)
+		if err != nil {
+			behavioralState.lastOutcome = "fetch_error"
+			log.Printf("warning: failed to fetch behavioral bundle: %v", err)
+			return false
+		}
+
+		digest := bundleDigest(bundle)
+		if shouldSkipApply(behavioralState, bundle, digest) {
+			behavioralState.lastSkippedDuplicate++
+			behavioralState.lastOutcome = "unchanged"
+			return false
+		}
+
+		publicKeyB64, err := resolveBundleVerificationKey("behavioral")
+		if err != nil {
+			behavioralState.lastOutcome = "key_error"
+			log.Printf("warning: failed to resolve signing public key for behavioral bundle: %v", err)
+			return false
+		}
+
+		if err := controlplane.ActivateSignedContentBundle(bundle, publicKeyB64, cfg.Rules.BehavioralDir, behavioralMetadataPath); err != nil {
+			behavioralState.lastOutcome = "failed"
+			log.Printf("warning: failed to activate behavioral bundle: %v", err)
+			return false
+		}
+
+		behavioralState.lastAppliedVersion = bundle.BundleVersion
+		behavioralState.lastAppliedDigest = digest
+		behavioralState.lastAppliedCount = len(bundle.Rules)
+		behavioralState.lastAppliedChecksums = append([]string(nil), bundle.ActiveChecksums...)
+		sort.Strings(behavioralState.lastAppliedChecksums)
+		behavioralState.lastAppliedSource = "runtime"
+		behavioralState.lastOutcome = "active"
+		log.Printf("behavioral bundle activated: policy_id=%s bundle_version=%d entries=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules))
 		return true
 	}
 
@@ -251,6 +525,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	yaraBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
 	defer yaraBundleTicker.Stop()
+	// Reuse YARA sync interval for hashes/behavioral bundles to keep rollout
+	// reaction latency low even when dedicated per-type intervals are not set.
+	hashesBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
+	defer hashesBundleTicker.Stop()
+	behavioralBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
+	defer behavioralBundleTicker.Stop()
 
 	yaraInventoryTicker := time.NewTicker(cfg.YaraInventoryCheckInterval())
 	defer yaraInventoryTicker.Stop()
@@ -262,7 +542,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			return false
 		}
 
-		rulesDir := "/etc/xdr-agent/rules/malware/yara"
+		rulesDir := cfg.Rules.YaraDir
 		entries, err := os.ReadDir(rulesDir)
 		if err != nil && !os.IsNotExist(err) {
 			log.Printf("warning: failed to check rule inventory: %v", err)
@@ -404,6 +684,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	// Initial YARA sync on startup to avoid waiting for the first periodic tick.
 	if syncYaraBundle() && detectionEngine != nil {
 		detectionEngine.ReloadMalwareRules()
+	}
+	if syncHashesBundle() && detectionEngine != nil {
+		detectionEngine.ReloadMalwareRules()
+	}
+	if syncBehavioralBundle() && detectionEngine != nil {
+		detectionEngine.ReloadBehavioralRules()
 	}
 
 	// ── Telemetry collectors ────────────────────────────────────────────
@@ -554,6 +840,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				log.Printf("heartbeat failed: %v", err)
 			} else {
 				handleHeartbeatCommands(hbResp)
+				// Reconcile YARA target-state at heartbeat cadence to guarantee
+				// convergence even if the periodic bundle ticker drifts.
+				if syncYaraBundle() && detectionEngine != nil {
+					detectionEngine.ReloadMalwareRules()
+				}
+				logHeartbeatContentSummary()
 			}
 		case <-commandPollTicker.C: // Fast command poll — delivers upgrades within seconds.
 			cmdResp, err := enroll.PollCommands(ctx, cfg, state, buildinfo.Version)
@@ -574,6 +866,14 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			// instead of waiting for the slower defense posture poll loop.
 			if syncYaraBundle() && detectionEngine != nil {
 				detectionEngine.ReloadMalwareRules()
+			}
+		case <-hashesBundleTicker.C:
+			if syncHashesBundle() && detectionEngine != nil {
+				detectionEngine.ReloadMalwareRules()
+			}
+		case <-behavioralBundleTicker.C:
+			if syncBehavioralBundle() && detectionEngine != nil {
+				detectionEngine.ReloadBehavioralRules()
 			}
 		case <-yaraInventoryTicker.C:
 			reportRuleInventory()

@@ -13,7 +13,8 @@ const DefaultConfigPath = "/etc/xdr-agent/config.json"
 const (
 	DefaultDefensePosturePath            = "/var/lib/xdr-agent/defense_posture.json"
 	DefaultDefensePostureAckPath         = "/api/xdr-defense/policy-rollouts/ack"
-	DefaultYaraRolloutAckPath            = "/api/xdr-defense/yara-rollouts/ack"
+	DefaultYaraRolloutAckPath            = "/api/xdr-defense/yara/rollouts/ack"
+	DefaultYaraRuleStatusPath            = "/api/xdr-defense/yara/rollouts/status"
 	DefaultDefensePosturePollIntervalSec = 30
 )
 
@@ -246,7 +247,7 @@ func setRulePathDefaults(cfg *Config) {
 		cfg.Rules.YaraDir = "/etc/xdr-agent/rules/malware/yara"
 	}
 	if cfg.Rules.HashesFile == "" {
-		cfg.Rules.HashesFile = "/etc/xdr-agent/rules/malware/known_hashes.yml"
+		cfg.Rules.HashesFile = "/etc/xdr-agent/rules/malware/hashes"
 	}
 	if cfg.Rules.ThreatIntelDir == "" {
 		cfg.Rules.ThreatIntelDir = "/etc/xdr-agent/rules/threatintel"
@@ -267,7 +268,7 @@ func setDefensePostureDefaults(cfg *Config) {
 		cfg.DefensePosturePollIntervalSeconds = DefaultDefensePosturePollIntervalSec
 	}
 	if cfg.YaraRuleStatusPath == "" {
-		cfg.YaraRuleStatusPath = "/api/xdr-defense/yara-rollouts/status"
+		cfg.YaraRuleStatusPath = DefaultYaraRuleStatusPath
 	}
 	if cfg.YaraRuleInventoryPath == "" {
 		cfg.YaraRuleInventoryPath = "/api/xdr-defense/yara-rules/inventory"
