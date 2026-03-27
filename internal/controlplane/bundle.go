@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -81,6 +82,18 @@ type YaraRolloutStatusReport struct {
 	ReportedAt      int64                  `json:"reported_at"`
 }
 
+// HashesRolloutStatusReport is sent to backend after hash bundle sync attempts.
+type HashesRolloutStatusReport struct {
+	AgentID             string `json:"agent_id"`
+	AgentHostname       string `json:"agent_hostname"`
+	PolicyID            string `json:"policy_id"`
+	State               string `json:"state"`
+	FullBundleVersion   int    `json:"full_bundle_version"`
+	CustomBundleVersion int    `json:"custom_bundle_version"`
+	ReportedAt          int64  `json:"reported_at"`
+	Error               string `json:"error,omitempty"`
+}
+
 // PeriodicRuleInventory sent every 5 min to detect degradation.
 type PeriodicRuleInventory struct {
 	AgentID         string                 `json:"agent_id"`
@@ -125,12 +138,19 @@ type BundleMetadata struct {
 	EnabledRuleCount int      `json:"enabled_rule_count"`
 }
 
+// HashesOverlayMetadata tracks the current active custom hash overlay locally.
+type HashesOverlayMetadata struct {
+	BundleMetadata
+	ManagedFiles []string `json:"managed_files"`
+}
+
 const defaultDevSigningPublicKeyB64 = "42NEblFO2ZJzJryCPXTalkrfoQCcFcYvslG96Si4u7U="
 
 const (
 	// signedBundleResponseMaxBytes must comfortably exceed current production-sized
 	// signed bundles (~24.8MB) to avoid truncation during JSON decode.
 	signedBundleResponseMaxBytes = 64 * 1024 * 1024
+	hashesCustomOverlayPrefix    = "custom-critical-hashes-"
 )
 
 // SaveBundleMetadata persist current bundle metadata locally.
@@ -161,6 +181,38 @@ func LoadBundleMetadata(path string) (BundleMetadata, error) {
 	var meta BundleMetadata
 	if err := json.Unmarshal(content, &meta); err != nil {
 		return BundleMetadata{}, fmt.Errorf("parse bundle metadata: %w", err)
+	}
+	return meta, nil
+}
+
+// SaveHashesOverlayMetadata persists the current overlay metadata locally.
+func SaveHashesOverlayMetadata(path string, meta HashesOverlayMetadata) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create overlay metadata dir: %w", err)
+	}
+
+	content, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal overlay metadata: %w", err)
+	}
+	content = append(content, '\n')
+
+	if err := os.WriteFile(path, content, 0o640); err != nil {
+		return fmt.Errorf("write overlay metadata: %w", err)
+	}
+	return nil
+}
+
+// LoadHashesOverlayMetadata loads the current custom hash overlay metadata.
+func LoadHashesOverlayMetadata(path string) (HashesOverlayMetadata, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return HashesOverlayMetadata{}, err
+	}
+
+	var meta HashesOverlayMetadata
+	if err := json.Unmarshal(content, &meta); err != nil {
+		return HashesOverlayMetadata{}, fmt.Errorf("parse overlay metadata: %w", err)
 	}
 	return meta, nil
 }
@@ -493,6 +545,12 @@ func (c *Client) FetchSignedHashesBundle(ctx context.Context, policyID string) (
 	return c.fetchSignedBundle(ctx, policyID, path)
 }
 
+// FetchSignedHashesCustomOverlayBundle fetches the latest signed immediate custom hash overlay bundle from xdr-defense.
+func (c *Client) FetchSignedHashesCustomOverlayBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
+	path := "/api/xdr-defense/hashes/custom-overlay/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
 // FetchSignedBehavioralBundle fetches the latest signed behavioral rules bundle from xdr-defense.
 func (c *Client) FetchSignedBehavioralBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
 	path := "/api/xdr-defense/behavioral/bundle"
@@ -662,6 +720,122 @@ func ActivateSignedContentBundle(
 
 	if err := SaveBundleMetadata(metadataPath, meta); err != nil {
 		return fmt.Errorf("save bundle metadata: %w", err)
+	}
+
+	return nil
+}
+
+// ActivateSignedHashesOverlayBundle validates and activates an additive custom-hash overlay.
+// It only manages overlay-owned files and never removes baseline bundle files.
+func ActivateSignedHashesOverlayBundle(
+	bundle *SignedYaraBundle,
+	publicKeyB64 string,
+	outputDir string,
+	metadataPath string,
+) error {
+	if err := VerifyBundleSignature(bundle, publicKeyB64); err != nil {
+		return fmt.Errorf("bundle signature verification failed: %w", err)
+	}
+
+	if err := VerifyRuleChecksums(bundle.Rules); err != nil {
+		return fmt.Errorf("bundle checksum verification failed: %w", err)
+	}
+
+	if err := os.MkdirAll(outputDir, 0o750); err != nil {
+		return fmt.Errorf("create overlay output dir: %w", err)
+	}
+
+	previousMeta, err := LoadHashesOverlayMetadata(metadataPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load overlay metadata: %w", err)
+	}
+
+	managedRules := make(map[string]YaraRuleEntry, len(bundle.Rules))
+	managedFiles := make([]string, 0, len(bundle.Rules))
+	for _, rule := range bundle.Rules {
+		filename := filepath.Base(strings.TrimSpace(rule.Filename))
+		if filename == "." || filename == string(filepath.Separator) || filename == "" {
+			continue
+		}
+		if !strings.HasPrefix(filename, hashesCustomOverlayPrefix) {
+			continue
+		}
+		if _, exists := managedRules[filename]; exists {
+			return fmt.Errorf("duplicate overlay-managed filename in bundle: %q", filename)
+		}
+		managedRules[filename] = rule
+		managedFiles = append(managedFiles, filename)
+	}
+	sort.Strings(managedFiles)
+
+	tempDir := filepath.Join(outputDir, ".custom-hash-overlay.tmp")
+	if err := os.RemoveAll(tempDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clean temp overlay dir: %w", err)
+	}
+	if err := os.MkdirAll(tempDir, 0o750); err != nil {
+		return fmt.Errorf("create temp overlay dir: %w", err)
+	}
+
+	for _, filename := range managedFiles {
+		rule := managedRules[filename]
+		tempPath := filepath.Join(tempDir, filename)
+		if err := os.WriteFile(tempPath, []byte(rule.Content), 0o640); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return fmt.Errorf("write temp overlay file %s: %w", filename, err)
+		}
+	}
+
+	for _, filename := range managedFiles {
+		tempPath := filepath.Join(tempDir, filename)
+		finalPath := filepath.Join(outputDir, filename)
+		if err := os.Rename(tempPath, finalPath); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return fmt.Errorf("activate overlay file %s: %w", filename, err)
+		}
+	}
+	if err := os.RemoveAll(tempDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clean temp overlay dir after activation: %w", err)
+	}
+
+	currentManaged := make(map[string]struct{}, len(managedFiles))
+	for _, filename := range managedFiles {
+		currentManaged[filename] = struct{}{}
+	}
+	for _, previousFile := range previousMeta.ManagedFiles {
+		if _, keep := currentManaged[previousFile]; keep {
+			continue
+		}
+		if !strings.HasPrefix(previousFile, hashesCustomOverlayPrefix) {
+			continue
+		}
+		stalePath := filepath.Join(outputDir, filepath.Base(previousFile))
+		if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale overlay file %s: %w", previousFile, err)
+		}
+	}
+
+	enabledCount := 0
+	for _, rule := range bundle.Rules {
+		if rule.Enabled {
+			enabledCount++
+		}
+	}
+
+	meta := HashesOverlayMetadata{
+		BundleMetadata: BundleMetadata{
+			BundleVersion:    bundle.BundleVersion,
+			GeneratedAt:      bundle.GeneratedAt,
+			ActivatedAt:      time.Now().UTC().Format(time.RFC3339),
+			PolicyID:         bundle.PolicyID,
+			ActiveChecksums:  bundle.ActiveChecksums,
+			RuleCount:        len(bundle.Rules),
+			EnabledRuleCount: enabledCount,
+		},
+		ManagedFiles: managedFiles,
+	}
+
+	if err := SaveHashesOverlayMetadata(metadataPath, meta); err != nil {
+		return fmt.Errorf("save overlay metadata: %w", err)
 	}
 
 	return nil
@@ -842,6 +1016,49 @@ func (c *Client) ReportYaraRuleStatus(ctx context.Context, statusPath string, re
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("YARA rule status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	return nil
+}
+
+// ReportHashesRolloutStatus posts hash rollout status after sync attempts.
+func (c *Client) ReportHashesRolloutStatus(ctx context.Context, report *HashesRolloutStatusReport) error {
+	const statusPath = "/api/xdr-defense/hashes/rollouts/status/report"
+
+	endpoint, err := c.buildURL(statusPath)
+	if err != nil {
+		return fmt.Errorf("build hashes rollout status endpoint: %w", err)
+	}
+
+	body, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("marshal hashes rollout status payload: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("build hashes rollout status request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "xdr-agent")
+	httpReq.Header.Set("osd-xsrf", "true")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("send hashes rollout status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+	if err != nil {
+		return fmt.Errorf("read hashes rollout status response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("hashes rollout status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	return nil

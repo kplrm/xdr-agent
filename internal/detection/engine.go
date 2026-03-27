@@ -159,8 +159,8 @@ func (e *Engine) evalMemory(event events.Event, posture config.DetectionPreventi
 }
 
 func (e *Engine) evalMalware(event events.Event, posture config.DetectionPreventionConfig) {
-	path, ok := pathFromEvent(event)
-	if !ok || path == "" {
+	// Only fire on event categories that carry executable or file paths.
+	if event.Category != "process" && event.Category != "file" {
 		return
 	}
 
@@ -169,8 +169,11 @@ func (e *Engine) evalMalware(event events.Event, posture config.DetectionPrevent
 		return
 	}
 
-	result, err := e.malware.ScanFile(path, cap.HashDetection, cap.YaraDetection, cap.StaticDetection)
-	if err != nil || !result.Matched {
+	path := pathFromEvent(event)
+	knownSHA := sha256FromEvent(event)
+
+	// Need at least a path or a pre-computed hash to do anything.
+	if path == "" && knownSHA == "" {
 		return
 	}
 
@@ -178,12 +181,45 @@ func (e *Engine) evalMalware(event events.Event, posture config.DetectionPrevent
 	if posture.Mode == config.ModePrevent && cap.ExecutionBlocking {
 		action = "block"
 	}
-	payload := map[string]interface{}{
-		"file.path":   path,
-		"file.sha256": result.HashSHA256,
-		"method":      result.Method,
+
+	// ── Hash fast path: use pre-computed SHA256 from the event ─────────────────
+	// Avoids reading the file from disk; works even if the file was deleted.
+	if cap.HashDetection {
+		sha := knownSHA
+		if sha == "" && path != "" {
+			// Fall back to computing the hash if the event didn't carry one.
+			if computed, err := malware.SHA256File(path); err == nil {
+				sha = computed
+			}
+		}
+		if sha != "" {
+			if result, ok := e.malware.LookupHash(sha); ok {
+				e.emitAlert(event, "detection.malware", "malware.hash.match", result.Name, result.Description, result.Severity, action, map[string]interface{}{
+					"file.path":        path,
+					"file.hash.sha256": result.HashSHA256,
+					"method":           result.Method,
+				})
+				return
+			}
+		}
 	}
-	e.emitAlert(event, "detection.malware", "malware.local.scan", result.Name, result.Description, result.Severity, action, payload)
+
+	// ── YARA / static scan: requires the file to be on disk ───────────────────
+	if (cap.YaraDetection || cap.StaticDetection) && path != "" {
+		result, err := e.malware.ScanFile(path, false, cap.YaraDetection, cap.StaticDetection)
+		if err != nil || !result.Matched {
+			return
+		}
+		sha := result.HashSHA256
+		if sha == "" {
+			sha = knownSHA
+		}
+		e.emitAlert(event, "detection.malware", "malware.local.scan", result.Name, result.Description, result.Severity, action, map[string]interface{}{
+			"file.path":        path,
+			"file.hash.sha256": sha,
+			"method":           result.Method,
+		})
+	}
 }
 
 func (e *Engine) emitAlert(src events.Event, module, ruleID, ruleName, description string, severity events.Severity, action string, extra map[string]interface{}) {
@@ -213,17 +249,77 @@ func (e *Engine) emitAlert(src events.Event, module, ruleID, ruleName, descripti
 	})
 }
 
-func pathFromEvent(event events.Event) (string, bool) {
+// pathFromEvent extracts the relevant file path from an event payload.
+// Handles both flat legacy keys and the ECS-nested structures used by
+// the process and file telemetry collectors.
+func pathFromEvent(event events.Event) string {
 	if event.Payload == nil {
-		return "", false
+		return ""
 	}
-	for _, key := range []string{"file_path", "file.path", "process.executable"} {
-		if v, ok := event.Payload[key]; ok {
-			s, _ := v.(string)
-			if s != "" {
-				return s, true
+	// ECS process events: payload["process"]["executable"]
+	if proc, ok := event.Payload["process"]; ok {
+		if procMap, ok := proc.(map[string]interface{}); ok {
+			if v, ok := procMap["executable"]; ok {
+				if s, _ := v.(string); s != "" {
+					return s
+				}
 			}
 		}
 	}
-	return "", false
+	// ECS file events: payload["file"]["path"]
+	if file, ok := event.Payload["file"]; ok {
+		if fileMap, ok := file.(map[string]interface{}); ok {
+			if v, ok := fileMap["path"]; ok {
+				if s, _ := v.(string); s != "" {
+					return s
+				}
+			}
+		}
+	}
+	// Legacy flat keys (kept for backward compatibility).
+	for _, key := range []string{"file_path", "file.path", "process.executable"} {
+		if v, ok := event.Payload[key]; ok {
+			if s, _ := v.(string); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// sha256FromEvent extracts a pre-computed SHA-256 digest from the event payload.
+// Returns empty string if no hash is present.
+func sha256FromEvent(event events.Event) string {
+	if event.Payload == nil {
+		return ""
+	}
+	// ECS process events: payload["process"]["hash"]["sha256"]
+	if proc, ok := event.Payload["process"]; ok {
+		if procMap, ok := proc.(map[string]interface{}); ok {
+			if h, ok := procMap["hash"]; ok {
+				if hMap, ok := h.(map[string]interface{}); ok {
+					if v, ok := hMap["sha256"]; ok {
+						if s, _ := v.(string); s != "" {
+							return s
+						}
+					}
+				}
+			}
+		}
+	}
+	// ECS file events: payload["file"]["hash"]["sha256"]
+	if file, ok := event.Payload["file"]; ok {
+		if fileMap, ok := file.(map[string]interface{}); ok {
+			if h, ok := fileMap["hash"]; ok {
+				if hMap, ok := h.(map[string]interface{}); ok {
+					if v, ok := hMap["sha256"]; ok {
+						if s, _ := v.(string); s != "" {
+							return s
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
 }

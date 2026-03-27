@@ -6,6 +6,12 @@ ConditionPathExists=/etc/xdr-agent/config.json
 
 [Service]
 Type=simple
+# Go runtime tuning for low-memory environments.
+Environment=GOMEMLIMIT=320MiB
+Environment=GOGC=80
+# systemd cgroup controls: soft pressure at 350M, hard ceiling at 500M.
+MemoryHigh=350M
+MemoryMax=500M
 ExecStart=/usr/bin/xdr-agent run --config /etc/xdr-agent/config.json
 Restart=always
 RestartSec=5

@@ -123,6 +123,24 @@ func loadInitialBundleState(name, metadataPath string) bundleSyncState {
 	return state
 }
 
+func loadInitialHashesOverlayBundleState(name, metadataPath string) bundleSyncState {
+	state := bundleSyncState{name: name, lastOutcome: "unknown"}
+	meta, err := controlplane.LoadHashesOverlayMetadata(metadataPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			state.lastOutcome = "metadata_error"
+		}
+		return state
+	}
+	state.lastAppliedVersion = meta.BundleVersion
+	state.lastAppliedCount = meta.RuleCount
+	state.lastAppliedChecksums = append([]string(nil), meta.ActiveChecksums...)
+	sort.Strings(state.lastAppliedChecksums)
+	state.lastAppliedSource = "metadata"
+	state.lastOutcome = "active"
+	return state
+}
+
 func (s bundleSyncState) summaryLabel() string {
 	if s.lastOutcome == "disabled" {
 		return "disabled"
@@ -239,10 +257,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	yaraMetadataPath := "/etc/xdr-agent/state/yara-bundle-metadata.json"
 	hashesMetadataPath := "/etc/xdr-agent/state/hashes-bundle-metadata.json"
+	hashesOverlayMetadataPath := "/etc/xdr-agent/state/hashes-custom-overlay-metadata.json"
 	behavioralMetadataPath := "/etc/xdr-agent/state/behavioral-bundle-metadata.json"
 
 	yaraState := loadInitialBundleState("yara", yaraMetadataPath)
 	hashesState := loadInitialBundleState("hashes", hashesMetadataPath)
+	hashesOverlayState := loadInitialHashesOverlayBundleState("hashes_overlay", hashesOverlayMetadataPath)
 	behavioralState := loadInitialBundleState("behavioral", behavioralMetadataPath)
 	postureStatus := "active"
 	if postureState.Version == 0 {
@@ -250,7 +270,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	}
 
 	logHeartbeatContentSummary := func() {
-		log.Printf("heartbeat content summary: posture=%s yara=%s hashes=%s behavioral=%s", postureStatus, yaraState.summaryLabel(), hashesState.summaryLabel(), behavioralState.summaryLabel())
+		log.Printf("heartbeat content summary: posture=%s yara=%s hashes=%s hashes_overlay=%s behavioral=%s", postureStatus, yaraState.summaryLabel(), hashesState.summaryLabel(), hashesOverlayState.summaryLabel(), behavioralState.summaryLabel())
 	}
 
 	syncDefensePosture := func() bool {
@@ -419,37 +439,38 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	}
 
 	// Sync signed hash content bundle from xdr-defense.
-	syncHashesBundle := func() bool {
+	syncHashesBundle := func() (bool, int, string) {
 		if !cfg.DetectionPrevention.Capabilities.Malware.HashDetection {
 			hashesState.lastOutcome = "disabled"
-			return false
+			return false, hashesState.lastAppliedVersion, ""
 		}
 
 		bundle, err := controlPlaneClient.FetchSignedHashesBundle(ctx, cfg.PolicyID)
 		if err != nil {
 			hashesState.lastOutcome = "fetch_error"
 			log.Printf("warning: failed to fetch hashes bundle: %v", err)
-			return false
+			return false, hashesState.lastAppliedVersion, err.Error()
 		}
+		bundleVersion := bundle.BundleVersion
 
 		digest := bundleDigest(bundle)
 		if shouldSkipApply(hashesState, bundle, digest) {
 			hashesState.lastSkippedDuplicate++
 			hashesState.lastOutcome = "unchanged"
-			return false
+			return false, bundleVersion, ""
 		}
 
 		publicKeyB64, err := resolveBundleVerificationKey("hashes")
 		if err != nil {
 			hashesState.lastOutcome = "key_error"
 			log.Printf("warning: failed to resolve signing public key for hashes bundle: %v", err)
-			return false
+			return false, bundleVersion, err.Error()
 		}
 
 		if err := controlplane.ActivateSignedContentBundle(bundle, publicKeyB64, cfg.Rules.HashesFile, hashesMetadataPath); err != nil {
 			hashesState.lastOutcome = "failed"
 			log.Printf("warning: failed to activate hashes bundle: %v", err)
-			return false
+			return false, bundleVersion, err.Error()
 		}
 
 		hashesState.lastAppliedVersion = bundle.BundleVersion
@@ -460,7 +481,100 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		hashesState.lastAppliedSource = "runtime"
 		hashesState.lastOutcome = "active"
 		log.Printf("hashes bundle activated: policy_id=%s bundle_version=%d entries=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules))
-		return true
+		return true, bundleVersion, ""
+	}
+
+	syncHashesOverlayBundle := func(forceApply bool) (bool, int, string) {
+		if !cfg.DetectionPrevention.Capabilities.Malware.HashDetection {
+			hashesOverlayState.lastOutcome = "disabled"
+			return false, hashesOverlayState.lastAppliedVersion, ""
+		}
+
+		bundle, err := controlPlaneClient.FetchSignedHashesCustomOverlayBundle(ctx, cfg.PolicyID)
+		if err != nil {
+			hashesOverlayState.lastOutcome = "fetch_error"
+			log.Printf("warning: failed to fetch hashes custom overlay bundle: %v", err)
+			return false, hashesOverlayState.lastAppliedVersion, err.Error()
+		}
+		bundleVersion := bundle.BundleVersion
+
+		digest := bundleDigest(bundle)
+		if !forceApply && shouldSkipApply(hashesOverlayState, bundle, digest) {
+			hashesOverlayState.lastSkippedDuplicate++
+			hashesOverlayState.lastOutcome = "unchanged"
+			return false, bundleVersion, ""
+		}
+
+		publicKeyB64, err := resolveBundleVerificationKey("hashes custom overlay")
+		if err != nil {
+			hashesOverlayState.lastOutcome = "key_error"
+			log.Printf("warning: failed to resolve signing public key for hashes custom overlay bundle: %v", err)
+			return false, bundleVersion, err.Error()
+		}
+
+		if err := controlplane.ActivateSignedHashesOverlayBundle(bundle, publicKeyB64, cfg.Rules.HashesFile, hashesOverlayMetadataPath); err != nil {
+			hashesOverlayState.lastOutcome = "failed"
+			log.Printf("warning: failed to activate hashes custom overlay bundle: %v", err)
+			return false, bundleVersion, err.Error()
+		}
+
+		hashesOverlayState.lastAppliedVersion = bundle.BundleVersion
+		hashesOverlayState.lastAppliedDigest = digest
+		hashesOverlayState.lastAppliedCount = len(bundle.Rules)
+		hashesOverlayState.lastAppliedChecksums = append([]string(nil), bundle.ActiveChecksums...)
+		sort.Strings(hashesOverlayState.lastAppliedChecksums)
+		hashesOverlayState.lastAppliedSource = "runtime"
+		hashesOverlayState.lastOutcome = "active"
+		log.Printf("hashes custom overlay bundle activated: policy_id=%s bundle_version=%d entries=%d force_apply=%t", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules), forceApply)
+		return true, bundleVersion, ""
+	}
+
+	reportHashesRolloutStatus := func(fullBundleVersion, customBundleVersion int, fullErr, customErr string) {
+		stateName := "active"
+		switch {
+		case hashesState.lastOutcome == "disabled" || hashesOverlayState.lastOutcome == "disabled":
+			stateName = "disabled"
+		case hashesState.lastOutcome == "fetch_error" || hashesOverlayState.lastOutcome == "fetch_error":
+			stateName = "fetch_error"
+		case hashesState.lastOutcome == "key_error" || hashesOverlayState.lastOutcome == "key_error":
+			stateName = "key_error"
+		case hashesState.lastOutcome == "failed" || hashesOverlayState.lastOutcome == "failed":
+			stateName = "failed"
+		case hashesState.lastOutcome == "unchanged" && hashesOverlayState.lastOutcome == "unchanged":
+			stateName = "unchanged"
+		case hashesState.lastOutcome == "active" || hashesOverlayState.lastOutcome == "active":
+			stateName = "active"
+		}
+
+		errorText := ""
+		if fullErr != "" && customErr != "" {
+			errorText = "full: " + fullErr + "; custom: " + customErr
+		} else if fullErr != "" {
+			errorText = fullErr
+		} else if customErr != "" {
+			errorText = customErr
+		}
+
+		report := &controlplane.HashesRolloutStatusReport{
+			AgentID:             state.AgentID,
+			AgentHostname:       state.Hostname,
+			PolicyID:            cfg.PolicyID,
+			State:               stateName,
+			FullBundleVersion:   fullBundleVersion,
+			CustomBundleVersion: customBundleVersion,
+			ReportedAt:          time.Now().Unix(),
+			Error:               errorText,
+		}
+		if err := controlPlaneClient.ReportHashesRolloutStatus(ctx, report); err != nil {
+			log.Printf("warning: failed to report hashes rollout status: %v", err)
+		}
+	}
+
+	syncHashesContent := func() bool {
+		fullChanged, fullBundleVersion, fullErr := syncHashesBundle()
+		overlayChanged, customBundleVersion, customErr := syncHashesOverlayBundle(fullChanged)
+		reportHashesRolloutStatus(fullBundleVersion, customBundleVersion, fullErr, customErr)
+		return fullChanged || overlayChanged
 	}
 
 	// Sync signed behavioral rules bundle from xdr-defense.
@@ -525,8 +639,9 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	yaraBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
 	defer yaraBundleTicker.Stop()
-	// Reuse YARA sync interval for hashes/behavioral bundles to keep rollout
-	// reaction latency low even when dedicated per-type intervals are not set.
+	// Hash bundles are synced at the same cadence as YARA. The GET endpoint no
+	// longer force-rebuilds the snapshot on each request, so polling at this
+	// frequency is cheap (sign-only when version unchanged).
 	hashesBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
 	defer hashesBundleTicker.Stop()
 	behavioralBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
@@ -685,7 +800,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	if syncYaraBundle() && detectionEngine != nil {
 		detectionEngine.ReloadMalwareRules()
 	}
-	if syncHashesBundle() && detectionEngine != nil {
+	if syncHashesContent() && detectionEngine != nil {
 		detectionEngine.ReloadMalwareRules()
 	}
 	if syncBehavioralBundle() && detectionEngine != nil {
@@ -840,9 +955,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				log.Printf("heartbeat failed: %v", err)
 			} else {
 				handleHeartbeatCommands(hbResp)
-				// Reconcile YARA target-state at heartbeat cadence to guarantee
+				// Reconcile YARA and hashes target-state at heartbeat cadence to guarantee
 				// convergence even if the periodic bundle ticker drifts.
 				if syncYaraBundle() && detectionEngine != nil {
+					detectionEngine.ReloadMalwareRules()
+				}
+				if syncHashesContent() && detectionEngine != nil {
 					detectionEngine.ReloadMalwareRules()
 				}
 				logHeartbeatContentSummary()
@@ -868,7 +986,10 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				detectionEngine.ReloadMalwareRules()
 			}
 		case <-hashesBundleTicker.C:
-			if syncHashesBundle() && detectionEngine != nil {
+			// Pick up updated hash bundles after MalwareBazaar sync completes.
+			// The server endpoint now serves the cached snapshot (no index scan per
+			// request), so this is cheap when the bundle version hasn't changed.
+			if syncHashesContent() && detectionEngine != nil {
 				detectionEngine.ReloadMalwareRules()
 			}
 		case <-behavioralBundleTicker.C:
