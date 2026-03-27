@@ -34,6 +34,17 @@ type defensePostureOverlayResponse struct {
 	Version         int64           `json:"version"`
 }
 
+// DefensePostureFetchError is returned when the posture endpoint responds with
+// a non-2xx status code.
+type DefensePostureFetchError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *DefensePostureFetchError) Error() string {
+	return fmt.Sprintf("Defense Posture fetch rejected: status=%d body=%s", e.StatusCode, strings.TrimSpace(e.Body))
+}
+
 // DefensePostureAckRequest confirms that a posture version has been delivered.
 type DefensePostureAckRequest struct {
 	AgentID        string `json:"agent_id"`
@@ -165,7 +176,7 @@ func (c *Client) FetchDefensePosture(ctx context.Context, policyID string) (Defe
 		return DefensePosture{}, fmt.Errorf("read Defense Posture response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return DefensePosture{}, fmt.Errorf("Defense Posture fetch rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		return DefensePosture{}, &DefensePostureFetchError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var overlay defensePostureOverlayResponse

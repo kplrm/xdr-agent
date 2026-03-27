@@ -151,9 +151,9 @@ make enroll ENROLLMENT_TOKEN=<token>  # Enroll and exit
 
 Default path: `/etc/xdr-agent/config.json` — Sample: `config/config.json`
 
-The agent package ships without bundled YARA rules. The YARA rules directory at
-`/etc/xdr-agent/rules/malware/yara` is populated only after `xdr-defense`
-imports and distributes rule bundles for the agent's assigned policy.
+The agent package ships without bundled detection content. YARA, hash, and
+behavioral directories are populated only after `xdr-defense` imports and
+distributes signed bundles for the agent's assigned policy.
 
 ```json
 {
@@ -184,7 +184,7 @@ imports and distributes rule bundles for the agent's assigned policy.
 
 | Field | Required | Description |
 |---|---|---|
-| `control_plane_url` | Yes | XDR manager URL (e.g. `https://xdr-manager.example.com`) |
+| `control_plane_url` | Yes | XDR manager URL (e.g. `https://xdr-coordinator.example.com`) |
 | `enrollment_path` | Yes | Enrollment API path |
 | `heartbeat_path` | No | Heartbeat API path (default: `/api/v1/agents/heartbeat`) |
 | `commands_path` | No | Fast command poll path (default: `/api/v1/agents/commands`) |
@@ -395,7 +395,7 @@ type Capability interface {
 
 ## Control-plane compatibility
 
-### OpenSearch Dashboards xdr-manager-plugin
+### OpenSearch Dashboards xdr-coordinator
 
 1. Generate an enrollment token from the plugin UI.
 2. Set `control_plane_url` to OpenSearch Dashboards (default: `http://localhost:5601`).

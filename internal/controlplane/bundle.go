@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -55,6 +56,13 @@ type SignedYaraBundle struct {
 	ManagerPolicyID string `json:"manager_policy_id,omitempty"`
 }
 
+// SigningPublicKeyResponse is returned by xdr-defense when requesting
+// the active bundle-signing verification key.
+type SigningPublicKeyResponse struct {
+	PublicKeyB64 string `json:"public_key_b64"`
+	KeyID        string `json:"key_id"`
+}
+
 // RuleActivationStatus tracks the result of activating a single YARA rule.
 type RuleActivationStatus struct {
 	RuleID       string `json:"rule_id"`       // e.g., "rule_trojan_banker_1"
@@ -72,6 +80,18 @@ type YaraRolloutStatusReport struct {
 	LoadedRules     int                    `json:"loaded_rules"` // how many actually loaded
 	FailedRules     []RuleActivationStatus `json:"failed_rules"` // only failures (empty if all loaded)
 	ReportedAt      int64                  `json:"reported_at"`
+}
+
+// HashesRolloutStatusReport is sent to backend after hash bundle sync attempts.
+type HashesRolloutStatusReport struct {
+	AgentID             string `json:"agent_id"`
+	AgentHostname       string `json:"agent_hostname"`
+	PolicyID            string `json:"policy_id"`
+	State               string `json:"state"`
+	FullBundleVersion   int    `json:"full_bundle_version"`
+	CustomBundleVersion int    `json:"custom_bundle_version"`
+	ReportedAt          int64  `json:"reported_at"`
+	Error               string `json:"error,omitempty"`
 }
 
 // PeriodicRuleInventory sent every 5 min to detect degradation.
@@ -118,7 +138,20 @@ type BundleMetadata struct {
 	EnabledRuleCount int      `json:"enabled_rule_count"`
 }
 
+// HashesOverlayMetadata tracks the current active custom hash overlay locally.
+type HashesOverlayMetadata struct {
+	BundleMetadata
+	ManagedFiles []string `json:"managed_files"`
+}
+
 const defaultDevSigningPublicKeyB64 = "42NEblFO2ZJzJryCPXTalkrfoQCcFcYvslG96Si4u7U="
+
+const (
+	// signedBundleResponseMaxBytes must comfortably exceed current production-sized
+	// signed bundles (~24.8MB) to avoid truncation during JSON decode.
+	signedBundleResponseMaxBytes = 64 * 1024 * 1024
+	hashesCustomOverlayPrefix    = "custom-critical-hashes-"
+)
 
 // SaveBundleMetadata persist current bundle metadata locally.
 func SaveBundleMetadata(path string, meta BundleMetadata) error {
@@ -148,6 +181,38 @@ func LoadBundleMetadata(path string) (BundleMetadata, error) {
 	var meta BundleMetadata
 	if err := json.Unmarshal(content, &meta); err != nil {
 		return BundleMetadata{}, fmt.Errorf("parse bundle metadata: %w", err)
+	}
+	return meta, nil
+}
+
+// SaveHashesOverlayMetadata persists the current overlay metadata locally.
+func SaveHashesOverlayMetadata(path string, meta HashesOverlayMetadata) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return fmt.Errorf("create overlay metadata dir: %w", err)
+	}
+
+	content, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal overlay metadata: %w", err)
+	}
+	content = append(content, '\n')
+
+	if err := os.WriteFile(path, content, 0o640); err != nil {
+		return fmt.Errorf("write overlay metadata: %w", err)
+	}
+	return nil
+}
+
+// LoadHashesOverlayMetadata loads the current custom hash overlay metadata.
+func LoadHashesOverlayMetadata(path string) (HashesOverlayMetadata, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return HashesOverlayMetadata{}, err
+	}
+
+	var meta HashesOverlayMetadata
+	if err := json.Unmarshal(content, &meta); err != nil {
+		return HashesOverlayMetadata{}, fmt.Errorf("parse overlay metadata: %w", err)
 	}
 	return meta, nil
 }
@@ -219,6 +284,9 @@ func SaveBundleRules(outputDir string, rules []YaraRuleEntry) error {
 
 	for _, rule := range rules {
 		path := filepath.Join(outputDir, rule.Filename)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			return fmt.Errorf("create rule directory for %s: %w", rule.Filename, err)
+		}
 		if err := os.WriteFile(path, []byte(rule.Content), 0o640); err != nil {
 			return fmt.Errorf("write rule %s: %w", rule.Filename, err)
 		}
@@ -244,20 +312,69 @@ func ValidateRuleContent(content string) error {
 	conditionPattern := regexp.MustCompile(`(?m)\bcondition\s*:`)
 	_ = conditionPattern.MatchString(content)
 
-	// Simple brace balance check
-	openBraces := 0
-	for _, ch := range content {
-		if ch == '{' {
-			openBraces++
-		} else if ch == '}' {
-			openBraces--
+	// Brace balance check — skips braces inside quoted string literals and
+	// comments so rules like $s = "{path}\\file" don't produce false positives.
+	{
+		openBraces := 0
+		inString := false
+		inBlockComment := false
+		inLineComment := false
+		runes := []rune(content)
+		for i := 0; i < len(runes); i++ {
+			ch := runes[i]
+			var next rune
+			if i+1 < len(runes) {
+				next = runes[i+1]
+			}
+			if inLineComment {
+				if ch == '\n' {
+					inLineComment = false
+				}
+				continue
+			}
+			if inBlockComment {
+				if ch == '*' && next == '/' {
+					inBlockComment = false
+					i++
+				}
+				continue
+			}
+			if inString {
+				if ch == '\\' {
+					i++ // skip escaped character
+					continue
+				}
+				if ch == '"' {
+					inString = false
+				}
+				continue
+			}
+			if ch == '/' && next == '/' {
+				inLineComment = true
+				i++
+				continue
+			}
+			if ch == '/' && next == '*' {
+				inBlockComment = true
+				i++
+				continue
+			}
+			if ch == '"' {
+				inString = true
+				continue
+			}
+			if ch == '{' {
+				openBraces++
+			} else if ch == '}' {
+				openBraces--
+				if openBraces < 0 {
+					return fmt.Errorf("mismatched braces")
+				}
+			}
 		}
-		if openBraces < 0 {
-			return fmt.Errorf("mismatched braces")
+		if openBraces != 0 {
+			return fmt.Errorf("unbalanced braces")
 		}
-	}
-	if openBraces != 0 {
-		return fmt.Errorf("unbalanced braces")
 	}
 
 	return nil
@@ -419,6 +536,73 @@ func ActivateBundleWithTracking(
 // server-side rollout_version so the caller can send a fail-ACK to the control plane.
 func (c *Client) FetchSignedYaraBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
 	path := "/api/xdr-defense/yara/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
+// FetchSignedHashesBundle fetches the latest signed hashes bundle from xdr-defense.
+func (c *Client) FetchSignedHashesBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
+	path := "/api/xdr-defense/hashes/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
+// FetchSignedHashesCustomOverlayBundle fetches the latest signed immediate custom hash overlay bundle from xdr-defense.
+func (c *Client) FetchSignedHashesCustomOverlayBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
+	path := "/api/xdr-defense/hashes/custom-overlay/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
+// FetchSignedBehavioralBundle fetches the latest signed behavioral rules bundle from xdr-defense.
+func (c *Client) FetchSignedBehavioralBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
+	path := "/api/xdr-defense/behavioral/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
+// FetchSigningPublicKey fetches the current signing public key from xdr-defense.
+func (c *Client) FetchSigningPublicKey(ctx context.Context) (*SigningPublicKeyResponse, error) {
+	endpoint, err := c.buildURL("/api/xdr-defense/signing/public-key")
+	if err != nil {
+		return nil, fmt.Errorf("build signing public key endpoint: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build signing public key request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "xdr-agent")
+	req.Header.Set("osd-xsrf", "true")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch signing public key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read signing public key response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch signing public key rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var keyResp SigningPublicKeyResponse
+	if err := json.Unmarshal(respBody, &keyResp); err != nil {
+		return nil, fmt.Errorf("parse signing public key response: %w", err)
+	}
+
+	if strings.TrimSpace(keyResp.PublicKeyB64) == "" {
+		return nil, fmt.Errorf("parse signing public key response: missing public_key_b64")
+	}
+
+	return &keyResp, nil
+}
+
+func (c *Client) fetchSignedBundle(ctx context.Context, policyID, path string) (*SignedYaraBundle, error) {
 	endpoint, err := c.buildURL(path)
 	if err != nil {
 		return nil, fmt.Errorf("build signed bundle endpoint: %w", err)
@@ -449,7 +633,7 @@ func (c *Client) FetchSignedYaraBundle(ctx context.Context, policyID string) (*S
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB limit
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, signedBundleResponseMaxBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read signed bundle response: %w", err)
 	}
@@ -478,6 +662,183 @@ func (c *Client) FetchSignedYaraBundle(ctx context.Context, policyID string) (*S
 	}
 
 	return &bundle, nil
+}
+
+// ActivateSignedContentBundle validates and activates a signed content bundle,
+// replacing previous content atomically. It is used for non-YARA bundle types
+// (e.g., hash lists, behavioral rules) that share the same signed manifest style.
+func ActivateSignedContentBundle(
+	bundle *SignedYaraBundle,
+	publicKeyB64 string,
+	outputDir string,
+	metadataPath string,
+) error {
+	if err := VerifyBundleSignature(bundle, publicKeyB64); err != nil {
+		return fmt.Errorf("bundle signature verification failed: %w", err)
+	}
+
+	if err := VerifyRuleChecksums(bundle.Rules); err != nil {
+		return fmt.Errorf("bundle checksum verification failed: %w", err)
+	}
+
+	tempDir := outputDir + ".tmp"
+	if err := os.RemoveAll(tempDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clean temp content dir: %w", err)
+	}
+
+	if err := SaveBundleRules(tempDir, bundle.Rules); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return fmt.Errorf("save content bundle to temp: %w", err)
+	}
+
+	if err := os.RemoveAll(outputDir); err != nil && !os.IsNotExist(err) {
+		_ = os.RemoveAll(tempDir)
+		return fmt.Errorf("remove old content dir: %w", err)
+	}
+
+	if err := os.Rename(tempDir, outputDir); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return fmt.Errorf("activate content (rename temp to production): %w", err)
+	}
+
+	enabledCount := 0
+	for _, rule := range bundle.Rules {
+		if rule.Enabled {
+			enabledCount++
+		}
+	}
+
+	meta := BundleMetadata{
+		BundleVersion:    bundle.BundleVersion,
+		GeneratedAt:      bundle.GeneratedAt,
+		ActivatedAt:      time.Now().UTC().Format(time.RFC3339),
+		PolicyID:         bundle.PolicyID,
+		ActiveChecksums:  bundle.ActiveChecksums,
+		RuleCount:        len(bundle.Rules),
+		EnabledRuleCount: enabledCount,
+	}
+
+	if err := SaveBundleMetadata(metadataPath, meta); err != nil {
+		return fmt.Errorf("save bundle metadata: %w", err)
+	}
+
+	return nil
+}
+
+// ActivateSignedHashesOverlayBundle validates and activates an additive custom-hash overlay.
+// It only manages overlay-owned files and never removes baseline bundle files.
+func ActivateSignedHashesOverlayBundle(
+	bundle *SignedYaraBundle,
+	publicKeyB64 string,
+	outputDir string,
+	metadataPath string,
+) error {
+	if err := VerifyBundleSignature(bundle, publicKeyB64); err != nil {
+		return fmt.Errorf("bundle signature verification failed: %w", err)
+	}
+
+	if err := VerifyRuleChecksums(bundle.Rules); err != nil {
+		return fmt.Errorf("bundle checksum verification failed: %w", err)
+	}
+
+	if err := os.MkdirAll(outputDir, 0o750); err != nil {
+		return fmt.Errorf("create overlay output dir: %w", err)
+	}
+
+	previousMeta, err := LoadHashesOverlayMetadata(metadataPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("load overlay metadata: %w", err)
+	}
+
+	managedRules := make(map[string]YaraRuleEntry, len(bundle.Rules))
+	managedFiles := make([]string, 0, len(bundle.Rules))
+	for _, rule := range bundle.Rules {
+		filename := filepath.Base(strings.TrimSpace(rule.Filename))
+		if filename == "." || filename == string(filepath.Separator) || filename == "" {
+			continue
+		}
+		if !strings.HasPrefix(filename, hashesCustomOverlayPrefix) {
+			continue
+		}
+		if _, exists := managedRules[filename]; exists {
+			return fmt.Errorf("duplicate overlay-managed filename in bundle: %q", filename)
+		}
+		managedRules[filename] = rule
+		managedFiles = append(managedFiles, filename)
+	}
+	sort.Strings(managedFiles)
+
+	tempDir := filepath.Join(outputDir, ".custom-hash-overlay.tmp")
+	if err := os.RemoveAll(tempDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clean temp overlay dir: %w", err)
+	}
+	if err := os.MkdirAll(tempDir, 0o750); err != nil {
+		return fmt.Errorf("create temp overlay dir: %w", err)
+	}
+
+	for _, filename := range managedFiles {
+		rule := managedRules[filename]
+		tempPath := filepath.Join(tempDir, filename)
+		if err := os.WriteFile(tempPath, []byte(rule.Content), 0o640); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return fmt.Errorf("write temp overlay file %s: %w", filename, err)
+		}
+	}
+
+	for _, filename := range managedFiles {
+		tempPath := filepath.Join(tempDir, filename)
+		finalPath := filepath.Join(outputDir, filename)
+		if err := os.Rename(tempPath, finalPath); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return fmt.Errorf("activate overlay file %s: %w", filename, err)
+		}
+	}
+	if err := os.RemoveAll(tempDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("clean temp overlay dir after activation: %w", err)
+	}
+
+	currentManaged := make(map[string]struct{}, len(managedFiles))
+	for _, filename := range managedFiles {
+		currentManaged[filename] = struct{}{}
+	}
+	for _, previousFile := range previousMeta.ManagedFiles {
+		if _, keep := currentManaged[previousFile]; keep {
+			continue
+		}
+		if !strings.HasPrefix(previousFile, hashesCustomOverlayPrefix) {
+			continue
+		}
+		stalePath := filepath.Join(outputDir, filepath.Base(previousFile))
+		if err := os.Remove(stalePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale overlay file %s: %w", previousFile, err)
+		}
+	}
+
+	enabledCount := 0
+	for _, rule := range bundle.Rules {
+		if rule.Enabled {
+			enabledCount++
+		}
+	}
+
+	meta := HashesOverlayMetadata{
+		BundleMetadata: BundleMetadata{
+			BundleVersion:    bundle.BundleVersion,
+			GeneratedAt:      bundle.GeneratedAt,
+			ActivatedAt:      time.Now().UTC().Format(time.RFC3339),
+			PolicyID:         bundle.PolicyID,
+			ActiveChecksums:  bundle.ActiveChecksums,
+			RuleCount:        len(bundle.Rules),
+			EnabledRuleCount: enabledCount,
+		},
+		ManagedFiles: managedFiles,
+	}
+
+	if err := SaveHashesOverlayMetadata(metadataPath, meta); err != nil {
+		return fmt.Errorf("save overlay metadata: %w", err)
+	}
+
+	return nil
 }
 
 // ActivateYaraBundle validates and activates a signed bundle, replacing previous rules.
@@ -655,6 +1016,49 @@ func (c *Client) ReportYaraRuleStatus(ctx context.Context, statusPath string, re
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("YARA rule status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	return nil
+}
+
+// ReportHashesRolloutStatus posts hash rollout status after sync attempts.
+func (c *Client) ReportHashesRolloutStatus(ctx context.Context, report *HashesRolloutStatusReport) error {
+	const statusPath = "/api/xdr-defense/hashes/rollouts/status/report"
+
+	endpoint, err := c.buildURL(statusPath)
+	if err != nil {
+		return fmt.Errorf("build hashes rollout status endpoint: %w", err)
+	}
+
+	body, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("marshal hashes rollout status payload: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("build hashes rollout status request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "xdr-agent")
+	httpReq.Header.Set("osd-xsrf", "true")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("send hashes rollout status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+	if err != nil {
+		return fmt.Errorf("read hashes rollout status response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("hashes rollout status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	return nil

@@ -13,9 +13,9 @@
   "defense_posture_path": "/var/lib/xdr-agent/defense_posture.json",
   "defense_posture_poll_interval_seconds": 30,
   "defense_posture_ack_path": "/api/xdr-defense/policy-rollouts/ack",
-  "yara_rollout_ack_path": "/api/xdr-defense/yara-rollouts/ack",
+  "yara_rollout_ack_path": "/api/xdr-defense/yara/rollouts/ack",
   "insecure_skip_tls_verify": false,
-    "yara_rule_status_path": "/api/xdr-defense/yara-rollouts/status",
+    "yara_rule_status_path": "/api/xdr-defense/yara/rollouts/status",
     "yara_rule_inventory_path": "/api/xdr-defense/yara-rules/inventory",
     "yara_inventory_check_interval_seconds": 300,
   "telemetry_url": "",
@@ -76,7 +76,7 @@
   "rules": {
     "behavioral_dir": "/etc/xdr-agent/rules/behavioral",
     "yara_dir": "/etc/xdr-agent/rules/malware/yara",
-    "hashes_file": "/etc/xdr-agent/rules/malware/known_hashes.yml",
+    "hashes_file": "/etc/xdr-agent/rules/malware/hashes",
     "threatintel_dir": "/etc/xdr-agent/rules/threatintel"
   }
 }

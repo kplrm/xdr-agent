@@ -3,8 +3,10 @@
 // Package file — access.go
 //
 // FileAccessCollector monitors a configurable set of sensitive files and
-// directories for read-access events using the Linux inotify IN_ACCESS and
-// IN_OPEN flags.
+// directories for read-access events using Linux inotify flags.
+//
+// Files use IN_ACCESS | IN_OPEN; directories use IN_OPEN-only to avoid
+// high-volume read-loop amplification during startup baseline scans.
 //
 // This enables detection of credential harvesting — e.g. an attacker reading
 // /etc/shadow, /etc/gshadow, or SSH host keys — without requiring eBPF or
@@ -18,7 +20,8 @@
 //   - event.kind: "event"
 //
 // Envelope MITRE technique (threat.technique.id) is set per-path:
-//   shadow/gshadow/opasswd → T1003.008, SSH paths → T1552.004
+//
+//	shadow/gshadow/opasswd → T1003.008, SSH paths → T1552.004
 package file
 
 import (
@@ -48,7 +51,7 @@ var defaultSensitiveAccessPaths = []string{
 }
 
 // FileAccessCollector watches sensitive files and directories for read-access
-// events via inotify IN_ACCESS | IN_OPEN.  It implements capability.Capability.
+// events via inotify. It implements capability.Capability.
 type FileAccessCollector struct {
 	pipeline   *events.Pipeline
 	agentID    string
@@ -57,6 +60,11 @@ type FileAccessCollector struct {
 	inotifyFd  int
 	inotifyMu  sync.Mutex
 	wdToPath   map[int32]string
+	emitMu     sync.Mutex
+	lastEmit   map[string]time.Time
+	windowFrom time.Time
+	windowSent int
+	windowDrop int
 	mu         sync.Mutex
 	health     capability.HealthStatus
 	cancel     context.CancelFunc
@@ -79,6 +87,7 @@ func NewFileAccessCollector(
 		watchPaths: watchPaths,
 		inotifyFd:  -1,
 		wdToPath:   make(map[int32]string),
+		lastEmit:   make(map[string]time.Time),
 		health:     capability.HealthStopped,
 	}
 }
@@ -152,10 +161,8 @@ func (a *FileAccessCollector) setupInotify() error {
 	a.inotifyFd = fd
 	a.inotifyMu.Unlock()
 
-	// IN_ACCESS fires on every read(); IN_OPEN on every open().
-	// We use IN_ACCESS | IN_OPEN for files and IN_ACCESS | IN_OPEN for dirs
-	// (directory-level access means a file within was opened).
-	const mask = uint32(syscall.IN_ACCESS | syscall.IN_OPEN)
+	const fileMask = uint32(syscall.IN_ACCESS | syscall.IN_OPEN)
+	const dirMask = uint32(syscall.IN_OPEN)
 
 	for _, p := range a.watchPaths {
 		info, err := os.Lstat(p)
@@ -167,11 +174,11 @@ func (a *FileAccessCollector) setupInotify() error {
 			continue
 		}
 
-		watchMask := mask
+		watchMask := fileMask
 		if info.IsDir() {
-			// For directories, watch only direct children (non-recursive).
-			// Recursive access monitoring would be too noisy.
-			watchMask |= syscall.IN_ONLYDIR
+			// Directory watches are intentionally limited to IN_OPEN to avoid
+			// read-loop amplification from startup baseline scanners.
+			watchMask = dirMask | syscall.IN_ONLYDIR
 		}
 
 		wd, wErr := syscall.InotifyAddWatch(fd, p, watchMask)
@@ -193,6 +200,12 @@ func (a *FileAccessCollector) setupInotify() error {
 // ── event loop ────────────────────────────────────────────────────────────────
 
 const accessBufSize = 65536
+
+const (
+	fileAccessPerPathMinInterval = 2 * time.Second
+	fileAccessBurstWindow        = 1 * time.Second
+	fileAccessBurstMaxEvents     = 200
+)
 
 func (a *FileAccessCollector) loop(ctx context.Context) {
 	buf := make([]byte, accessBufSize)
@@ -287,6 +300,11 @@ func (a *FileAccessCollector) handleAccessEvent(wd int32, mask uint32, name stri
 //   - /etc/shadow, /etc/gshadow, /etc/security/opasswd → T1003.008 (OS Credential Dumping: /etc/passwd and /etc/shadow)
 //   - SSH paths (/root/.ssh, /etc/ssh) → T1552.004 (Unsecured Credentials: Private Keys)
 func (a *FileAccessCollector) emitAccessEvent(path string) {
+	now := time.Now().UTC()
+	if !a.shouldEmit(path, now) {
+		return
+	}
+
 	filePayload := map[string]interface{}{
 		"path":      path,
 		"name":      filepath.Base(path),
@@ -303,8 +321,8 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 	}
 
 	ev := events.Event{
-		ID:            fmt.Sprintf("faccess-%d", time.Now().UnixNano()),
-		Timestamp:     time.Now().UTC(),
+		ID:            fmt.Sprintf("faccess-%d", now.UnixNano()),
+		Timestamp:     now,
 		Type:          "file.access",
 		Category:      "file",
 		Kind:          "event",
@@ -323,4 +341,43 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 		Tags: []string{"file", "access", "credential-access", "telemetry"},
 	}
 	a.pipeline.Emit(ev)
+}
+
+// shouldEmit bounds startup storms while preserving actionable telemetry.
+// It applies both a per-path debounce and a global per-second cap.
+func (a *FileAccessCollector) shouldEmit(path string, now time.Time) bool {
+	a.emitMu.Lock()
+	defer a.emitMu.Unlock()
+
+	if a.windowFrom.IsZero() || now.Sub(a.windowFrom) >= fileAccessBurstWindow {
+		if a.windowDrop > 0 {
+			log.Printf("file.access: suppressed %d noisy events in last %s", a.windowDrop, fileAccessBurstWindow)
+		}
+		a.windowFrom = now
+		a.windowSent = 0
+		a.windowDrop = 0
+
+		if len(a.lastEmit) > 4096 {
+			cutoff := now.Add(-(2 * fileAccessPerPathMinInterval))
+			for p, ts := range a.lastEmit {
+				if ts.Before(cutoff) {
+					delete(a.lastEmit, p)
+				}
+			}
+		}
+	}
+
+	if last, ok := a.lastEmit[path]; ok && now.Sub(last) < fileAccessPerPathMinInterval {
+		a.windowDrop++
+		return false
+	}
+
+	if a.windowSent >= fileAccessBurstMaxEvents {
+		a.windowDrop++
+		return false
+	}
+
+	a.windowSent++
+	a.lastEmit[path] = now
+	return true
 }

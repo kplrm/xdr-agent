@@ -8,7 +8,12 @@ package behavioral
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +24,9 @@ type Engine struct {
 	rulesDir string
 	reload   time.Duration
 
-	mu    sync.RWMutex
-	rules []Rule
+	mu              sync.RWMutex
+	rules           []Rule
+	lastRulesDigest string
 }
 
 func NewEngine(rulesDir string) (*Engine, error) {
@@ -39,11 +45,39 @@ func (e *Engine) Reload() error {
 	if err != nil {
 		return err
 	}
+
+	digest := behavioralRulesDigest(rules)
 	e.mu.Lock()
+	unchanged := e.lastRulesDigest != "" && e.lastRulesDigest == digest
 	e.rules = rules
+	e.lastRulesDigest = digest
 	e.mu.Unlock()
-	log.Printf("behavioral: loaded %d rules from %s", len(rules), e.rulesDir)
+
+	if !unchanged {
+		log.Printf("behavioral: loaded %d rules from %s", len(rules), e.rulesDir)
+	}
 	return nil
+}
+
+func behavioralRulesDigest(rules []Rule) string {
+	parts := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%t|%s",
+			rule.ID,
+			rule.Name,
+			rule.Description,
+			rule.Severity,
+			rule.MitreTactic,
+			rule.MitreTechnique,
+			rule.Condition.EventType,
+			rule.Action,
+			rule.Enabled,
+			strings.Join(rule.Tags, ","),
+		))
+	}
+	sort.Strings(parts)
+	hash := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(hash[:])
 }
 
 func (e *Engine) StartAutoReload(ctx context.Context) {

@@ -6,9 +6,13 @@ package events
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
+	"time"
 )
+
+const dropLogWindow = 5 * time.Second
 
 // Pipeline is the central event bus for the XDR agent.
 // Capabilities publish events; the shipper consumes them.
@@ -17,6 +21,11 @@ type Pipeline struct {
 	subs   []func(Event)
 	mu     sync.RWMutex
 	closed bool
+
+	dropMu      sync.Mutex
+	dropFrom    time.Time
+	dropCount   int
+	dropLastTyp string
 }
 
 // NewPipeline creates a new event pipeline with the given buffer size.
@@ -41,8 +50,42 @@ func (p *Pipeline) Emit(event Event) {
 	select {
 	case p.ch <- event:
 	default:
-		log.Printf("event pipeline buffer full, dropping event type=%s", event.Type)
+		if msg := p.recordDrop(event.Type, time.Now()); msg != "" {
+			log.Print(msg)
+		}
 	}
+}
+
+func (p *Pipeline) recordDrop(eventType string, now time.Time) string {
+	p.dropMu.Lock()
+	defer p.dropMu.Unlock()
+
+	if p.dropFrom.IsZero() {
+		p.dropFrom = now
+		p.dropCount = 1
+		p.dropLastTyp = eventType
+		return fmt.Sprintf("event pipeline buffer full, dropping events (suppressing repeats for %s, latest type=%s)", dropLogWindow, eventType)
+	}
+
+	if now.Sub(p.dropFrom) < dropLogWindow {
+		p.dropCount++
+		p.dropLastTyp = eventType
+		return ""
+	}
+
+	prevCount := p.dropCount
+	prevType := p.dropLastTyp
+	p.dropFrom = now
+	p.dropCount = 1
+	p.dropLastTyp = eventType
+
+	return fmt.Sprintf(
+		"event pipeline buffer full, dropped %d events in last %s (latest type=%s); continuing to drop (latest type=%s)",
+		prevCount,
+		dropLogWindow,
+		prevType,
+		eventType,
+	)
 }
 
 // Subscribe registers a handler that will receive all events.
