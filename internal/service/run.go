@@ -964,6 +964,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 }
 
 func isSecurityClassifiedEvent(event events.Event) bool {
+	// Injection collector emits alert/intrusion_detection semantics for telemetry dashboards,
+	// so keep telemetry.injection events on the telemetry topic.
+	if event.Module == "telemetry.injection" {
+		return false
+	}
+
 	if event.Kind == "alert" || event.Category == "intrusion_detection" {
 		return true
 	}
