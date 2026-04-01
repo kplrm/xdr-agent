@@ -228,6 +228,9 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 
 	// handleHeartbeatCommands processes any commands returned by the control
 	// plane in the heartbeat response (e.g. upgrade:0.3.2).
+	var detectionEngine *detection.Engine
+	var syncYaraBundle func(bool) bool
+
 	handleHeartbeatCommands := func(resp enroll.HeartbeatResponse) {
 		for _, cmd := range resp.PendingCommands {
 			if strings.HasPrefix(cmd, "upgrade:") {
@@ -239,8 +242,28 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				if err := upgrade.Perform(ctx, targetVersion); err != nil {
 					log.Printf("upgrade failed (will retry on next heartbeat): %v", err)
 				}
-				// If upgrade succeeded, systemd will restart us. If it failed,
-				// we continue running and will retry on the next heartbeat cycle.
+				continue
+			}
+
+			if strings.HasPrefix(cmd, "yara-rollout:") {
+				parts := strings.SplitN(strings.TrimPrefix(cmd, "yara-rollout:"), ":", 2)
+				commandPolicyID := ""
+				commandBundleVersion := ""
+				if len(parts) >= 1 {
+					commandPolicyID = strings.TrimSpace(parts[0])
+				}
+				if len(parts) == 2 {
+					commandBundleVersion = strings.TrimSpace(parts[1])
+				}
+				// Accept commands for this agent's enrolled policy OR for the
+				// global-default YARA bundle policy (used by xdr-defense for all agents).
+				if commandPolicyID != "" && commandPolicyID != cfg.PolicyID && commandPolicyID != "global-default" {
+					continue
+				}
+				log.Printf("YARA rollout command received: policy_id=%s bundle_version=%s", cfg.PolicyID, commandBundleVersion)
+				if syncYaraBundle != nil && syncYaraBundle(true) && detectionEngine != nil {
+					detectionEngine.ReloadMalwareRules()
+				}
 			}
 		}
 	}
@@ -337,13 +360,16 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	}
 
 	// Sync YARA rules bundle from xdr-defense with per-rule tracking.
-	syncYaraBundle := func() bool {
+	syncYaraBundle = func(forceApply bool) bool {
 		if !cfg.DetectionPrevention.Capabilities.Malware.YaraDetection {
 			yaraState.lastOutcome = "disabled"
 			return false
 		}
 
-		bundle, err := controlPlaneClient.FetchSignedYaraBundle(ctx, cfg.PolicyID)
+		// YARA bundles are always built for the global-default policy in xdr-defense.
+		// Fetch from global-default regardless of the agent's enrolled policy ID so
+		// all agents receive the same global YARA ruleset.
+		bundle, err := controlPlaneClient.FetchSignedYaraBundle(ctx, "global-default")
 		if err != nil {
 			yaraState.lastOutcome = "fetch_error"
 			log.Printf("warning: failed to fetch YARA bundle: %v", err)
@@ -351,7 +377,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		}
 
 		digest := bundleDigest(bundle)
-		if shouldSkipApply(yaraState, bundle, digest) {
+		if !forceApply && shouldSkipApply(yaraState, bundle, digest) {
 			yaraState.lastSkippedDuplicate++
 			yaraState.lastOutcome = "unchanged"
 			return false
@@ -411,7 +437,9 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		statusReport := &controlplane.YaraRolloutStatusReport{
 			ManagerPolicyID: mpID,
 			AgentID:         state.AgentID,
+			AgentHostname:   state.Hostname,
 			State:           activationState,
+			BundleVersion:   bundle.BundleVersion,
 			TotalRules:      len(bundle.Rules),
 			LoadedRules:     loadedCount,
 			FailedRules:     failedRulesList,
@@ -637,61 +665,11 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	defensePostureTicker := time.NewTicker(cfg.DefensePosturePollInterval())
 	defer defensePostureTicker.Stop()
 
-	yaraBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
-	defer yaraBundleTicker.Stop()
-	// Hash bundles are synced at the same cadence as YARA. The GET endpoint no
-	// longer force-rebuilds the snapshot on each request, so polling at this
-	// frequency is cheap (sign-only when version unchanged).
+	// Hash and behavioral bundles continue to poll on the existing cadence.
 	hashesBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
 	defer hashesBundleTicker.Stop()
 	behavioralBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
 	defer behavioralBundleTicker.Stop()
-
-	yaraInventoryTicker := time.NewTicker(cfg.YaraInventoryCheckInterval())
-	defer yaraInventoryTicker.Stop()
-
-	// Periodic rule inventory check to detect degradation
-	reportRuleInventory := func() bool {
-		// Only report if YARA detection is enabled
-		if !cfg.DetectionPrevention.Capabilities.Malware.YaraDetection {
-			return false
-		}
-
-		rulesDir := cfg.Rules.YaraDir
-		entries, err := os.ReadDir(rulesDir)
-		if err != nil && !os.IsNotExist(err) {
-			log.Printf("warning: failed to check rule inventory: %v", err)
-			return false
-		}
-
-		// Count actual rule files
-		ruleCount := 0
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".yar") {
-				ruleCount++
-			}
-		}
-
-		inventory := &controlplane.PeriodicRuleInventory{
-			AgentID:         state.AgentID,
-			LoadedRuleCount: ruleCount,
-			FailedRules:     []controlplane.RuleActivationStatus{},
-			CheckedAt:       time.Now().Unix(),
-		}
-
-		// Report inventory (non-fatal on error)
-		if reportErr := controlPlaneClient.ReportRuleInventory(ctx, cfg.YaraRuleInventoryPath, inventory); reportErr != nil {
-			log.Printf("warning: failed to report rule inventory: %v", reportErr)
-		} else {
-			log.Printf("rule inventory reported: count=%d", ruleCount)
-			state.LastYaraInventoryAt = time.Now().UTC().Format(time.RFC3339)
-			if err := identity.Save(cfg.StatePath, state); err != nil {
-				log.Printf("warning: failed to save agent state after inventory report: %v", err)
-			}
-		}
-
-		return true
-	}
 
 	for {
 		if state.Enrolled {
@@ -781,7 +759,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		"mode": cfg.DetectionPrevention.Mode,
 	})
 
-	detectionEngine, err := detection.NewEngine(cfg, pipeline)
+	detectionEngine, err = detection.NewEngine(cfg, pipeline)
 	if err != nil {
 		log.Printf("detection engine init failed: %v", err)
 		agentLogger.Error("detection", "detection engine initialization failed", map[string]interface{}{"error": err.Error()})
@@ -796,10 +774,6 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		"enabled": cfg.DetectionPrevention.Capabilities.Prevention.Enabled,
 	})
 
-	// Initial YARA sync on startup to avoid waiting for the first periodic tick.
-	if syncYaraBundle() && detectionEngine != nil {
-		detectionEngine.ReloadMalwareRules()
-	}
 	if syncHashesContent() && detectionEngine != nil {
 		detectionEngine.ReloadMalwareRules()
 	}
@@ -955,11 +929,6 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				log.Printf("heartbeat failed: %v", err)
 			} else {
 				handleHeartbeatCommands(hbResp)
-				// Reconcile YARA and hashes target-state at heartbeat cadence to guarantee
-				// convergence even if the periodic bundle ticker drifts.
-				if syncYaraBundle() && detectionEngine != nil {
-					detectionEngine.ReloadMalwareRules()
-				}
 				if syncHashesContent() && detectionEngine != nil {
 					detectionEngine.ReloadMalwareRules()
 				}
@@ -979,12 +948,6 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				}
 				preventionManager.UpdateDefensePosture(cfg.DetectionPrevention)
 			}
-		case <-yaraBundleTicker.C:
-			// Sync YARA rules frequently so delete/activate rollouts are applied quickly,
-			// instead of waiting for the slower defense posture poll loop.
-			if syncYaraBundle() && detectionEngine != nil {
-				detectionEngine.ReloadMalwareRules()
-			}
 		case <-hashesBundleTicker.C:
 			// Pick up updated hash bundles after MalwareBazaar sync completes.
 			// The server endpoint now serves the cached snapshot (no index scan per
@@ -996,8 +959,6 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			if syncBehavioralBundle() && detectionEngine != nil {
 				detectionEngine.ReloadBehavioralRules()
 			}
-		case <-yaraInventoryTicker.C:
-			reportRuleInventory()
 		}
 	}
 }

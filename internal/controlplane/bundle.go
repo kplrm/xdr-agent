@@ -75,7 +75,9 @@ type RuleActivationStatus struct {
 type YaraRolloutStatusReport struct {
 	ManagerPolicyID string                 `json:"manager_policy_id"`
 	AgentID         string                 `json:"agent_id"`
-	State           string                 `json:"state"`        // "acked" | "partial" | "failed"
+	AgentHostname   string                 `json:"agent_hostname,omitempty"`
+	State           string                 `json:"state"` // "acked" | "partial" | "failed"
+	BundleVersion   int                    `json:"bundle_version,omitempty"`
 	TotalRules      int                    `json:"total_rules"`  // total rules in bundle
 	LoadedRules     int                    `json:"loaded_rules"` // how many actually loaded
 	FailedRules     []RuleActivationStatus `json:"failed_rules"` // only failures (empty if all loaded)
