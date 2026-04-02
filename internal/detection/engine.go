@@ -12,6 +12,7 @@ package detection
 import (
 	"context"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -236,6 +237,7 @@ func (e *Engine) emitAlert(src events.Event, module, ruleID, ruleName, descripti
 	}
 
 	e.pipeline.Emit(events.Event{
+		ID:        buildAlertID(module, ruleID, src.ID),
 		Timestamp: time.Now().UTC(),
 		Type:      "alert",
 		Category:  "threat",
@@ -247,6 +249,15 @@ func (e *Engine) emitAlert(src events.Event, module, ruleID, ruleName, descripti
 		Payload:   payload,
 		Tags:      []string{"detection", action},
 	})
+}
+
+func buildAlertID(module, ruleID, sourceEventID string) string {
+	// Keep IDs stable enough for dedup and always non-empty for index _id.
+	ts := time.Now().UnixNano()
+	if sourceEventID != "" {
+		return "alert-" + module + "-" + ruleID + "-" + sourceEventID + "-" + strconv.FormatInt(ts, 10)
+	}
+	return "alert-" + module + "-" + ruleID + "-" + strconv.FormatInt(ts, 10)
 }
 
 // pathFromEvent extracts the relevant file path from an event payload.

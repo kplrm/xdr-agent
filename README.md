@@ -299,6 +299,37 @@ Expected output on success:
 The test is safe — it does not push data to OpenSearch, and all files created
 during the test are automatically deleted on exit (including on failure or Ctrl+C).
 
+## Malware engine smoke test (test-only)
+
+Use `test/scripts/test_malware_engines.sh` to run a controlled local smoke test
+for one hash signature and one YARA signature with spaced triggers.
+
+Warning: this is test-only tooling for validation in non-production environments.
+It creates temporary trigger binaries and temporary rule files under
+`/etc/xdr-agent/rules/malware/*`, restarts `xdr-agent`, queries OpenSearch, then
+automatically cleans all test artifacts and restarts the agent again on exit.
+
+```bash
+sudo bash test/scripts/test_malware_engines.sh
+```
+
+Useful overrides:
+
+```bash
+# Default spacing is 30s between hash trigger and YARA trigger.
+sudo SPACING_SECONDS=45 bash test/scripts/test_malware_engines.sh
+
+# OpenSearch endpoint/auth options.
+sudo OPENSEARCH_URL=http://localhost:9200 \
+  OPENSEARCH_USER=admin \
+  OPENSEARCH_PASS=admin \
+  OPENSEARCH_INSECURE=true \
+  bash test/scripts/test_malware_engines.sh
+```
+
+The script uses `/root/xdr-test` by default (instead of `/tmp`) to avoid
+systemd `PrivateTmp` visibility issues.
+
 ### Inspecting captured events
 
 After a `KEEP_LOGS=1` run, the captured events are saved in a root-owned file
