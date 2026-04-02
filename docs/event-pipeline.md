@@ -1,47 +1,61 @@
 # Event Pipeline
 
-## Overview
+The event pipeline is the handoff point between collection, detection, prevention, and shipping.
 
-The event pipeline is the central nervous system of the XDR agent. All capabilities
-emit structured events into the pipeline, which handles enrichment, filtering,
-buffering, and shipping to the control plane.
+## What Exists Today
 
-## Event Flow
+The implementation is intentionally simple:
 
+- an in-memory buffered channel in `internal/events/pipeline.go`
+- subscribers registered by runtime components
+- compressed batch shipping in `internal/controlplane/shipper.go`
+- requeue on shipping failure inside the shipper
+- drop logging when the pipeline buffer is saturated
+
+## Actual Flow
+
+```text
+collector or engine
+  -> pipeline.Emit(event)
+  -> subscriber callbacks
+  -> shipper enqueue
+  -> batch flush
+  -> gzip HTTP POST to control plane
 ```
-Capability → Emit() → Pipeline Channel → Enrichment → Filtering → Buffer → Ship to Control Plane
-```
 
-## Event Kinds
+## Event Types in Practice
 
-| Kind | Description | Example |
-|---|---|---|
-| `event` | Raw telemetry event | Process start, file write, network connection |
-| `alert` | Detection alert | Malware detected, suspicious behavior, IoC match |
-| `metric` | Performance metric | CPU usage, event rate, scan duration |
-| `state` | State change | Capability started, agent enrolled, policy updated |
+The current event model supports four broad kinds:
 
-## Enrichment
+- `event`: raw telemetry or operational events
+- `alert`: detection results
+- `metric`: runtime measurements
+- `state`: state changes when used by a component
 
-Before shipping, events are enriched with:
-- **Agent context**: agent_id, hostname, OS info
-- **Cloud context**: cloud provider, instance ID, region (if applicable)
-- **Container context**: container ID, image, K8s namespace (if applicable)
-- **MITRE ATT&CK**: tactic and technique IDs (for alerts)
-- **Threat intel**: reputation scores (for IoC matches)
+Prevention actions are emitted as normal events with prevention-oriented metadata.
 
-## Buffering
+## Important Clarification
 
-When the control plane is unreachable, events are buffered to disk:
-- Append-only log file in `/var/lib/xdr-agent/buffer/`
-- Replayed in order when connectivity is restored  
-- Maximum buffer size is configurable (default: 100MB)
-- Oldest events are dropped when buffer is full
+The current pipeline does not implement durable on-disk event buffering.
 
-## Shipping
+What it does instead:
+- keeps an in-memory buffer
+- drops events when the pipeline channel is full
+- logs drop summaries in a rate-limited way
+- requeues batches inside the shipper when HTTP delivery fails
 
-Events are shipped to the control plane via HTTP POST:
-- Batched (default: up to 1000 events per request)
-- Compressed (gzip)
-- Retry with exponential backoff on failure
-- Configurable endpoint and authentication
+That distinction matters for reliability planning and should stay explicit in all docs.
+
+## Shipping Behavior
+
+The shipper:
+- batches events
+- compresses requests with gzip
+- retries failed requests with exponential backoff
+- avoids retrying most non-429 client errors
+- performs a final flush attempt on shutdown
+
+## Documentation Boundary
+
+This document describes the current mechanics only.
+If durable buffering, WAL replay, or alternate transport fan-out are added later, document them as new features rather than implying they already exist.

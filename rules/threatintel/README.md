@@ -1,42 +1,36 @@
-# Threat Intelligence Feed Integration
-#
-# The XDR agent supports consuming threat intelligence from multiple sources
-# to match observed indicators (file hashes, IPs, domains) against known threats.
-#
-# Supported feed formats:
-#   - STIX 2.x (JSON bundles)
-#   - TAXII 2.x (automated feed retrieval)
-#   - MISP (event export format)
-#   - CSV (simple hash/IP/domain lists)
-#   - OpenCTI (via API)
-#
-# Configuration:
-#   Feeds are configured in the agent's config.json under "threat_intel.feeds":
-#
-#   "threat_intel": {
-#     "enabled": true,
-#     "feeds": [
-#       {
-#         "name": "abuse-ch-malware-bazaar",
-#         "type": "csv",
-#         "url": "https://bazaar.abuse.ch/export/csv/recent/",
-#         "interval_hours": 1,
-#         "indicator_types": ["sha256"]
-#       },
-#       {
-#         "name": "custom-stix-feed",
-#         "type": "taxii",
-#         "url": "https://threatintel.example.com/taxii2/",
-#         "api_key": "${TAXII_API_KEY}",
-#         "interval_hours": 6,
-#         "indicator_types": ["sha256", "ipv4", "domain"]
-#       }
-#     ]
-#   }
-#
-# Free threat intel sources:
-#   - abuse.ch (Malware Bazaar, URLhaus, ThreatFox)
-#   - AlienVault OTX
-#   - CIRCL (Luxembourg CERT)
-#   - Emerging Threats (Proofpoint open rules)
-#   - VirusTotal (with API key)
+# Threat Intel Rules Directory
+
+This directory stores local threat-intel artifacts consumed by `xdr-agent`.
+
+## Purpose
+
+`xdr-agent` uses local, policy-assigned indicators during endpoint evaluation.
+The control plane (`xdr-defense`) is responsible for collecting, curating, signing, and distributing those indicators.
+
+## Design Choice
+
+Threat intel ingestion is centralized in `xdr-defense`, not decentralized to each endpoint.
+
+Why:
+- Keeps endpoint behavior deterministic and auditable
+- Reduces internet egress and feed parsing risk on endpoints
+- Enables one curated source of truth for all agents
+- Makes rollout/revoke workflows easier to verify
+
+## What Belongs Here
+
+- Indicator files deployed for local matching
+- Signed or checksum-verifiable artifact payloads
+- Minimal metadata needed for endpoint-side evaluation
+
+## What Does Not Belong Here
+
+- Endpoint-specific STIX/TAXII/MISP fetch logic
+- Long-running remote feed clients
+- Unverified direct internet feed payloads
+
+## Future Work
+
+- Standardize artifact schema and versioning metadata
+- Improve rollback metadata for quick policy reversions
+- Add integrity and freshness checks per artifact family

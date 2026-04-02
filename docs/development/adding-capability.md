@@ -1,101 +1,61 @@
-# Adding a New Capability
+# Adding a Capability
 
-This guide explains how to add a new security capability to the XDR agent.
+Use this guide when adding a new runtime capability to `xdr-agent`.
 
-## Step 1: Create the package
+## Decide First
 
-Create a new package under the appropriate domain in `internal/`:
+Before creating a package, decide whether the feature is actually one of these:
 
-| Domain | Package Location | When to Use |
-|---|---|---|
-| Telemetry | `internal/telemetry/<name>/` | Collecting system events |
-| Detection | `internal/detection/<name>/` | Analyzing events for threats |
-| Prevention | `internal/prevention/<name>/` | Blocking threats in real-time |
-| Response | `internal/response/` | Remote response actions |
-| Compliance | `internal/compliance/` | Configuration checks |
-| Cloud | `internal/cloud/<name>/` | Cloud/container monitoring |
+- telemetry collector
+- detection engine logic
+- prevention decision or enforcement logic
+- control-plane sync logic
 
-## Step 2: Implement the Capability interface
+Do not create a new capability just because a feature exists conceptually on the roadmap.
 
-```go
-package mycapability
+## Design Rules
 
-import (
-    "context"
-    "xdr-agent/internal/capability"
-)
+- Fit the current service model in `internal/service/run.go`.
+- Reuse the shared event envelope from `internal/events/event.go`.
+- Make posture interaction explicit if the feature is policy-controlled.
+- Keep endpoint-side logic local and deterministic.
 
-type MyCapability struct {
-    deps   capability.Dependencies
-    health capability.HealthStatus
-}
+## Typical Steps
 
-func New() capability.Capability {
-    return &MyCapability{health: capability.HealthStopped}
-}
+### 1. Create the package
+Place it under the correct domain:
 
-func (m *MyCapability) Name() string { return "domain.mycapability" }
+- `internal/telemetry/<name>`
+- `internal/detection/<name>`
+- `internal/prevention/<name>`
 
-func (m *MyCapability) Init(deps capability.Dependencies) error {
-    m.deps = deps
-    m.health = capability.HealthStarting
-    // Initialize resources, load rules, etc.
-    return nil
-}
+### 2. Define startup and runtime behavior
+The agent currently mixes full capability-style modules and manager-style runtime components.
 
-func (m *MyCapability) Start(ctx context.Context) error {
-    m.health = capability.HealthRunning
-    // Start goroutines, watchers, etc.
-    // Emit events via: m.deps.EventPipeline
-    return nil
-}
+Match the existing pattern used by the neighboring package instead of forcing a new abstraction.
 
-func (m *MyCapability) Stop() error {
-    m.health = capability.HealthStopped
-    // Cleanup resources
-    return nil
-}
+### 3. Emit events through the pipeline
+Use the shared pipeline so the new component participates in the same shipping and downstream evaluation flow.
 
-func (m *MyCapability) Health() capability.HealthStatus {
-    return m.health
-}
-```
+### 4. Add config and posture hooks only if needed
+If the feature is toggleable, add:
+- config defaults
+- posture mapping in `internal/controlplane/defense_posture.go`
+- runtime update handling in the relevant engine or manager
 
-## Step 3: Register in the agent
+### 5. Wire it in `internal/service/run.go`
+Keep orchestration changes explicit and easy to review.
 
-Add your capability to the wiring section in `internal/service/run.go`:
+### 6. Test the real boundary
+At minimum, validate:
+- startup behavior
+- event emission
+- posture update handling if applicable
+- failure behavior when control plane or local artifacts are unavailable
 
-```go
-// Inside the Run() function, after the existing collectors:
-myCollector := mycapability.New(pipeline, state.AgentID, state.Hostname)
-if err := myCollector.Init(capability.Dependencies{}); err != nil {
-    log.Printf("mycapability init failed: %v", err)
-} else if err := myCollector.Start(ctx); err != nil {
-    log.Printf("mycapability start failed: %v", err)
-} else {
-    log.Printf("capability started: %s", myCollector.Name())
-}
-```
+## Anti-Patterns
 
-## Step 4: Add configuration
-
-Add a configuration section in `config.json`:
-
-```json
-{
-  "capabilities": {
-    "domain.mycapability": {
-      "enabled": true,
-      "custom_setting": "value"
-    }
-  }
-}
-```
-
-## Step 5: Write tests
-
-Add unit tests in your package and integration tests in `test/integration/`.
-
-## Step 6: Document
-
-Add documentation in `docs/capabilities/`.
+- adding roadmap-only stubs with no runtime path
+- creating a second event model instead of reusing the shared one
+- duplicating feed curation logic that belongs in `xdr-defense`
+- documenting fields or behavior before the runtime actually emits them

@@ -1,40 +1,62 @@
 # Contributing to xdr-agent
 
-Thank you for your interest in contributing to xdr-agent! This document
-explains how to contribute and the terms under which contributions are accepted.
+This document covers contribution expectations for the endpoint runtime.
 
 ## License
 
-xdr-agent is licensed under the **GNU Affero General Public License v3.0**
-(AGPL-3.0). See [LICENSE](LICENSE) for the full text.
+`xdr-agent` is licensed under the GNU Affero General Public License v3.0.
+See `LICENSE` for the full terms.
 
-All contributions to this project are subject to the same license. By
-submitting a pull request you agree that your work may be distributed under
-the terms of the AGPL-3.0 (Inbound = Outbound).
+By submitting a change, you agree that your contribution is distributed under the same license.
 
-## How to contribute
+## Contribution Flow
 
-1. **Fork** the repository and create a feature branch from `main`.
-2. Make your changes. Add or update tests where applicable.
-3. Ensure the project builds cleanly: `make build`.
-4. Commit with a clear message.
-5. Open a **pull request** against `main`.
+1. Branch from `main`.
+2. Make a focused change.
+3. Add or update tests when behavior changes.
+4. Build and test before opening a pull request.
+5. Include a clear description of the runtime impact, policy impact, and any compatibility implications.
 
-## Coding guidelines
+## Build And Test
 
-- Go source files should be formatted with `gofmt`.
-- Keep dependencies minimal — the project currently uses only the Go standard
-  library, and that is intentional.
-- Follow the existing package and file structure (see `docs/architecture.md`
-  and `docs/development/adding-capability.md`).
+```bash
+cd /home/kplrm/github/xdr-agent
+make build
+go build ./...
+go test ./...
+```
 
-## Reporting issues
+Run the smallest relevant test scope when iterating, but do not open a change without a clean build.
 
-Open a GitHub issue. Include steps to reproduce, expected behaviour, and actual
-behaviour. For security vulnerabilities, **do not** open a public issue — email
-the maintainer privately instead.
+## Engineering Expectations
 
-## Code of Conduct
+- Follow the current runtime architecture in `docs/architecture.md`.
+- Keep capability boundaries clear instead of adding cross-cutting logic in ad hoc places.
+- Prefer minimal, justified dependencies. External libraries are acceptable when they solve a real endpoint-security need better than custom code.
+- Keep policy-driven behavior in config or control-plane overlays rather than hard-coding mode decisions.
+- Update docs when routes, rollout behavior, field ownership, or capability boundaries change.
 
-Be respectful and constructive. Harassment or discriminatory behaviour of any
-kind will not be tolerated.
+## Code Style
+
+- Format Go code with `gofmt`.
+- Match existing package structure and naming.
+- Write table-driven tests for new logic where practical.
+- Use the project logging path instead of ad hoc stdout logging.
+
+## Security Issues
+
+Do not open public issues for vulnerabilities, secrets exposure, or bypasses.
+Report them privately to the maintainer through the established private contact path.
+
+## General Issues And Pull Requests
+
+For non-security issues, include:
+
+- what you changed
+- why the current behavior is wrong or incomplete
+- how you validated the change
+- whether agent, coordinator, or defense compatibility is affected
+
+## Conduct
+
+Be direct, respectful, and technically concrete.

@@ -1,151 +1,105 @@
-# XDR Agent Architecture
+# xdr-agent Architecture
 
-## Overview
+`xdr-agent` is a Linux endpoint runtime. Its responsibilities are narrow on purpose:
 
-The XDR Agent is a lightweight, modular endpoint security agent written in Go.
-It provides comprehensive telemetry collection for Linux endpoints, with a
-capability-based architecture designed for detection, prevention, and response
-phases to follow.
+- collect endpoint telemetry
+- apply policy overlays received from the control plane
+- consume signed detection content produced by `xdr-defense`
+- emit ECS-shaped telemetry, alerts, and prevention audit events
 
-## Architecture Diagram
+It is not intended to be a full control plane, a remote feed aggregator, or a rule authoring system.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           XDR Agent Process                                  │
-│                                                                              │
-│  ┌────────────┐    ┌───────────────────────────────────────────────────┐    │
-│  │  CLI / CMD  │───▶│              Service Orchestrator                  │    │
-│  └────────────┘    │  (enrollment, heartbeat, capability wiring)         │    │
-│                    └──────────────────┬────────────────────────────────┘    │
-│                                       │                                      │
-│  ┌────────────────────────────────────┼────────────────────────────────┐    │
-│  │                     Telemetry Capabilities (13 active)               │    │
-│  │                                                                      │    │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ │    │
-│  │  │ Process  │ │   FIM    │ │ Network  │ │   DNS    │ │ Session  │ │    │
-│  │  │ monitor  │ │ inotify  │ │  conns   │ │AF_PACKET │ │utmp+auth │ │    │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ │    │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ │    │
-│  │  │  System  │ │ Library  │ │  Kernel  │ │   TTY    │ │Scheduled │ │    │
-│  │  │ metrics  │ │ SO load  │ │ modules  │ │ sessions │ │cron/timer│ │    │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘ │    │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐                           │    │
-│  │  │Injection │ │  File    │ │   IPC    │   + env vars, script      │    │
-│  │  │ ptrace   │ │  access  │ │ sockets  │   capture, entropy        │    │
-│  │  └──────────┘ └──────────┘ └──────────┘   (integrated)            │    │
-│  └───────┬────────────────────────────────────────────────────────────┘    │
-│          │                                                                  │
-│  ┌───────▼────────────────────────────────────────────────────────────┐    │
-│  │                       Event Pipeline                                │    │
-│  │  ┌──────────┐  ┌───────────┐  ┌──────────────────────────────┐    │    │
-│  │  │  Emit    │─▶│ Enrichment│─▶│  Subscribe → Shipper queue   │    │    │
-│  │  └──────────┘  └───────────┘  └──────────────┬───────────────┘    │    │
-│  └──────────────────────────────────────────────┼────────────────────┘    │
-│                                                  │                          │
-│  ┌──────────────────────────────────────────────▼────────────────────┐    │
-│  │                    Control Plane Client                             │    │
-│  │  ┌──────────┐  ┌───────────┐  ┌──────────────────────────────┐    │    │
-│  │  │  Enroll  │  │ Heartbeat │  │  Shipper (batch+gzip+retry)  │    │    │
-│  │  └──────────┘  └───────────┘  └──────────────────────────────┘    │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │  Future: Detection │ Prevention │ Response │ Compliance │ Cloud    │    │
-│  │          (Phase 3)   (Phase 4)   (Phase 5)   (Phase 6)  (Phase 5) │    │
-│  └────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-                        ┌───────────────────────┐
-                        │   XDR Control Plane    │
-                        │   (OpenSearch + OSD)   │
-                        └───────────────────────┘
-```
+## Runtime Structure
 
-## Data Flow
+### Process flow
+1. Load local config.
+2. Load cached Defense Posture state if present.
+3. Ensure persistent agent identity.
+4. Enroll if needed.
+5. Start telemetry collectors.
+6. Start the event pipeline and shippers.
+7. Start detection and prevention managers.
+8. Poll for posture updates and signed artifact rollouts.
 
-1. **Telemetry collectors** gather OS events via Linux APIs (procfs, inotify, AF_PACKET, /proc/modules, utmp, etc.)
-2. **Events** are structured into ECS-compatible format and emitted into the pipeline
-3. **Event pipeline** distributes events to subscribers (currently: the shipper)
-4. **Shipper** batches events, compresses with gzip, and ships to the control plane with retry
-5. **Control plane** (OpenSearch + OSD xdr-manager plugin) stores and visualizes events
+The main orchestration lives in `internal/service/run.go`.
 
-## Active Telemetry Collectors
+## Core Components
 
-All 13 collectors implement the `Capability` interface and are wired in `internal/service/run.go`.
+### Identity and enrollment
+- `internal/identity`: persistent agent identity and local state
+- `internal/enroll`: enrollment and heartbeat HTTP client
 
-| Collector | Package | Data Source | Key Events |
-|---|---|---|---|
-| **Process** | `telemetry/process/` | `/proc` polling | `process.start`, `process.end` with 30+ fields, ancestry, env vars, script content |
-| **FIM** | `telemetry/file/fim.go` | inotify + BoltDB baseline | `file.created`, `file.modified`, `file.deleted` with SHA-256, entropy, header bytes |
-| **File Access** | `telemetry/file/access.go` | inotify `IN_ACCESS\|IN_OPEN` | Credential harvesting detection on `/etc/shadow`, SSH keys |
-| **Network** | `telemetry/network/connections.go` | `/proc/net/{tcp,udp}` polling | `network.open`, `network.close` with Community ID, PID, direction |
-| **DNS** | `telemetry/network/dns.go` | AF_PACKET raw socket | DNS query/response with PID enrichment, transaction correlation |
-| **Session** | `telemetry/session/` | utmp binary + auth log tail | Login/logoff, SSH, sudo, su events |
-| **System Metrics** | `telemetry/system/` | `/proc/meminfo`, `/proc/stat`, `/proc/diskstats`, `/proc/net/dev` | Combined CPU, memory, disk I/O, network I/O per interval |
-| **Library Loading** | `telemetry/library/` | inotify on lib dirs + `/proc/[pid]/maps` | SO file loads with SHA-256, LD_PRELOAD detection |
-| **Kernel Modules** | `telemetry/kernel/modules.go` | `/proc/modules` polling | Module load/unload (rootkit detection) |
-| **TTY Sessions** | `telemetry/tty/` | `/proc` PTY scanning | Terminal session start/end detection |
-| **Scheduled Tasks** | `telemetry/scheduled/` | inotify on cron dirs + systemd timers | Cron/timer created, modified, deleted |
-| **Injection** | `telemetry/injection/` | `/proc/[pid]/status` + `/proc/[pid]/maps` | ptrace attach, anonymous executable memory regions |
-| **IPC** | `telemetry/ipc/` | `/proc/net/unix` + inotify | Unix domain sockets, named pipe (FIFO) creation |
+### Eventing and shipping
+- `internal/events`: in-memory event pipeline and base event model
+- `internal/controlplane`: compressed batch shipping, Defense Posture sync, signed bundle sync
 
-**Integrated into Process collector** (no separate capability):
-- Environment variable capture (`envvars.go`) — `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, etc.
-- Script content capture (`script.go` + `telemetry/script/capture.go`) — first 4096 bytes of interpreter scripts
+### Telemetry
+The current runtime starts 13 active telemetry collectors:
 
-## Capability Interface
+- process
+- file integrity monitoring
+- file access monitoring
+- network connections
+- DNS
+- session/auth
+- system metrics
+- library loading
+- kernel modules
+- TTY sessions
+- scheduled tasks
+- injection indicators
+- IPC
 
-Every security module implements `capability.Capability`:
+### Detection
+The detection engine consumes runtime events and emits alerts. Current engine structure includes:
 
-```go
-type Capability interface {
-    Name() string
-    Init(deps Dependencies) error
-    Start(ctx context.Context) error
-    Stop() error
-    Health() HealthStatus
-}
-```
+- malware scanning and rule reload support
+- behavioral rule engine
+- local threat-intel matching
+- memory-focused detection paths
 
-## Core Infrastructure
+This logic lives under `internal/detection`.
 
-| Package | Purpose |
-|---|---|
-| `cmd/xdr-agent/` | CLI entry point: `run`, `enroll`, `remove`, `version`, `completion` |
-| `internal/service/` | Main orchestrator — loads config, enrolls, starts heartbeat, wires all telemetry collectors |
-| `internal/config/` | JSON configuration loader with defaults |
-| `internal/identity/` | Agent identity persistence (agent_id, machine_id, hostname, IPs) |
-| `internal/enroll/` | Control plane enrollment and heartbeat HTTP client |
-| `internal/controlplane/` | HTTP client wrapper + telemetry shipper (batch, gzip, retry) |
-| `internal/events/` | Event pipeline (buffered channel, pub/sub), Event struct, Alert struct, enrichment chain |
-| `internal/capability/` | Capability interface and HealthStatus enum |
-| `internal/buildinfo/` | Build version injection via `-ldflags` |
-| `internal/platform/common/` | File hashing utilities (SHA-256, MD5) |
+### Prevention
+The prevention manager currently acts as an enforcement decision layer on top of detection output. It emits prevention audit/action events and chooses actions based on posture and alert severity.
 
-## Key Design Decisions
+This logic lives under `internal/prevention`.
 
-| Decision | Rationale |
-|---|---|
-| Go language | Low overhead, single binary, strong stdlib, cross-compilation |
-| Capability pattern | Modular, independently testable, policy-controlled |
-| ECS-compatible events | Interoperable with Elastic/OpenSearch ecosystem, standard field naming |
-| Direct syscall usage | Telemetry collectors use `syscall` directly for inotify, AF_PACKET, etc. — no abstraction overhead |
-| BoltDB for FIM baseline | Embedded, zero-config, crash-safe key-value store |
-| Community ID v1 | Standard network flow identifier for cross-tool correlation |
+## Policy and Bundle Model
 
-## Scaffolded for Future Phases
+### Defense Posture
+`xdr-agent` polls `xdr-defense` for policy overlays and persists the last applied posture locally.
 
-The following packages contain architectural stubs ready for implementation:
+The posture controls:
+- global mode: `detect` or `prevent`
+- capability toggles such as malware hash detection, YARA detection, ransomware shield, memory detection, rollback, and prevention enablement
 
-| Domain | Packages | Target Phase |
-|---|---|---|
-| Detection | `internal/detection/` (malware, behavioral, memory, threatintel) | Phase 3 |
-| Prevention | `internal/prevention/` (malware, ransomware, exploit, allowlist) | Phase 4 |
-| Response | `internal/response/` (isolate, kill, remediate, shell, firewall, playbook) | Phase 5 |
-| Cloud | `internal/cloud/` (container runtime, drift, K8s audit, metadata) | Phase 5 |
-| Compliance | `internal/compliance/` (CIS, SCA, hardening, inventory, audit trail) | Phase 6 |
-| Vulnerability | `internal/vulnerability/` (CVE, packages, patches, ports) | Phase 6 |
-| Rules | `rules/` (behavioral YAML, malware hashes, YARA, compliance) | Phase 3+ |
-| Public API | `pkg/eventschema/`, `pkg/ruleformat/` | Phase 3+ |
-| Platform | `internal/platform/linux/` (eBPF, fanotify, seccomp, cgroups) | Phase 4–7 |
+### Signed content
+The agent consumes signed local artifacts instead of directly fetching internet feeds.
+
+Current design intent:
+- `xdr-defense` curates and signs content
+- `xdr-agent` verifies, applies, and reports rollout state
+
+This keeps endpoint behavior deterministic and reduces feed-management complexity on hosts.
+
+## Design Choices
+
+- Capability-oriented runtime:
+  collectors and engines remain separable so policy can evolve without rewriting the service loop.
+- In-memory event bus:
+  the pipeline is intentionally simple, with bounded buffering and explicit drop logging under pressure.
+- Control plane owns content curation:
+  the agent should evaluate local artifacts, not become a distributed feed collector.
+- Prevention follows posture:
+  enforcement is policy-driven rather than hard-coded into each detector.
+
+## Boundaries
+
+The agent should not grow into these roles:
+
+- remote threat feed aggregation per endpoint
+- broad control-plane orchestration logic
+- large amounts of duplicated policy-authoring behavior
+
+Those concerns belong in the OpenSearch Dashboards plugins.
