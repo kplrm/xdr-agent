@@ -75,6 +75,8 @@
   },
   "rules": {
     "behavioral_dir": "/etc/xdr-agent/rules/behavioral",
+    "memory_dir": "/etc/xdr-agent/rules/memory",
+    "ransomware_dir": "/etc/xdr-agent/rules/ransomware",
     "yara_dir": "/etc/xdr-agent/rules/malware/yara",
     "hashes_file": "/etc/xdr-agent/rules/malware/hashes",
     "threatintel_dir": "/etc/xdr-agent/rules/threatintel"

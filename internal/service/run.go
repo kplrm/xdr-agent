@@ -50,6 +50,53 @@ type bundleSyncState struct {
 	lastOutcome          string
 }
 
+type engineReloadState struct {
+	name         string
+	lastDigest   string
+	lastVersion  int
+	hasLoaded    bool
+	skippedCount int
+}
+
+func stateDigestKey(state bundleSyncState) string {
+	if state.lastAppliedDigest != "" {
+		return state.lastAppliedDigest
+	}
+
+	checksums := append([]string(nil), state.lastAppliedChecksums...)
+	sort.Strings(checksums)
+	return fmt.Sprintf("count=%d|checksums=%s|outcome=%s", state.lastAppliedCount, strings.Join(checksums, ","), state.lastOutcome)
+}
+
+func combinedDigestKey(parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte("\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (s *engineReloadState) shouldReload(digest string, version int) (bool, string) {
+	if !s.hasLoaded {
+		return true, "startup"
+	}
+	if s.lastDigest != "" && digest != "" && s.lastDigest != digest {
+		return true, "digest_changed"
+	}
+	if s.lastDigest == "" && digest != "" {
+		return true, "digest_initialized"
+	}
+	return false, "unchanged"
+}
+
+func (s *engineReloadState) markReloaded(digest string, version int) {
+	s.lastDigest = digest
+	s.lastVersion = version
+	s.hasLoaded = true
+	s.skippedCount = 0
+}
+
 func bundleDigest(bundle *controlplane.SignedYaraBundle) string {
 	if bundle == nil {
 		return ""
@@ -83,16 +130,10 @@ func bundleDigest(bundle *controlplane.SignedYaraBundle) string {
 
 	payload := struct {
 		PolicyID       string       `json:"policy_id"`
-		BundleVersion  int          `json:"bundle_version"`
-		GeneratedAt    string       `json:"generated_at"`
-		SigningAlg     string       `json:"signing_alg"`
 		Rules          []digestRule `json:"rules"`
 		ActiveChecksum []string     `json:"active_checksums"`
 	}{
 		PolicyID:       bundle.PolicyID,
-		BundleVersion:  bundle.BundleVersion,
-		GeneratedAt:    bundle.GeneratedAt,
-		SigningAlg:     bundle.SigningAlg,
 		Rules:          rules,
 		ActiveChecksum: checksums,
 	}
@@ -159,9 +200,9 @@ func shouldSkipApply(state bundleSyncState, bundle *controlplane.SignedYaraBundl
 		return false
 	}
 	if digest != "" && state.lastAppliedDigest != "" {
-		return state.lastAppliedVersion == bundle.BundleVersion && state.lastAppliedDigest == digest
+		return state.lastAppliedDigest == digest
 	}
-	if state.lastAppliedVersion != bundle.BundleVersion || state.lastAppliedCount != len(bundle.Rules) {
+	if state.lastAppliedCount != len(bundle.Rules) {
 		return false
 	}
 	if len(state.lastAppliedChecksums) == 0 && len(bundle.ActiveChecksums) == 0 {
@@ -230,6 +271,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	// plane in the heartbeat response (e.g. upgrade:0.3.2).
 	var detectionEngine *detection.Engine
 	var syncYaraBundle func(bool) bool
+	var maybeReloadMalware func(string)
 
 	handleHeartbeatCommands := func(resp enroll.HeartbeatResponse) {
 		for _, cmd := range resp.PendingCommands {
@@ -261,8 +303,11 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 					continue
 				}
 				log.Printf("YARA rollout command received: policy_id=%s bundle_version=%s", cfg.PolicyID, commandBundleVersion)
-				if syncYaraBundle != nil && syncYaraBundle(true) && detectionEngine != nil {
-					detectionEngine.ReloadMalwareRules()
+				if syncYaraBundle != nil {
+					_ = syncYaraBundle(true)
+				}
+				if maybeReloadMalware != nil {
+					maybeReloadMalware("command:yara_rollout")
 				}
 			}
 		}
@@ -282,18 +327,22 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	hashesMetadataPath := "/etc/xdr-agent/state/hashes-bundle-metadata.json"
 	hashesOverlayMetadataPath := "/etc/xdr-agent/state/hashes-custom-overlay-metadata.json"
 	behavioralMetadataPath := "/etc/xdr-agent/state/behavioral-bundle-metadata.json"
+	memoryMetadataPath := "/etc/xdr-agent/state/memory-bundle-metadata.json"
+	ransomwareMetadataPath := "/etc/xdr-agent/state/ransomware-bundle-metadata.json"
 
 	yaraState := loadInitialBundleState("yara", yaraMetadataPath)
 	hashesState := loadInitialBundleState("hashes", hashesMetadataPath)
 	hashesOverlayState := loadInitialHashesOverlayBundleState("hashes_overlay", hashesOverlayMetadataPath)
 	behavioralState := loadInitialBundleState("behavioral", behavioralMetadataPath)
+	memoryState := loadInitialBundleState("memory", memoryMetadataPath)
+	ransomwareState := loadInitialBundleState("ransomware", ransomwareMetadataPath)
 	postureStatus := "active"
 	if postureState.Version == 0 {
 		postureStatus = "unknown"
 	}
 
 	logHeartbeatContentSummary := func() {
-		log.Printf("heartbeat content summary: posture=%s yara=%s hashes=%s hashes_overlay=%s behavioral=%s", postureStatus, yaraState.summaryLabel(), hashesState.summaryLabel(), hashesOverlayState.summaryLabel(), behavioralState.summaryLabel())
+		log.Printf("heartbeat content summary: posture=%s yara=%s hashes=%s hashes_overlay=%s behavioral=%s memory=%s ransomware=%s", postureStatus, yaraState.summaryLabel(), hashesState.summaryLabel(), hashesOverlayState.summaryLabel(), behavioralState.summaryLabel(), memoryState.summaryLabel(), ransomwareState.summaryLabel())
 	}
 
 	syncDefensePosture := func() bool {
@@ -377,9 +426,12 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		}
 
 		digest := bundleDigest(bundle)
-		if !forceApply && shouldSkipApply(yaraState, bundle, digest) {
+		if shouldSkipApply(yaraState, bundle, digest) {
 			yaraState.lastSkippedDuplicate++
 			yaraState.lastOutcome = "unchanged"
+			if forceApply {
+				log.Printf("YARA bundle apply skipped: unchanged content despite force_apply=true bundle_version=%d", bundle.BundleVersion)
+			}
 			return false
 		}
 
@@ -650,6 +702,148 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		return true
 	}
 
+	// Sync signed memory rules bundle from xdr-defense.
+	syncMemoryBundle := func() (bool, int, string) {
+		if !cfg.DetectionPrevention.Capabilities.Memory.Injection && !cfg.DetectionPrevention.Capabilities.Memory.Hollowing && !cfg.DetectionPrevention.Capabilities.Memory.Fileless {
+			memoryState.lastOutcome = "disabled"
+			return false, memoryState.lastAppliedVersion, ""
+		}
+
+		bundle, err := controlPlaneClient.FetchSignedMemoryBundle(ctx, cfg.PolicyID)
+		if err != nil {
+			memoryState.lastOutcome = "fetch_error"
+			log.Printf("warning: failed to fetch memory bundle: %v", err)
+			return false, memoryState.lastAppliedVersion, err.Error()
+		}
+		bundleVersion := bundle.BundleVersion
+
+		digest := bundleDigest(bundle)
+		if shouldSkipApply(memoryState, bundle, digest) {
+			memoryState.lastSkippedDuplicate++
+			memoryState.lastOutcome = "unchanged"
+			return false, bundleVersion, ""
+		}
+
+		publicKeyB64, err := resolveBundleVerificationKey("memory")
+		if err != nil {
+			memoryState.lastOutcome = "key_error"
+			log.Printf("warning: failed to resolve signing public key for memory bundle: %v", err)
+			return false, bundleVersion, err.Error()
+		}
+
+		if err := controlplane.ActivateSignedContentBundle(bundle, publicKeyB64, cfg.Rules.MemoryDir, memoryMetadataPath); err != nil {
+			memoryState.lastOutcome = "failed"
+			log.Printf("warning: failed to activate memory bundle: %v", err)
+			return false, bundleVersion, err.Error()
+		}
+
+		memoryState.lastAppliedVersion = bundle.BundleVersion
+		memoryState.lastAppliedDigest = digest
+		memoryState.lastAppliedCount = len(bundle.Rules)
+		memoryState.lastAppliedChecksums = append([]string(nil), bundle.ActiveChecksums...)
+		sort.Strings(memoryState.lastAppliedChecksums)
+		memoryState.lastAppliedSource = "runtime"
+		memoryState.lastOutcome = "active"
+		log.Printf("memory bundle activated: policy_id=%s bundle_version=%d entries=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules))
+		return true, bundleVersion, ""
+	}
+
+	reportMemoryRolloutStatus := func(bundleVersion int, rolloutErr string) {
+		stateName := memoryState.lastOutcome
+		if stateName == "" || stateName == "unknown" {
+			stateName = "active"
+		}
+		report := &controlplane.MemoryRolloutStatusReport{
+			AgentID:       state.AgentID,
+			AgentHostname: state.Hostname,
+			PolicyID:      cfg.PolicyID,
+			State:         stateName,
+			BundleVersion: bundleVersion,
+			ReportedAt:    time.Now().Unix(),
+			Error:         rolloutErr,
+		}
+		if err := controlPlaneClient.ReportMemoryRolloutStatus(ctx, report); err != nil {
+			log.Printf("warning: failed to report memory rollout status: %v", err)
+		}
+	}
+
+	syncMemoryContent := func() bool {
+		changed, bundleVersion, rolloutErr := syncMemoryBundle()
+		reportMemoryRolloutStatus(bundleVersion, rolloutErr)
+		return changed
+	}
+
+	// Sync signed ransomware rules bundle from xdr-defense.
+	syncRansomwareBundle := func() (bool, int, string) {
+		if !cfg.DetectionPrevention.Capabilities.Ransomware.BehaviorDetection {
+			ransomwareState.lastOutcome = "disabled"
+			return false, ransomwareState.lastAppliedVersion, ""
+		}
+
+		bundle, err := controlPlaneClient.FetchSignedRansomwareBundle(ctx, cfg.PolicyID)
+		if err != nil {
+			ransomwareState.lastOutcome = "fetch_error"
+			log.Printf("warning: failed to fetch ransomware bundle: %v", err)
+			return false, ransomwareState.lastAppliedVersion, err.Error()
+		}
+		bundleVersion := bundle.BundleVersion
+
+		digest := bundleDigest(bundle)
+		if shouldSkipApply(ransomwareState, bundle, digest) {
+			ransomwareState.lastSkippedDuplicate++
+			ransomwareState.lastOutcome = "unchanged"
+			return false, bundleVersion, ""
+		}
+
+		publicKeyB64, err := resolveBundleVerificationKey("ransomware")
+		if err != nil {
+			ransomwareState.lastOutcome = "key_error"
+			log.Printf("warning: failed to resolve signing public key for ransomware bundle: %v", err)
+			return false, bundleVersion, err.Error()
+		}
+
+		if err := controlplane.ActivateSignedContentBundle(bundle, publicKeyB64, cfg.Rules.RansomwareDir, ransomwareMetadataPath); err != nil {
+			ransomwareState.lastOutcome = "failed"
+			log.Printf("warning: failed to activate ransomware bundle: %v", err)
+			return false, bundleVersion, err.Error()
+		}
+
+		ransomwareState.lastAppliedVersion = bundle.BundleVersion
+		ransomwareState.lastAppliedDigest = digest
+		ransomwareState.lastAppliedCount = len(bundle.Rules)
+		ransomwareState.lastAppliedChecksums = append([]string(nil), bundle.ActiveChecksums...)
+		sort.Strings(ransomwareState.lastAppliedChecksums)
+		ransomwareState.lastAppliedSource = "runtime"
+		ransomwareState.lastOutcome = "active"
+		log.Printf("ransomware bundle activated: policy_id=%s bundle_version=%d entries=%d", bundle.PolicyID, bundle.BundleVersion, len(bundle.Rules))
+		return true, bundleVersion, ""
+	}
+
+	reportRansomwareRolloutStatus := func(bundleVersion int, rolloutErr string) {
+		stateName := ransomwareState.lastOutcome
+		if stateName == "" || stateName == "unknown" {
+			stateName = "active"
+		}
+		report := &controlplane.RansomwareRolloutStatusReport{
+			AgentID:       state.AgentID,
+			AgentHostname: state.Hostname,
+			PolicyID:      cfg.PolicyID,
+			State:         stateName,
+			BundleVersion: bundleVersion,
+			ReportedAt:    time.Now().Unix(),
+			Error:         rolloutErr,
+		}
+		if err := controlPlaneClient.ReportRansomwareRolloutStatus(ctx, report); err != nil {
+			log.Printf("warning: failed to report ransomware rollout status: %v", err)
+		}
+	}
+
+	syncRansomwareContent := func() bool {
+		changed, bundleVersion, rolloutErr := syncRansomwareBundle()
+		reportRansomwareRolloutStatus(bundleVersion, rolloutErr)
+		return changed
+	}
+
 	enrollTicker := time.NewTicker(cfg.EnrollInterval())
 	defer enrollTicker.Stop()
 
@@ -670,6 +864,10 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	defer hashesBundleTicker.Stop()
 	behavioralBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
 	defer behavioralBundleTicker.Stop()
+	memoryBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
+	defer memoryBundleTicker.Stop()
+	ransomwareBundleTicker := time.NewTicker(cfg.YaraBundleSyncInterval())
+	defer ransomwareBundleTicker.Stop()
 
 	for {
 		if state.Enrolled {
@@ -774,12 +972,105 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		"enabled": cfg.DetectionPrevention.Capabilities.Prevention.Enabled,
 	})
 
-	if syncHashesContent() && detectionEngine != nil {
+	_ = syncHashesContent()
+	_ = syncBehavioralBundle()
+	_ = syncMemoryContent()
+	_ = syncRansomwareContent()
+
+	malwareReloadState := &engineReloadState{name: "malware"}
+	behavioralReloadState := &engineReloadState{name: "behavioral"}
+	memoryReloadState := &engineReloadState{name: "memory"}
+	ransomwareReloadState := &engineReloadState{name: "ransomware"}
+
+	maybeReloadMalware = func(trigger string) {
+		if detectionEngine == nil {
+			return
+		}
+		digest := combinedDigestKey(
+			stateDigestKey(yaraState),
+			stateDigestKey(hashesState),
+			stateDigestKey(hashesOverlayState),
+		)
+		version := yaraState.lastAppliedVersion + hashesState.lastAppliedVersion + hashesOverlayState.lastAppliedVersion
+		reload, reason := malwareReloadState.shouldReload(digest, version)
+		if !reload {
+			malwareReloadState.skippedCount++
+			if malwareReloadState.skippedCount == 1 || malwareReloadState.skippedCount%20 == 0 {
+				log.Printf("detection reload skipped: engine=%s trigger=%s reason=%s version=%d skips=%d", malwareReloadState.name, trigger, reason, version, malwareReloadState.skippedCount)
+			}
+			return
+		}
+
 		detectionEngine.ReloadMalwareRules()
+		malwareReloadState.markReloaded(digest, version)
+		log.Printf("detection reloaded: engine=%s trigger=%s reason=%s version=%d", malwareReloadState.name, trigger, reason, version)
 	}
-	if syncBehavioralBundle() && detectionEngine != nil {
+
+	maybeReloadBehavioral := func(trigger string) {
+		if detectionEngine == nil {
+			return
+		}
+		digest := stateDigestKey(behavioralState)
+		version := behavioralState.lastAppliedVersion
+		reload, reason := behavioralReloadState.shouldReload(digest, version)
+		if !reload {
+			behavioralReloadState.skippedCount++
+			if behavioralReloadState.skippedCount == 1 || behavioralReloadState.skippedCount%20 == 0 {
+				log.Printf("detection reload skipped: engine=%s trigger=%s reason=%s version=%d skips=%d", behavioralReloadState.name, trigger, reason, version, behavioralReloadState.skippedCount)
+			}
+			return
+		}
+
 		detectionEngine.ReloadBehavioralRules()
+		behavioralReloadState.markReloaded(digest, version)
+		log.Printf("detection reloaded: engine=%s trigger=%s reason=%s version=%d", behavioralReloadState.name, trigger, reason, version)
 	}
+
+	maybeReloadMemory := func(trigger string) {
+		if detectionEngine == nil {
+			return
+		}
+		digest := stateDigestKey(memoryState)
+		version := memoryState.lastAppliedVersion
+		reload, reason := memoryReloadState.shouldReload(digest, version)
+		if !reload {
+			memoryReloadState.skippedCount++
+			if memoryReloadState.skippedCount == 1 || memoryReloadState.skippedCount%20 == 0 {
+				log.Printf("detection reload skipped: engine=%s trigger=%s reason=%s version=%d skips=%d", memoryReloadState.name, trigger, reason, version, memoryReloadState.skippedCount)
+			}
+			return
+		}
+
+		detectionEngine.ReloadMemoryRules()
+		memoryReloadState.markReloaded(digest, version)
+		log.Printf("detection reloaded: engine=%s trigger=%s reason=%s version=%d", memoryReloadState.name, trigger, reason, version)
+	}
+
+	maybeReloadRansomware := func(trigger string) {
+		if detectionEngine == nil {
+			return
+		}
+		digest := stateDigestKey(ransomwareState)
+		version := ransomwareState.lastAppliedVersion
+		reload, reason := ransomwareReloadState.shouldReload(digest, version)
+		if !reload {
+			ransomwareReloadState.skippedCount++
+			if ransomwareReloadState.skippedCount == 1 || ransomwareReloadState.skippedCount%20 == 0 {
+				log.Printf("detection reload skipped: engine=%s trigger=%s reason=%s version=%d skips=%d", ransomwareReloadState.name, trigger, reason, version, ransomwareReloadState.skippedCount)
+			}
+			return
+		}
+
+		detectionEngine.ReloadRansomwareRules()
+		ransomwareReloadState.markReloaded(digest, version)
+		log.Printf("detection reloaded: engine=%s trigger=%s reason=%s version=%d", ransomwareReloadState.name, trigger, reason, version)
+	}
+
+	// Force exactly one reload per engine per process start after initial sync/apply.
+	maybeReloadMalware("startup")
+	maybeReloadBehavioral("startup")
+	maybeReloadMemory("startup")
+	maybeReloadRansomware("startup")
 
 	// ── Telemetry collectors ────────────────────────────────────────────
 
@@ -929,9 +1220,8 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 				log.Printf("heartbeat failed: %v", err)
 			} else {
 				handleHeartbeatCommands(hbResp)
-				if syncHashesContent() && detectionEngine != nil {
-					detectionEngine.ReloadMalwareRules()
-				}
+				_ = syncHashesContent()
+				maybeReloadMalware("heartbeat")
 				logHeartbeatContentSummary()
 			}
 		case <-commandPollTicker.C: // Fast command poll — delivers upgrades within seconds.
@@ -952,13 +1242,17 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			// Pick up updated hash bundles after MalwareBazaar sync completes.
 			// The server endpoint now serves the cached snapshot (no index scan per
 			// request), so this is cheap when the bundle version hasn't changed.
-			if syncHashesContent() && detectionEngine != nil {
-				detectionEngine.ReloadMalwareRules()
-			}
+			_ = syncHashesContent()
+			maybeReloadMalware("ticker:hashes")
 		case <-behavioralBundleTicker.C:
-			if syncBehavioralBundle() && detectionEngine != nil {
-				detectionEngine.ReloadBehavioralRules()
-			}
+			_ = syncBehavioralBundle()
+			maybeReloadBehavioral("ticker:behavioral")
+		case <-memoryBundleTicker.C:
+			_ = syncMemoryContent()
+			maybeReloadMemory("ticker:memory")
+		case <-ransomwareBundleTicker.C:
+			_ = syncRansomwareContent()
+			maybeReloadRansomware("ticker:ransomware")
 		}
 	}
 }

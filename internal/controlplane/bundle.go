@@ -96,6 +96,28 @@ type HashesRolloutStatusReport struct {
 	Error               string `json:"error,omitempty"`
 }
 
+// MemoryRolloutStatusReport is sent to backend after memory bundle sync attempts.
+type MemoryRolloutStatusReport struct {
+	AgentID       string `json:"agent_id"`
+	AgentHostname string `json:"agent_hostname"`
+	PolicyID      string `json:"policy_id"`
+	State         string `json:"state"`
+	BundleVersion int    `json:"bundle_version"`
+	ReportedAt    int64  `json:"reported_at"`
+	Error         string `json:"error,omitempty"`
+}
+
+// RansomwareRolloutStatusReport is sent to backend after ransomware bundle sync attempts.
+type RansomwareRolloutStatusReport struct {
+	AgentID       string `json:"agent_id"`
+	AgentHostname string `json:"agent_hostname"`
+	PolicyID      string `json:"policy_id"`
+	State         string `json:"state"`
+	BundleVersion int    `json:"bundle_version"`
+	ReportedAt    int64  `json:"reported_at"`
+	Error         string `json:"error,omitempty"`
+}
+
 // PeriodicRuleInventory sent every 5 min to detect degradation.
 type PeriodicRuleInventory struct {
 	AgentID         string                 `json:"agent_id"`
@@ -556,6 +578,18 @@ func (c *Client) FetchSignedHashesCustomOverlayBundle(ctx context.Context, polic
 // FetchSignedBehavioralBundle fetches the latest signed behavioral rules bundle from xdr-defense.
 func (c *Client) FetchSignedBehavioralBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
 	path := "/api/xdr-defense/behavioral/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
+// FetchSignedMemoryBundle fetches the latest signed memory rules bundle from xdr-defense.
+func (c *Client) FetchSignedMemoryBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
+	path := "/api/xdr-defense/memory/bundle"
+	return c.fetchSignedBundle(ctx, policyID, path)
+}
+
+// FetchSignedRansomwareBundle fetches the latest signed ransomware rules bundle from xdr-defense.
+func (c *Client) FetchSignedRansomwareBundle(ctx context.Context, policyID string) (*SignedYaraBundle, error) {
+	path := "/api/xdr-defense/ransomware/bundle"
 	return c.fetchSignedBundle(ctx, policyID, path)
 }
 
@@ -1061,6 +1095,92 @@ func (c *Client) ReportHashesRolloutStatus(ctx context.Context, report *HashesRo
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("hashes rollout status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	return nil
+}
+
+// ReportMemoryRolloutStatus posts memory rollout status after sync attempts.
+func (c *Client) ReportMemoryRolloutStatus(ctx context.Context, report *MemoryRolloutStatusReport) error {
+	const statusPath = "/api/xdr-defense/memory/rollouts/status/report"
+
+	endpoint, err := c.buildURL(statusPath)
+	if err != nil {
+		return fmt.Errorf("build memory rollout status endpoint: %w", err)
+	}
+
+	body, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("marshal memory rollout status payload: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("build memory rollout status request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "xdr-agent")
+	httpReq.Header.Set("osd-xsrf", "true")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("send memory rollout status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+	if err != nil {
+		return fmt.Errorf("read memory rollout status response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("memory rollout status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	return nil
+}
+
+// ReportRansomwareRolloutStatus posts ransomware rollout status after sync attempts.
+func (c *Client) ReportRansomwareRolloutStatus(ctx context.Context, report *RansomwareRolloutStatusReport) error {
+	const statusPath = "/api/xdr-defense/ransomware/rollouts/status/report"
+
+	endpoint, err := c.buildURL(statusPath)
+	if err != nil {
+		return fmt.Errorf("build ransomware rollout status endpoint: %w", err)
+	}
+
+	body, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("marshal ransomware rollout status payload: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("build ransomware rollout status request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("User-Agent", "xdr-agent")
+	httpReq.Header.Set("osd-xsrf", "true")
+	if c.token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("send ransomware rollout status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+	if err != nil {
+		return fmt.Errorf("read ransomware rollout status response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("ransomware rollout status rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
 	return nil

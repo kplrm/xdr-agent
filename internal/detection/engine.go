@@ -18,6 +18,7 @@ import (
 
 	"xdr-agent/internal/config"
 	"xdr-agent/internal/detection/behavioral"
+	"xdr-agent/internal/detection/customrules"
 	"xdr-agent/internal/detection/malware"
 	"xdr-agent/internal/detection/memory"
 	"xdr-agent/internal/detection/threatintel"
@@ -31,6 +32,8 @@ type Engine struct {
 	posture  config.DetectionPreventionConfig
 
 	behavioral  *behavioral.Engine
+	memoryRules *customrules.Engine
+	ransomRules *customrules.Engine
 	malware     *malware.Scanner
 	threatintel *threatintel.Matcher
 	memory      *memory.Scanner
@@ -38,6 +41,14 @@ type Engine struct {
 
 func NewEngine(cfg config.Config, pipeline *events.Pipeline) (*Engine, error) {
 	b, err := behavioral.NewEngine(cfg.Rules.BehavioralDir)
+	if err != nil {
+		return nil, err
+	}
+	memoryRules, err := customrules.NewEngine(cfg.Rules.MemoryDir)
+	if err != nil {
+		return nil, err
+	}
+	ransomRules, err := customrules.NewEngine(cfg.Rules.RansomwareDir)
 	if err != nil {
 		return nil, err
 	}
@@ -55,6 +66,8 @@ func NewEngine(cfg config.Config, pipeline *events.Pipeline) (*Engine, error) {
 		pipeline:    pipeline,
 		posture:     cfg.DetectionPrevention,
 		behavioral:  b,
+		memoryRules: memoryRules,
+		ransomRules: ransomRules,
 		malware:     mw,
 		threatintel: ti,
 		memory:      memory.NewScanner(),
@@ -97,6 +110,26 @@ func (e *Engine) ReloadBehavioralRules() {
 	}
 }
 
+func (e *Engine) ReloadMemoryRules() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.memoryRules != nil {
+		if err := e.memoryRules.Reload(); err != nil {
+			log.Printf("warning: failed to reload memory rules: %v", err)
+		}
+	}
+}
+
+func (e *Engine) ReloadRansomwareRules() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.ransomRules != nil {
+		if err := e.ransomRules.Reload(); err != nil {
+			log.Printf("warning: failed to reload ransomware rules: %v", err)
+		}
+	}
+}
+
 func (e *Engine) currentPosture() config.DetectionPreventionConfig {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -121,6 +154,10 @@ func (e *Engine) handle(event events.Event) {
 	}
 	if posture.Capabilities.Memory.Injection || posture.Capabilities.Memory.Hollowing || posture.Capabilities.Memory.Fileless {
 		e.evalMemory(event, posture)
+		e.evalMemoryCustomRules(event)
+	}
+	if posture.Capabilities.Ransomware.BehaviorDetection {
+		e.evalRansomwareRules(event)
 	}
 	e.evalMalware(event, posture)
 }
@@ -156,6 +193,24 @@ func (e *Engine) evalMemory(event events.Event, posture config.DetectionPreventi
 		posture.Capabilities.Memory.Fileless,
 	) {
 		e.emitAlert(event, "detection.memory", finding.RuleID, finding.Name, finding.Description, finding.Severity, "alert", nil)
+	}
+}
+
+func (e *Engine) evalMemoryCustomRules(event events.Event) {
+	for _, rule := range e.memoryRules.Match(event) {
+		e.emitAlert(event, "detection.memory.rules", rule.ID, rule.Name, rule.Description, rule.SeverityValue(), string(rule.Action), map[string]interface{}{
+			"rule.tags":          rule.Tags,
+			"trigger_event_type": event.Type,
+		})
+	}
+}
+
+func (e *Engine) evalRansomwareRules(event events.Event) {
+	for _, rule := range e.ransomRules.Match(event) {
+		e.emitAlert(event, "detection.ransomware", rule.ID, rule.Name, rule.Description, rule.SeverityValue(), string(rule.Action), map[string]interface{}{
+			"rule.tags":          rule.Tags,
+			"trigger_event_type": event.Type,
+		})
 	}
 }
 

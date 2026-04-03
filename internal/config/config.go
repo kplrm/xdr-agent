@@ -141,6 +141,8 @@ type LoggingShipConfig struct {
 
 type RulesConfig struct {
 	BehavioralDir  string `json:"behavioral_dir,omitempty"`
+	MemoryDir      string `json:"memory_dir,omitempty"`
+	RansomwareDir  string `json:"ransomware_dir,omitempty"`
 	YaraDir        string `json:"yara_dir,omitempty"`
 	HashesFile     string `json:"hashes_file,omitempty"`
 	ThreatIntelDir string `json:"threatintel_dir,omitempty"`
@@ -242,6 +244,12 @@ func setLoggingDefaults(cfg *Config) {
 func setRulePathDefaults(cfg *Config) {
 	if cfg.Rules.BehavioralDir == "" {
 		cfg.Rules.BehavioralDir = "/etc/xdr-agent/rules/behavioral"
+	}
+	if cfg.Rules.MemoryDir == "" {
+		cfg.Rules.MemoryDir = "/etc/xdr-agent/rules/memory"
+	}
+	if cfg.Rules.RansomwareDir == "" {
+		cfg.Rules.RansomwareDir = "/etc/xdr-agent/rules/ransomware"
 	}
 	if cfg.Rules.YaraDir == "" {
 		cfg.Rules.YaraDir = "/etc/xdr-agent/rules/malware/yara"

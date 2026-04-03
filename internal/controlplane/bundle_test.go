@@ -91,6 +91,24 @@ func TestFetchSignedBehavioralBundle_BuildsQueryAsQueryString(t *testing.T) {
 	})
 }
 
+func TestFetchSignedMemoryBundle_BuildsQueryAsQueryString(t *testing.T) {
+	t.Parallel()
+
+	const policyID = "memory policy/v3"
+	runFetchSignedBundleQueryTest(t, "/api/xdr-defense/memory/bundle", policyID, func(c *Client, pid string) (*SignedYaraBundle, error) {
+		return c.FetchSignedMemoryBundle(context.Background(), pid)
+	})
+}
+
+func TestFetchSignedRansomwareBundle_BuildsQueryAsQueryString(t *testing.T) {
+	t.Parallel()
+
+	const policyID = "ransomware/policy"
+	runFetchSignedBundleQueryTest(t, "/api/xdr-defense/ransomware/bundle", policyID, func(c *Client, pid string) (*SignedYaraBundle, error) {
+		return c.FetchSignedRansomwareBundle(context.Background(), pid)
+	})
+}
+
 func TestFetchSignedHashesCustomOverlayBundle_BuildsQueryAsQueryString(t *testing.T) {
 	t.Parallel()
 
@@ -337,6 +355,98 @@ func TestReportHashesRolloutStatus(t *testing.T) {
 		t.Fatalf("unexpected method: got=%s want=%s", gotMethod, http.MethodPost)
 	}
 	if gotPath != "/api/xdr-defense/hashes/rollouts/status/report" {
+		t.Fatalf("unexpected path: got=%s", gotPath)
+	}
+	if gotBody["agent_id"] != "agent-1" || gotBody["policy_id"] != "policy-1" {
+		t.Fatalf("unexpected payload: %v", gotBody)
+	}
+}
+
+func TestReportMemoryRolloutStatus(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   map[string]interface{}
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "", 5*time.Second, false)
+	report := &MemoryRolloutStatusReport{
+		AgentID:       "agent-1",
+		AgentHostname: "host-1",
+		PolicyID:      "policy-1",
+		State:         "active",
+		BundleVersion: 22,
+		ReportedAt:    1774600001,
+	}
+
+	if err := client.ReportMemoryRolloutStatus(context.Background(), report); err != nil {
+		t.Fatalf("ReportMemoryRolloutStatus error = %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Fatalf("unexpected method: got=%s want=%s", gotMethod, http.MethodPost)
+	}
+	if gotPath != "/api/xdr-defense/memory/rollouts/status/report" {
+		t.Fatalf("unexpected path: got=%s", gotPath)
+	}
+	if gotBody["agent_id"] != "agent-1" || gotBody["policy_id"] != "policy-1" {
+		t.Fatalf("unexpected payload: %v", gotBody)
+	}
+}
+
+func TestReportRansomwareRolloutStatus(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   map[string]interface{}
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "", 5*time.Second, false)
+	report := &RansomwareRolloutStatusReport{
+		AgentID:       "agent-1",
+		AgentHostname: "host-1",
+		PolicyID:      "policy-1",
+		State:         "active",
+		BundleVersion: 23,
+		ReportedAt:    1774600002,
+	}
+
+	if err := client.ReportRansomwareRolloutStatus(context.Background(), report); err != nil {
+		t.Fatalf("ReportRansomwareRolloutStatus error = %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Fatalf("unexpected method: got=%s want=%s", gotMethod, http.MethodPost)
+	}
+	if gotPath != "/api/xdr-defense/ransomware/rollouts/status/report" {
 		t.Fatalf("unexpected path: got=%s", gotPath)
 	}
 	if gotBody["agent_id"] != "agent-1" || gotBody["policy_id"] != "policy-1" {
