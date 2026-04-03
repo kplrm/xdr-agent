@@ -13,6 +13,7 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -250,11 +251,15 @@ func (e *Engine) evalMalware(event events.Event, posture config.DetectionPrevent
 		}
 		if sha != "" {
 			if result, ok := e.malware.LookupHash(sha); ok {
-				e.emitAlert(event, "detection.malware", "malware.hash.match", result.Name, result.Description, result.Severity, action, map[string]interface{}{
+				extra := map[string]interface{}{
 					"file.path":        path,
 					"file.hash.sha256": result.HashSHA256,
 					"method":           result.Method,
-				})
+				}
+				for k, v := range hashEntryPayload(result.HashEntry) {
+					extra[k] = v
+				}
+				e.emitAlert(event, "detection.malware", "malware.hash.match", result.Name, result.Description, result.Severity, action, extra)
 				return
 			}
 		}
@@ -286,10 +291,12 @@ func (e *Engine) emitAlert(src events.Event, module, ruleID, ruleName, descripti
 		"event.action":     action,
 		"source.module":    src.Module,
 		"source.type":      src.Type,
+		"source.event.id":  src.ID,
 	}
 	for k, v := range extra {
 		payload[k] = v
 	}
+	enrichPayloadWithSourceProcess(payload, src)
 
 	e.pipeline.Emit(events.Event{
 		ID:        buildAlertID(module, ruleID, src.ID),
@@ -313,6 +320,91 @@ func buildAlertID(module, ruleID, sourceEventID string) string {
 		return "alert-" + module + "-" + ruleID + "-" + sourceEventID + "-" + strconv.FormatInt(ts, 10)
 	}
 	return "alert-" + module + "-" + ruleID + "-" + strconv.FormatInt(ts, 10)
+}
+
+func hashEntryPayload(entry malware.HashEntry) map[string]interface{} {
+	payload := map[string]interface{}{}
+	if s := strings.TrimSpace(entry.Severity); s != "" {
+		payload["threat.indicator.severity"] = s
+	}
+	if s := strings.TrimSpace(entry.Source); s != "" {
+		payload["threat.indicator.provider"] = s
+	}
+	if s := strings.TrimSpace(entry.Family); s != "" {
+		payload["threat.software.family"] = s
+	}
+	if s := strings.TrimSpace(entry.MimeType); s != "" {
+		payload["threat.indicator.file.mime_type"] = s
+	}
+	if s := strings.TrimSpace(entry.FirstSeenUTC); s != "" {
+		payload["threat.indicator.first_seen"] = s
+	}
+	return payload
+}
+
+func enrichPayloadWithSourceProcess(payload map[string]interface{}, src events.Event) {
+	if src.Payload == nil {
+		return
+	}
+	processRaw, ok := src.Payload["process"]
+	if !ok {
+		return
+	}
+	processMap, ok := processRaw.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	copyString(payload, "process.entity_id", processMap, "entity_id")
+	copyString(payload, "process.name", processMap, "name")
+	copyString(payload, "process.executable", processMap, "executable")
+	copyString(payload, "process.command_line", processMap, "command_line")
+	copyNumber(payload, "process.pid", processMap, "pid")
+	copyNumber(payload, "process.ppid", processMap, "ppid")
+
+	parentRaw, ok := processMap["parent"]
+	if !ok {
+		return
+	}
+	parentMap, ok := parentRaw.(map[string]interface{})
+	if !ok {
+		return
+	}
+	copyString(payload, "process.parent.entity_id", parentMap, "entity_id")
+	copyString(payload, "process.parent.name", parentMap, "name")
+	copyString(payload, "process.parent.executable", parentMap, "executable")
+	copyString(payload, "process.parent.command_line", parentMap, "command_line")
+	copyNumber(payload, "process.parent.pid", parentMap, "pid")
+	copyNumber(payload, "process.parent.ppid", parentMap, "ppid")
+}
+
+func copyString(dst map[string]interface{}, dstKey string, src map[string]interface{}, srcKey string) {
+	v, ok := src[srcKey]
+	if !ok {
+		return
+	}
+	s, ok := v.(string)
+	if !ok || strings.TrimSpace(s) == "" {
+		return
+	}
+	dst[dstKey] = s
+}
+
+func copyNumber(dst map[string]interface{}, dstKey string, src map[string]interface{}, srcKey string) {
+	v, ok := src[srcKey]
+	if !ok {
+		return
+	}
+	switch n := v.(type) {
+	case int:
+		dst[dstKey] = n
+	case int32:
+		dst[dstKey] = n
+	case int64:
+		dst[dstKey] = n
+	case float64:
+		dst[dstKey] = n
+	}
 }
 
 // pathFromEvent extracts the relevant file path from an event payload.
