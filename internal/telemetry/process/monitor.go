@@ -214,6 +214,14 @@ func (p *ProcessCollector) scan() {
 		p.tree.Update(info)
 	}
 
+	// Second pass: parent links may be unresolved if a child was processed before
+	// its parent in the first pass (Go map iteration order is non-deterministic).
+	// Running Update again for the entire snapshot ensures every node whose parent
+	// is now in the tree gets properly linked before any process.start events fire.
+	for _, info := range snapshot {
+		p.tree.Update(info)
+	}
+
 	p.mu.Lock()
 	prevKnown := p.known
 	wasBaseline := p.baseline
