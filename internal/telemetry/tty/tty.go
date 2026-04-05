@@ -13,6 +13,8 @@ package tty
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -194,7 +196,11 @@ func (t *TTYCollector) scan(ctx context.Context, baseline bool) {
 }
 
 func (t *TTYCollector) emitEvent(eventType string, severity events.Severity, sess TTYSession) {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s-%d-%d", t.hostname, sess.PID, sess.StartTime)))
+	entityID := hex.EncodeToString(h[:])[:16]
+
 	processPayload := map[string]interface{}{
+		"entity_id":    entityID,
 		"pid":          sess.PID,
 		"ppid":         sess.PPID,
 		"name":         sess.Name,
