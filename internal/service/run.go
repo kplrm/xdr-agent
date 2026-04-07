@@ -222,6 +222,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	if enrollmentToken != "" {
 		cfg.EnrollmentToken = enrollmentToken
 	}
+	cfg.EnrollmentToken = strings.TrimSpace(cfg.EnrollmentToken)
 
 	postureState := controlplane.DefensePosture{}
 	if cachedPosture, postureErr := controlplane.LoadDefensePosture(cfg.DefensePosturePath); postureErr == nil {
@@ -236,6 +237,10 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	state, err := identity.Ensure(cfg.StatePath)
 	if err != nil {
 		return fmt.Errorf("initialize identity state: %w", err)
+	}
+
+	if state.Enrolled && cfg.EnrollmentToken == "" {
+		return fmt.Errorf("agent is marked enrolled but enrollment_token is empty; run `sudo xdr-agent enroll <enrollment_token> --control-plane-url=<url> --policy-id=<policy>` to restore authenticated control-plane communication")
 	}
 
 	log.Printf("xdr-agent starting: agent_id=%s machine_id=%s hostname=%s", state.AgentID, state.MachineID, state.Hostname)
