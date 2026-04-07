@@ -60,6 +60,9 @@ func Heartbeat(ctx context.Context, cfg config.Config, state identity.State, ver
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "xdr-agent")
 	req.Header.Set("osd-xsrf", "true")
+	if cfg.EnrollmentToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.EnrollmentToken)
+	}
 
 	client := &http.Client{
 		Timeout: cfg.RequestTimeout(),

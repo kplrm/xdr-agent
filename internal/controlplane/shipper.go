@@ -36,6 +36,7 @@ type ShipperConfig struct {
 	TelemetryURL    string        // base URL (falls back to control plane URL)
 	TelemetryPath   string        // e.g. /api/v1/agents/telemetry
 	AgentID         string        // enrolled agent identifier
+	EnrollmentToken string        // optional bearer token for control-plane auth
 	Interval        time.Duration // how often to flush (0 → 10 s)
 	BatchSize       int           // max events per HTTP request (0 → 500)
 	RequestTimeout  time.Duration // per-request timeout
@@ -239,6 +240,9 @@ func (s *Shipper) ship(ctx context.Context, batch []events.Event) error {
 		req.Header.Set("Content-Encoding", "gzip")
 		req.Header.Set("User-Agent", "xdr-agent")
 		req.Header.Set("osd-xsrf", "true")
+		if s.cfg.EnrollmentToken != "" {
+			req.Header.Set("Authorization", "Bearer "+s.cfg.EnrollmentToken)
+		}
 
 		resp, err := s.client.Do(req)
 		if err != nil {
