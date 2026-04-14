@@ -53,6 +53,8 @@ const (
 
 	// defaultRescanInterval is how often to re-hash all monitored files.
 	defaultRescanInterval = time.Hour
+	fimIdleMinBackoff     = 100 * time.Millisecond
+	fimIdleMaxBackoff     = 500 * time.Millisecond
 
 	// inotifyBufSize is the read buffer for inotify events.
 	// Each event is at least 16 bytes; 64 KiB holds ~4000 minimal events.
@@ -338,10 +340,11 @@ func (f *FIMCollector) addFileWatch(filePath string) {
 
 // ── inotify event loop ────────────────────────────────────────────────────────
 
-// inotifyLoop polls the inotify fd every 100 ms and dispatches events.
-// Non-blocking fd (IN_NONBLOCK) allows clean cancellation via context.
+// inotifyLoop reads inotify events and uses adaptive idle backoff to avoid
+// hot looping when no events are pending on the non-blocking fd.
 func (f *FIMCollector) inotifyLoop(ctx context.Context) {
 	buf := make([]byte, inotifyBufSize)
+	idleBackoff := fimIdleMinBackoff
 
 	for {
 		select {
@@ -361,11 +364,18 @@ func (f *FIMCollector) inotifyLoop(ctx context.Context) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EINTR {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(idleBackoff)
+				if idleBackoff < fimIdleMaxBackoff {
+					idleBackoff *= 2
+					if idleBackoff > fimIdleMaxBackoff {
+						idleBackoff = fimIdleMaxBackoff
+					}
+				}
 				continue
 			}
 			return
 		}
+		idleBackoff = fimIdleMinBackoff
 		if n == 0 {
 			continue
 		}

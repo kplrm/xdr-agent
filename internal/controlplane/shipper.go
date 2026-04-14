@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	defaultShipInterval = 1 * time.Second
-	defaultBatchSize    = 500
-	maxRetries          = 3
-	retryBaseDelay      = 2 * time.Second
+	defaultShipInterval    = 1 * time.Second
+	defaultBatchSize       = 500
+	defaultMaxQueueBatches = 10
+	defaultMinQueueEvents  = 1000
+	maxRetries             = 3
+	retryBaseDelay         = 2 * time.Second
+	queueDropLogWindow     = 5 * time.Second
 )
 
 // TelemetryBatch is the JSON payload shipped to the telemetry endpoint.
@@ -39,6 +42,7 @@ type ShipperConfig struct {
 	EnrollmentToken string        // optional bearer token for control-plane auth
 	Interval        time.Duration // how often to flush (0 → 10 s)
 	BatchSize       int           // max events per HTTP request (0 → 500)
+	MaxQueueEvents  int           // max in-memory queued events before dropping (0 → max(BatchSize*10, 1000))
 	RequestTimeout  time.Duration // per-request timeout
 	InsecureSkipTLS bool
 }
@@ -52,6 +56,10 @@ type Shipper struct {
 	mu     sync.Mutex
 	buffer []events.Event
 	notify chan struct{} // signaled when new events are enqueued
+
+	dropFrom    time.Time
+	dropCount   int
+	dropLastTyp string
 }
 
 // NewShipper creates a new event shipper.
@@ -61,6 +69,12 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = defaultBatchSize
+	}
+	if cfg.MaxQueueEvents <= 0 {
+		cfg.MaxQueueEvents = cfg.BatchSize * defaultMaxQueueBatches
+		if cfg.MaxQueueEvents < defaultMinQueueEvents {
+			cfg.MaxQueueEvents = defaultMinQueueEvents
+		}
 	}
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = 10 * time.Second
@@ -83,6 +97,13 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 // a pipeline subscriber callback: pipeline.Subscribe(shipper.Enqueue)
 func (s *Shipper) Enqueue(event events.Event) {
 	s.mu.Lock()
+	if len(s.buffer) >= s.cfg.MaxQueueEvents {
+		if msg := s.recordDropLocked(event.Type, time.Now()); msg != "" {
+			log.Print(msg)
+		}
+		s.mu.Unlock()
+		return
+	}
 	s.buffer = append(s.buffer, event)
 	s.mu.Unlock()
 
@@ -91,6 +112,36 @@ func (s *Shipper) Enqueue(event events.Event) {
 	case s.notify <- struct{}{}:
 	default:
 	}
+}
+
+func (s *Shipper) recordDropLocked(eventType string, now time.Time) string {
+	if s.dropFrom.IsZero() {
+		s.dropFrom = now
+		s.dropCount = 1
+		s.dropLastTyp = eventType
+		return fmt.Sprintf("shipper queue full (%d), dropping events (suppressing repeats for %s, latest type=%s)", s.cfg.MaxQueueEvents, queueDropLogWindow, eventType)
+	}
+
+	if now.Sub(s.dropFrom) < queueDropLogWindow {
+		s.dropCount++
+		s.dropLastTyp = eventType
+		return ""
+	}
+
+	prevCount := s.dropCount
+	prevType := s.dropLastTyp
+	s.dropFrom = now
+	s.dropCount = 1
+	s.dropLastTyp = eventType
+
+	return fmt.Sprintf(
+		"shipper queue full (%d), dropped %d events in last %s (latest type=%s); continuing to drop (latest type=%s)",
+		s.cfg.MaxQueueEvents,
+		prevCount,
+		queueDropLogWindow,
+		prevType,
+		eventType,
+	)
 }
 
 // Run starts the shipping loop.

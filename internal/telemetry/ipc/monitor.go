@@ -38,6 +38,8 @@ import (
 const (
 	defaultIPCScanInterval = 15 * time.Second
 	ipcInotifyBufSize      = 65536
+	ipcIdleMinBackoff      = 50 * time.Millisecond
+	ipcIdleMaxBackoff      = 500 * time.Millisecond
 )
 
 // defaultIPCWatchDirs are directories monitored via inotify for FIFO creation.
@@ -284,6 +286,7 @@ func (c *IPCCollector) setupInotify() error {
 
 func (c *IPCCollector) inotifyLoop(ctx context.Context) {
 	buf := make([]byte, ipcInotifyBufSize)
+	idleBackoff := ipcIdleMinBackoff
 
 	for {
 		select {
@@ -303,11 +306,18 @@ func (c *IPCCollector) inotifyLoop(ctx context.Context) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EINTR {
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(idleBackoff)
+				if idleBackoff < ipcIdleMaxBackoff {
+					idleBackoff *= 2
+					if idleBackoff > ipcIdleMaxBackoff {
+						idleBackoff = ipcIdleMaxBackoff
+					}
+				}
 				continue
 			}
 			return
 		}
+		idleBackoff = ipcIdleMinBackoff
 		if n == 0 {
 			continue
 		}

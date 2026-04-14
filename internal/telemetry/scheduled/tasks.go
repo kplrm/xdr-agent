@@ -29,6 +29,8 @@ import (
 const (
 	defaultRescanInterval   = 5 * time.Minute
 	inotifyScheduledBufSize = 65536
+	scheduledIdleMinBackoff = 100 * time.Millisecond
+	scheduledIdleMaxBackoff = 500 * time.Millisecond
 )
 
 // cronWatchPaths are directories / files monitored for crontab changes.
@@ -182,6 +184,7 @@ func (s *ScheduledTaskCollector) setupInotify() error {
 
 func (s *ScheduledTaskCollector) inotifyLoop(ctx context.Context) {
 	buf := make([]byte, inotifyScheduledBufSize)
+	idleBackoff := scheduledIdleMinBackoff
 
 	for {
 		select {
@@ -201,11 +204,18 @@ func (s *ScheduledTaskCollector) inotifyLoop(ctx context.Context) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EINTR {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(idleBackoff)
+				if idleBackoff < scheduledIdleMaxBackoff {
+					idleBackoff *= 2
+					if idleBackoff > scheduledIdleMaxBackoff {
+						idleBackoff = scheduledIdleMaxBackoff
+					}
+				}
 				continue
 			}
 			return
 		}
+		idleBackoff = scheduledIdleMinBackoff
 		if n == 0 {
 			continue
 		}

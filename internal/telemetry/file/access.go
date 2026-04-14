@@ -205,10 +205,13 @@ const (
 	fileAccessPerPathMinInterval = 2 * time.Second
 	fileAccessBurstWindow        = 1 * time.Second
 	fileAccessBurstMaxEvents     = 200
+	fileAccessIdleMinBackoff     = 50 * time.Millisecond
+	fileAccessIdleMaxBackoff     = 500 * time.Millisecond
 )
 
 func (a *FileAccessCollector) loop(ctx context.Context) {
 	buf := make([]byte, accessBufSize)
+	idleBackoff := fileAccessIdleMinBackoff
 
 	for {
 		select {
@@ -228,11 +231,18 @@ func (a *FileAccessCollector) loop(ctx context.Context) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EINTR {
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(idleBackoff)
+				if idleBackoff < fileAccessIdleMaxBackoff {
+					idleBackoff *= 2
+					if idleBackoff > fileAccessIdleMaxBackoff {
+						idleBackoff = fileAccessIdleMaxBackoff
+					}
+				}
 				continue
 			}
 			return
 		}
+		idleBackoff = fileAccessIdleMinBackoff
 		if n == 0 {
 			continue
 		}

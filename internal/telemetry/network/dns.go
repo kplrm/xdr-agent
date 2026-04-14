@@ -39,7 +39,9 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,6 +71,9 @@ const (
 
 	// dnsMaxAnswers caps the number of RRs we parse in a single response (DoS guard).
 	dnsMaxAnswers = 64
+
+	// dnsResolverCacheTTL bounds how often procfs socket ownership snapshots are rebuilt.
+	dnsResolverCacheTTL = 2 * time.Second
 )
 
 // ── internal types ────────────────────────────────────────────────────────────
@@ -90,6 +95,12 @@ type dnsPendingEntry struct {
 	dstIP   string
 	srcPort uint16
 	dstPort uint16
+}
+
+type dnsResolverSnapshot struct {
+	expiresAt time.Time
+	bySocket  map[string]uint64
+	byInode   map[uint64]*ProcessInfo
 }
 
 // dnsQuestion holds parsed question section fields.
@@ -144,6 +155,9 @@ type DNSCollector struct {
 
 	pendingMu sync.Mutex
 	pending   map[dnsPendingKey]*dnsPendingEntry
+
+	resolverMu   sync.Mutex
+	resolverSnap dnsResolverSnapshot
 }
 
 // NewDNSCollector creates a new DNS traffic collector.
@@ -155,6 +169,10 @@ func NewDNSCollector(pipeline *events.Pipeline, agentID, hostname string) *DNSCo
 		procRoot: defaultNetProcRoot,
 		sockfd:   -1,
 		pending:  make(map[dnsPendingKey]*dnsPendingEntry),
+		resolverSnap: dnsResolverSnapshot{
+			bySocket: make(map[string]uint64),
+			byInode:  make(map[uint64]*ProcessInfo),
+		},
 	}
 }
 
@@ -374,6 +392,36 @@ func (d *DNSCollector) handleFrame(frame []byte) {
 // It scans /proc/net/udp[6] to find the socket inode and then walks /proc/<pid>/fd.
 // Returns nil if no match is found (the socket may have already closed).
 func (d *DNSCollector) resolveUDPSocket(localIP string, localPort int) *ProcessInfo {
+	snap := d.getResolverSnapshot(time.Now())
+	if snap == nil {
+		return nil
+	}
+
+	key := dnsSocketKey(localIP, localPort)
+	inode := snap.bySocket[key]
+	if inode == 0 {
+		if strings.Contains(localIP, ":") {
+			inode = snap.bySocket[dnsSocketKey("::", localPort)]
+		} else {
+			inode = snap.bySocket[dnsSocketKey("0.0.0.0", localPort)]
+		}
+	}
+	if inode == 0 {
+		return nil
+	}
+	return snap.byInode[inode]
+}
+
+func (d *DNSCollector) getResolverSnapshot(now time.Time) *dnsResolverSnapshot {
+	d.resolverMu.Lock()
+	defer d.resolverMu.Unlock()
+
+	if !d.resolverSnap.expiresAt.IsZero() && now.Before(d.resolverSnap.expiresAt) {
+		snap := d.resolverSnap
+		return &snap
+	}
+
+	socketToInode := make(map[string]uint64)
 	for _, proto := range []string{"udp", "udp6"} {
 		path := filepath.Join(d.procRoot, "net", proto)
 		conns, err := ParseProcNet(path, proto)
@@ -381,15 +429,80 @@ func (d *DNSCollector) resolveUDPSocket(localIP string, localPort int) *ProcessI
 			continue
 		}
 		for _, c := range conns {
-			if c.LocalPort == localPort &&
-				(c.LocalAddr == localIP || c.LocalAddr == "0.0.0.0" || c.LocalAddr == "::") {
-				if proc := ResolveSocketInode(d.procRoot, c.Inode); proc != nil {
-					return proc
-				}
+			if c.LocalPort <= 0 || c.Inode == 0 {
+				continue
+			}
+			socketToInode[dnsSocketKey(c.LocalAddr, c.LocalPort)] = c.Inode
+		}
+	}
+
+	owners := buildSocketOwnerSnapshot(d.procRoot)
+
+	d.resolverSnap = dnsResolverSnapshot{
+		expiresAt: now.Add(dnsResolverCacheTTL),
+		bySocket:  socketToInode,
+		byInode:   owners,
+	}
+
+	snap := d.resolverSnap
+	return &snap
+}
+
+func dnsSocketKey(ip string, port int) string {
+	return ip + ":" + strconv.Itoa(port)
+}
+
+func buildSocketOwnerSnapshot(procRoot string) map[uint64]*ProcessInfo {
+	owners := make(map[uint64]*ProcessInfo)
+
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return owners
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		fdDir := filepath.Join(procRoot, entry.Name(), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			inode, ok := parseSocketInodeLink(link)
+			if !ok {
+				continue
+			}
+			if _, exists := owners[inode]; !exists {
+				owners[inode] = readProcessInfo(procRoot, pid)
 			}
 		}
 	}
-	return nil
+
+	return owners
+}
+
+func parseSocketInodeLink(link string) (uint64, bool) {
+	if !strings.HasPrefix(link, "socket:[") || !strings.HasSuffix(link, "]") {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")
+	inode, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || inode == 0 {
+		return 0, false
+	}
+	return inode, true
 }
 
 // ── DNS event emission ────────────────────────────────────────────────────────

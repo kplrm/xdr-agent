@@ -6,7 +6,8 @@
 // to detect libraries loaded into running processes.
 //
 // MITRE ATT&CK: T1574.006 (Hijack Execution Flow: Dynamic Linker Hijacking),
-//               T1055.001 (Process Injection: Dynamic-link Library Injection)
+//
+//	T1055.001 (Process Injection: Dynamic-link Library Injection)
 package library
 
 import (
@@ -33,6 +34,8 @@ const (
 	defaultSOScanInterval = 15 * time.Second
 	inotifySOBufSize      = 65536
 	soMaxHashSize         = 256 << 20 // 256 MiB
+	soIdleMinBackoff      = 100 * time.Millisecond
+	soIdleMaxBackoff      = 500 * time.Millisecond
 )
 
 // defaultSOWatchPaths are standard Linux shared library directories plus
@@ -63,10 +66,10 @@ type SOCollector struct {
 	wdToDir   map[int32]string
 
 	// /proc/[pid]/maps tracking: pid → set of so paths
-	mu         sync.Mutex
-	knownMaps  map[int]map[string]struct{}
-	health     capability.HealthStatus
-	cancel     context.CancelFunc
+	mu        sync.Mutex
+	knownMaps map[int]map[string]struct{}
+	health    capability.HealthStatus
+	cancel    context.CancelFunc
 }
 
 // NewSOCollector creates a new shared-library telemetry collector.
@@ -175,6 +178,7 @@ func (s *SOCollector) setupInotify() error {
 
 func (s *SOCollector) inotifyLoop(ctx context.Context) {
 	buf := make([]byte, inotifySOBufSize)
+	idleBackoff := soIdleMinBackoff
 
 	for {
 		select {
@@ -194,11 +198,18 @@ func (s *SOCollector) inotifyLoop(ctx context.Context) {
 		n, err := syscall.Read(fd, buf)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EINTR {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(idleBackoff)
+				if idleBackoff < soIdleMaxBackoff {
+					idleBackoff *= 2
+					if idleBackoff > soIdleMaxBackoff {
+						idleBackoff = soIdleMaxBackoff
+					}
+				}
 				continue
 			}
 			return
 		}
+		idleBackoff = soIdleMinBackoff
 		if n == 0 {
 			continue
 		}
