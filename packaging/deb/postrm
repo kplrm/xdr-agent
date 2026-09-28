@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Purge removes agent-generated configuration, enrollment identity, and state.
+set -e
+
+if [ "${1:-}" = purge ]; then
+  rm -rf -- /etc/xdr-agent /var/lib/xdr-agent
+fi

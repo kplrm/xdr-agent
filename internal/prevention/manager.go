@@ -1,101 +1,73 @@
-// Package prevention provides active threat blocking capabilities.
-// Unlike detection (which only alerts), prevention actively blocks malicious
-// activity in real-time — stopping malware execution, ransomware encryption,
-// and exploit techniques before damage occurs.
-//
-// Sub-packages:
-//   - malware/     — Block malware execution and quarantine malicious files
-//   - ransomware/  — Ransomware-specific prevention (canaries, rollback)
-//   - exploit/     — Memory and exploit protection enforcement
-//   - allowlist/   — Allow/block list management for exception handling
+// Package prevention terminates only the executable instance matched by YARA.
 package prevention
 
 import (
 	"fmt"
-	"strings"
-	"sync"
+	"os"
+	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"xdr-agent/internal/config"
 	"xdr-agent/internal/events"
+	"xdr-agent/internal/telemetry/process"
 )
 
 type Manager struct {
-	cfg      config.Config
+	enabled  bool
 	pipeline *events.Pipeline
-	mu       sync.RWMutex
-	posture  config.DetectionPreventionConfig
 }
 
 func NewManager(cfg config.Config, pipeline *events.Pipeline) *Manager {
-	return &Manager{cfg: cfg, pipeline: pipeline, posture: cfg.DetectionPrevention}
+	return &Manager{enabled: cfg.IsPreventionMode(), pipeline: pipeline}
 }
-
-func (m *Manager) UpdateDefensePosture(posture config.DetectionPreventionConfig) {
-	m.mu.Lock()
-	m.posture = posture
-	m.mu.Unlock()
-}
-
-func (m *Manager) currentPosture() config.DetectionPreventionConfig {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.posture
-}
-
 func (m *Manager) Handle(event events.Event) {
-	posture := m.currentPosture()
-
-	if event.Kind != "alert" {
+	if event.Kind != "alert" || event.Module != "detection.malware" || event.Payload["method"] != "yara" {
 		return
 	}
-	if !strings.HasPrefix(event.Module, "detection.") {
+	if requested, _ := event.Payload["execution.deny_requested"].(bool); requested {
 		return
 	}
-
-	action := "alert_only"
-	if posture.Mode == config.ModePrevent && posture.Capabilities.Prevention.Enabled {
-		action = m.recommendedAction(event, posture)
+	action, detail := "alert_only", ""
+	if m.enabled {
+		if _, ok := event.Payload["process.pid"]; ok {
+			if err := killMatchedProcess(event.Payload); err != nil {
+				action = "kill_skipped"
+				detail = err.Error()
+			} else {
+				action = "process_killed"
+			}
+		}
 	}
-
-	m.pipeline.Emit(events.Event{
-		Timestamp: time.Now().UTC(),
-		Type:      "prevention.action",
-		Category:  "prevention",
-		Kind:      "event",
-		Severity:  event.Severity,
-		Module:    "prevention.manager",
-		AgentID:   event.AgentID,
-		Hostname:  event.Hostname,
-		Payload: map[string]interface{}{
-			"action":           action,
-			"source_alert":     event.Type,
-			"source_module":    event.Module,
-			"source_rule_id":   payloadString(event.Payload, "rule.id"),
-			"source_rule_name": payloadString(event.Payload, "rule.name"),
-			"justification":    fmt.Sprintf("mode=%s severity=%s", posture.Mode, event.Severity.String()),
-		},
-		Tags: []string{"prevention", action, "audit"},
-	})
+	m.pipeline.Emit(events.Event{Timestamp: time.Now().UTC(), Type: "prevention.action", Category: "prevention", Kind: "event", Severity: event.Severity, Module: "prevention.manager", AgentID: event.AgentID, Hostname: event.Hostname, Payload: map[string]interface{}{"action": action, "detail": detail, "source.event.id": event.ID, "rule.id": event.Payload["rule.id"], "process.pid": event.Payload["process.pid"]}})
 }
 
-func (m *Manager) recommendedAction(event events.Event, posture config.DetectionPreventionConfig) string {
-	if strings.Contains(event.Module, "malware") && posture.Capabilities.Malware.ExecutionBlocking {
-		return "block"
+func killMatchedProcess(payload map[string]interface{}) error {
+	pid, ok := payload["process.pid"].(int)
+	if !ok || pid <= 1 || pid == os.Getpid() {
+		return fmt.Errorf("invalid target process")
 	}
-	if strings.Contains(event.Module, "ransomware") && posture.Capabilities.Ransomware.Shield {
-		return "kill_process"
+	start, ok := payload["process.start_time"].(uint64)
+	if !ok {
+		return fmt.Errorf("missing process instance identity")
 	}
-	if event.Severity >= events.SeverityHigh {
-		return "quarantine"
+	// pidfd pins the process identity; never fall back to a reusable numeric PID.
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return fmt.Errorf("open process handle: %w", err)
 	}
-	return "alert_only"
-}
-
-func payloadString(payload map[string]interface{}, key string) string {
-	if payload == nil {
-		return ""
+	defer unix.Close(fd)
+	info, err := process.ReadProcessInfo("/proc", pid)
+	if err != nil || info.StartTime != start {
+		return fmt.Errorf("process instance changed")
 	}
-	v, _ := payload[key].(string)
-	return v
+	executable, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return err
+	}
+	stat, ok := executable.Sys().(*syscall.Stat_t)
+	if !ok || payload["file.device"] != stat.Dev || payload["file.inode"] != stat.Ino || payload["file.size"] != executable.Size() || payload["file.mtime_ns"] != executable.ModTime().UnixNano() {
+		return fmt.Errorf("executable changed since YARA match")
+	}
+	return unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0)
 }

@@ -1,98 +1,56 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
-
-	"xdr-agent/internal/controlplane"
+	"time"
+	"xdr-agent/internal/config"
+	"xdr-agent/internal/enroll"
+	"xdr-agent/internal/identity"
 )
 
-func TestShouldSkipApply_DigestMatchIgnoresVersionChurn(t *testing.T) {
-	state := bundleSyncState{
-		lastAppliedVersion: 5,
-		lastAppliedDigest:  "abc123",
-	}
-	bundle := &controlplane.SignedYaraBundle{BundleVersion: 999}
-
-	if !shouldSkipApply(state, bundle, "abc123") {
-		t.Fatal("expected skip when digest is unchanged even if bundle version churns")
-	}
-}
-
-func TestShouldSkipApply_DigestChangedForcesApply(t *testing.T) {
-	state := bundleSyncState{
-		lastAppliedVersion: 5,
-		lastAppliedDigest:  "abc123",
-	}
-	bundle := &controlplane.SignedYaraBundle{BundleVersion: 5}
-
-	if shouldSkipApply(state, bundle, "def456") {
-		t.Fatal("expected apply when digest changed")
-	}
-}
-
-func TestShouldSkipApply_FallbackChecksumsWithoutDigest(t *testing.T) {
-	state := bundleSyncState{
-		lastAppliedVersion:   10,
-		lastAppliedCount:     2,
-		lastAppliedChecksums: []string{"a", "b"},
-	}
-	bundle := &controlplane.SignedYaraBundle{
-		BundleVersion:   999,
-		Rules:           []controlplane.YaraRuleEntry{{ID: "1"}, {ID: "2"}},
-		ActiveChecksums: []string{"a", "b"},
-	}
-
-	if !shouldSkipApply(state, bundle, "") {
-		t.Fatal("expected skip when digest unavailable but count/checksums unchanged")
-	}
-}
-
-func TestEngineReloadState_DigestDriven(t *testing.T) {
-	state := &engineReloadState{name: "malware"}
-
-	reload, reason := state.shouldReload("digest-a", 1)
-	if !reload || reason != "startup" {
-		t.Fatalf("startup reload mismatch: reload=%t reason=%s", reload, reason)
-	}
-	state.markReloaded("digest-a", 1)
-
-	reload, reason = state.shouldReload("digest-a", 2)
-	if reload || reason != "unchanged" {
-		t.Fatalf("unchanged digest should skip reload: reload=%t reason=%s", reload, reason)
-	}
-
-	reload, reason = state.shouldReload("digest-b", 2)
-	if !reload || reason != "digest_changed" {
-		t.Fatalf("changed digest should reload: reload=%t reason=%s", reload, reason)
-	}
-}
-
-func TestBundleDigest_IgnoresVersionAndTimestampChurn(t *testing.T) {
-	b1 := &controlplane.SignedYaraBundle{
-		PolicyID:      "default-endpoint",
-		BundleVersion: 100,
-		GeneratedAt:   "2026-04-03T09:00:00Z",
-		SigningAlg:    "ed25519",
-		Rules: []controlplane.YaraRuleEntry{
-			{ID: "r1", Filename: "a.yar", SHA256: "aaa", Enabled: true},
-			{ID: "r2", Filename: "b.yar", SHA256: "bbb", Enabled: false},
-		},
-		ActiveChecksums: []string{"aaa"},
-	}
-
-	b2 := &controlplane.SignedYaraBundle{
-		PolicyID:      "default-endpoint",
-		BundleVersion: 101,
-		GeneratedAt:   "2026-04-03T09:00:05Z",
-		SigningAlg:    "ed25519",
-		Rules: []controlplane.YaraRuleEntry{
-			{ID: "r2", Filename: "b.yar", SHA256: "bbb", Enabled: false},
-			{ID: "r1", Filename: "a.yar", SHA256: "aaa", Enabled: true},
-		},
-		ActiveChecksums: []string{"aaa"},
-	}
-
-	if bundleDigest(b1) != bundleDigest(b2) {
-		t.Fatal("expected identical digest when rule/checksum content is unchanged")
+func TestFleetRetriesEnrollmentAndReportsPeriodicHealth(t *testing.T) {
+	var enrollments, beats atomic.Int32
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/enroll":
+			if enrollments.Add(1) == 1 {
+				w.WriteHeader(503)
+				return
+			}
+			w.Write([]byte(`{"enrollment_id":"agent"}`))
+		case "/heartbeat":
+			var req enroll.HeartbeatRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Error(err)
+			}
+			if req.Protection == nil || req.Protection.Health["yara"] != "running" {
+				t.Error("health absent")
+			}
+			w.Write([]byte(`{"message":"ok"}`))
+			if beats.Add(1) >= 2 {
+				cancel()
+			}
+		default:
+			w.Write([]byte(`{"message":"ok"}`))
+		}
+	}))
+	defer server.Close()
+	cfg := config.Config{ControlPlaneURL: server.URL, EnrollmentPath: "/enroll", HeartbeatPath: "/heartbeat", CommandsPath: "/commands", RequestTimeoutSeconds: 1, EnrollIntervalSeconds: 1, HeartbeatIntervalSeconds: 1, CommandPollIntervalSeconds: 1, StatePath: filepath.Join(t.TempDir(), "state.json")}
+	state := identity.State{AgentID: "agent"}
+	started := 0
+	err := runFleet(ctx, cfg, &state, func() enroll.ProtectionInventory {
+		return enroll.ProtectionInventory{Health: map[string]string{"yara": "running"}}
+	}, func() { started++ })
+	if !errors.Is(err, context.Canceled) || enrollments.Load() != 2 || beats.Load() < 2 || started != 1 {
+		t.Fatalf("err=%v enrollments=%d beats=%d started=%d", err, enrollments.Load(), beats.Load(), started)
 	}
 }

@@ -55,6 +55,8 @@ const (
 	defaultRescanInterval = time.Hour
 	fimIdleMinBackoff     = 100 * time.Millisecond
 	fimIdleMaxBackoff     = 500 * time.Millisecond
+	baselineBatchSize     = 16
+	baselineBatchPause    = 20 * time.Millisecond
 
 	// inotifyBufSize is the read buffer for inotify events.
 	// Each event is at least 16 bytes; 64 KiB holds ~4000 minimal events.
@@ -93,6 +95,7 @@ type fileRecord struct {
 // FIMCollector monitors filesystem paths for integrity changes using inotify
 // and periodic SHA-256 rescans. It implements capability.Capability.
 type FIMCollector struct {
+	workers        sync.WaitGroup
 	pipeline       *events.Pipeline
 	agentID        string
 	hostname       string
@@ -192,37 +195,41 @@ func (f *FIMCollector) Start(ctx context.Context) error {
 	f.mu.Unlock()
 
 	if err := f.setupInotify(); err != nil {
+		f.mu.Lock()
+		f.health = capability.HealthDegraded
+		f.mu.Unlock()
 		log.Printf("fim: inotify unavailable (%v) — periodic rescan only", err)
 	} else {
-		go f.inotifyLoop(childCtx)
+		f.workers.Add(1)
+		go func() { defer f.workers.Done(); f.inotifyLoop(childCtx) }()
 	}
 
-	go f.scanLoop(childCtx)
+	f.workers.Add(1)
+	go func() { defer f.workers.Done(); f.scanLoop(childCtx) }()
 	return nil
 }
 
 // Stop cancels all goroutines, closes inotify, and flushes BoltDB.
 func (f *FIMCollector) Stop() error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	if f.cancel != nil {
 		f.cancel()
 	}
-
+	f.mu.Unlock()
+	f.workers.Wait()
 	f.inotifyMu.Lock()
 	if f.inotifyFd >= 0 {
 		_ = syscall.Close(f.inotifyFd)
 		f.inotifyFd = -1
 	}
 	f.inotifyMu.Unlock()
-
 	if f.db != nil {
 		_ = f.db.Close()
 		f.db = nil
 	}
-
+	f.mu.Lock()
 	f.health = capability.HealthStopped
+	f.mu.Unlock()
 	return nil
 }
 
@@ -525,6 +532,7 @@ func (f *FIMCollector) runBaselineScan(ctx context.Context) {
 	log.Printf("fim: starting initial baseline scan (%d watch paths, distro=%s)", len(f.watchPaths), distroName)
 	count := 0
 	skipped := 0
+	processed := 0
 
 	for _, wp := range f.watchPaths {
 		if ctx.Err() != nil {
@@ -544,6 +552,7 @@ func (f *FIMCollector) runBaselineScan(ctx context.Context) {
 				skipped++
 				pathCount++
 			}
+			paceFileScan(ctx, &processed)
 		})
 		if pathCount == 0 {
 			// Log unexpected errors (e.g. EPERM) but not plain "not found" —
@@ -561,18 +570,34 @@ func (f *FIMCollector) runBaselineScan(ctx context.Context) {
 	}
 }
 
+// Yield after each small batch; the real-time inotify loop runs meanwhile.
+func paceFileScan(ctx context.Context, processed *int) {
+	(*processed)++
+	if *processed%baselineBatchSize != 0 {
+		return
+	}
+	timer := time.NewTimer(baselineBatchPause)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
 // runRescan re-walks all paths, compares against the DB, and emits events for
 // changes.  Also detects files present in DB but missing on disk (deleted).
 func (f *FIMCollector) runRescan(ctx context.Context) {
 	log.Printf("fim: starting periodic rescan")
 
 	seenOnDisk := make(map[string]struct{}, 2048)
+	processed := 0
 
 	for _, wp := range f.watchPaths {
 		if ctx.Err() != nil {
 			return
 		}
 		f.walkPath(ctx, wp.Path, wp.Recursive, func(rec *fileRecord) {
+			defer paceFileScan(ctx, &processed)
 			seenOnDisk[rec.Path] = struct{}{}
 
 			old, err := f.loadRecord(rec.Path)

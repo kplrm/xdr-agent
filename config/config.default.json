@@ -1,0 +1,47 @@
+{
+  "max_cpu_cores": 1,
+  "execution_watch_paths": [
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/opt",
+    "/tmp",
+    "/var/tmp",
+    "/home"
+  ],
+  "control_plane_url": "http://localhost:5601",
+  "enrollment_path": "/api/v1/agents/enroll",
+  "heartbeat_path": "/api/v1/agents/heartbeat",
+  "commands_path": "/api/v1/agents/commands",
+  "enrollment_token": "",
+  "policy_id": "default-endpoint",
+  "tags": [
+    "linux",
+    "xdr-agent"
+  ],
+  "enroll_interval_seconds": 30,
+  "heartbeat_interval_seconds": 30,
+  "command_poll_interval_seconds": 5,
+  "request_timeout_seconds": 10,
+  "state_path": "/var/lib/xdr-agent/state.json",
+  "insecure_skip_tls_verify": false,
+  "telemetry_url": "",
+  "telemetry_path": "/api/v1/agents/telemetry",
+  "telemetry_interval_seconds": 5,
+  "telemetry_ship_interval_seconds": 30,
+  "security_url": "",
+  "security_path": "/api/v1/agents/security",
+  "security_ship_interval_seconds": 30,
+  "detection_prevention": {"mode": "detect"},
+  "logging": {
+    "level": "INFO",
+    "ship": {
+      "enabled": true,
+      "url": "",
+      "path": "/api/v1/agents/logs",
+      "index": "xdr-agent-logs",
+      "ship_interval_seconds": 30
+    }
+  }
+}

@@ -1,5 +1,5 @@
 [Unit]
-Description=XDR Agent (Identity + Enrollment)
+Description=XDR Agent (Linux telemetry and YARA protection)
 Wants=network-online.target
 After=network-online.target
 ConditionPathExists=/etc/xdr-agent/config.json
@@ -12,13 +12,18 @@ Environment=GOGC=80
 # systemd cgroup controls: soft pressure at 350M, hard ceiling at 500M.
 MemoryHigh=350M
 MemoryMax=500M
+# Agent and YARA children share bounded CPU time and yield to host workloads.
+CPUQuota=75%
+CPUWeight=20
+Nice=10
 ExecStart=/usr/bin/xdr-agent run --config /etc/xdr-agent/config.json
 Restart=always
 RestartSec=5
 User=root
 Group=root
 NoNewPrivileges=true
-PrivateTmp=true
+# Watch the host temporary directories for file and execution activity.
+PrivateTmp=false
 
 [Install]
 WantedBy=multi-user.target

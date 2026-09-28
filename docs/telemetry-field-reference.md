@@ -37,21 +37,10 @@ The following modules own their payload structure:
 | `telemetry.file.access` | sensitive file access |
 | `telemetry.network` | connection telemetry |
 | `telemetry.dns` | DNS activity |
-| `telemetry.session` | session and auth signals |
-| `telemetry.system` | host metrics |
-| `telemetry.library` | shared library loads |
-| `telemetry.kernel` | kernel module activity |
-| `telemetry.tty` | interactive terminal sessions |
-| `telemetry.scheduled` | cron/timer persistence signals |
-| `telemetry.injection` | injection-related indicators |
-| `telemetry.ipc` | IPC visibility |
 
 Detection and prevention emit additional modules such as:
 
-- `detection.behavioral`
 - `detection.malware`
-- `detection.memory`
-- `detection.threatintel`
 - `prevention.manager`
 
 ## How To Treat Payload Fields

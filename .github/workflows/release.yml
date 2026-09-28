@@ -53,9 +53,26 @@ jobs:
   # ALL four jobs must pass before the release stage is allowed to run.
   # fail-fast: true means a single failure cancels the other three immediately.
   # ────────────────────────────────────────────────────────────────────────────
+  rules:
+    name: Freeze latest Forge Core for all release targets
+    needs: version
+    if: needs.version.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tools/refresh_yara.py --output release-rules/yara-rules-core.yar
+      - run: python3 tools/bundle_yara.py --source release-rules/yara-rules-core.yar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-rules
+          path: |
+            release-rules/yara-rules-core.yar
+            internal/detection/malware/bundle/catalog.json
+          retention-days: 1
+
   build-test:
     name: "[${{ matrix.os }}/${{ matrix.arch }}] build & smoke-test"
-    needs: version
+    needs: [version, rules]
     if: needs.version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
 
@@ -67,7 +84,7 @@ jobs:
           - os: debian
             arch: amd64
             pkg_type: deb
-            pkg_install: "dpkg -i --force-depends"
+            pkg_install: "apt-get update -qq && apt-get install -y"
             test_image: debian:stable-slim
             platform: linux/amd64
 
@@ -75,7 +92,7 @@ jobs:
           - os: debian
             arch: arm64
             pkg_type: deb
-            pkg_install: "dpkg -i --force-depends"
+            pkg_install: "apt-get update -qq && apt-get install -y"
             test_image: debian:stable-slim
             platform: linux/arm64
 
@@ -83,7 +100,7 @@ jobs:
           - os: centos
             arch: amd64
             pkg_type: rpm
-            pkg_install: "rpm -i --nodeps"
+            pkg_install: "dnf install -y epel-release && dnf install -y"
             test_image: almalinux:9
             platform: linux/amd64
 
@@ -91,7 +108,7 @@ jobs:
           - os: centos
             arch: arm64
             pkg_type: rpm
-            pkg_install: "rpm -i --nodeps"
+            pkg_install: "dnf install -y epel-release && dnf install -y"
             test_image: almalinux:9
             platform: linux/arm64
 
@@ -101,6 +118,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-rules
+          path: frozen-rules
+      - run: |
+          mkdir -p yara-forge-core
+          cp frozen-rules/release-rules/yara-rules-core.yar yara-forge-core/yara-rules-core.yar
+      - name: Validate rules and endpoint clients
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y yara
+          make rules test build
+          make prevention-test
+          ./dist/xdr-agent check-rules
 
       # Enable QEMU binfmt_misc so the x86_64 runner can execute arm64
       # container images transparently via Docker.
@@ -157,7 +189,7 @@ jobs:
                 RBDIR=/tmp/rpmbuild
                 mkdir -p \${RBDIR}/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
                 install -m 0755 /out/xdr-agent                        \${RBDIR}/SOURCES/xdr-agent
-                install -m 0644 /src/config/config.json               \${RBDIR}/SOURCES/config.json
+                install -m 0644 /src/config/config.default.json               \${RBDIR}/SOURCES/config.json
                 install -m 0644 /src/systemd/xdr-agent.service        \${RBDIR}/SOURCES/xdr-agent.service
                 install -m 0644 /src/LICENSE                          \${RBDIR}/SOURCES/LICENSE
                 install -m 0644 /src/AUTHORS                          \${RBDIR}/SOURCES/AUTHORS
@@ -194,11 +226,10 @@ jobs:
 
       # Install the package inside the exact target container and run
       # `xdr-agent version` to verify the binary is functional.
-      # --nodeps / --force-depends: systemd is declared as a dep but is not
-      # running inside a container — we only need the binary to execute.
+      # Install declared dependencies and compile the full bundled ruleset.
       - name: "Smoke test — ${{ matrix.os }}/${{ matrix.arch }}"
         run: |
-          cp "${{ steps.pkg.outputs.path }}" dist/smoke-test-pkg
+          cp "${{ steps.pkg.outputs.path }}" dist/smoke-test-pkg.${{ matrix.pkg_type }}
           docker run --rm \
             --platform ${{ matrix.platform }} \
             -v "${PWD}/dist:/pkg:ro" \
@@ -206,9 +237,10 @@ jobs:
             sh -c "
               set -e
               echo '==> Installing package'
-              ${{ matrix.pkg_install }} /pkg/smoke-test-pkg
+              ${{ matrix.pkg_install }} /pkg/smoke-test-pkg.${{ matrix.pkg_type }}
               echo '==> Running: xdr-agent version'
               /usr/bin/xdr-agent version
+              /usr/bin/xdr-agent check-rules
               echo '==> Smoke test PASSED'
             "
 
@@ -297,3 +329,4 @@ jobs:
             release-artifacts/**/*.deb
             release-artifacts/**/*.rpm
             release-artifacts/**/*.tar.gz
+            release-artifacts/release-rules/internal/detection/malware/bundle/catalog.json

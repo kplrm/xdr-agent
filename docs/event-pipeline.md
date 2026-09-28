@@ -53,7 +53,9 @@ The shipper:
 - compresses requests with gzip
 - retries failed requests with exponential backoff
 - avoids retrying most non-429 client errors
-- performs a final flush attempt on shutdown
+- exposes a final flush used after the service drains its event/log queues
+
+By default health reports are sent every 30 seconds and event/log batches every 30 seconds. Both are configurable. Runtime diagnostics are captured from the standard logger; shipper diagnostics stay in the local journal to prevent feedback loops.
 
 ## Documentation Boundary
 

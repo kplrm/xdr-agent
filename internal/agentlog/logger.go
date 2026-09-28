@@ -1,113 +1,72 @@
+// Package agentlog captures runtime diagnostics for periodic log shipping.
 package agentlog
 
 import (
-	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"xdr-agent/internal/events"
 )
 
-type Level int
-
-const (
-	LevelDebug Level = iota
-	LevelInfo
-	LevelWarn
-	LevelError
-)
-
-type Logger struct {
-	level    Level
-	agentID  string
-	hostname string
-	pipeline *events.Pipeline
+// Writer keeps log output independent of network delivery. Shipper diagnostics
+// remain in the local journal to avoid recursively generating log batches.
+type Writer struct {
+	mu                       sync.Mutex
+	closed                   bool
+	queue                    chan events.Event
+	done                     chan struct{}
+	agentID, hostname, level string
 }
 
-func New(levelRaw, agentID, hostname string, pipeline *events.Pipeline) *Logger {
-	return &Logger{
-		level:    parseLevel(levelRaw),
-		agentID:  agentID,
-		hostname: hostname,
-		pipeline: pipeline,
+func NewWriter(level, agentID, hostname string, enqueue func(events.Event)) *Writer {
+	w := &Writer{queue: make(chan events.Event, 1024), done: make(chan struct{}), agentID: agentID, hostname: hostname, level: strings.ToUpper(level)}
+	go func() {
+		defer close(w.done)
+		for event := range w.queue {
+			enqueue(event)
+		}
+	}()
+	return w
+}
+
+func (w *Writer) Write(data []byte) (int, error) {
+	message := strings.TrimSpace(string(data))
+	if strings.Contains(message, "shipper") {
+		return len(data), nil
 	}
-}
-
-func (l *Logger) Debug(module, msg string, fields map[string]interface{}) {
-	l.emit(LevelDebug, module, msg, fields)
-}
-
-func (l *Logger) Info(module, msg string, fields map[string]interface{}) {
-	l.emit(LevelInfo, module, msg, fields)
-}
-
-func (l *Logger) Warn(module, msg string, fields map[string]interface{}) {
-	l.emit(LevelWarn, module, msg, fields)
-}
-
-func (l *Logger) Error(module, msg string, fields map[string]interface{}) {
-	l.emit(LevelError, module, msg, fields)
-}
-
-func (l *Logger) emit(level Level, module, msg string, fields map[string]interface{}) {
-	if level < l.level {
-		return
+	level, severity := "INFO", events.SeverityInfo
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "failed") {
+		level, severity = "ERROR", events.SeverityHigh
+	} else if strings.Contains(lower, "warning") || strings.Contains(lower, "degraded") {
+		level, severity = "WARN", events.SeverityMedium
 	}
-	if fields == nil {
-		fields = map[string]interface{}{}
+	if (w.level == "ERROR" && level != "ERROR") || (w.level == "WARN" && level == "INFO") {
+		return len(data), nil
 	}
-	fields["message"] = msg
-	fields["log.level"] = strings.ToUpper(level.String())
-
-	l.pipeline.Emit(events.Event{
-		Timestamp: time.Now().UTC(),
-		Type:      "agent.log",
-		Category:  "agent",
-		Kind:      "event",
-		Severity:  levelSeverity(level),
-		Module:    "agent.logger",
-		AgentID:   l.agentID,
-		Hostname:  l.hostname,
-		Payload:   fields,
-		Tags:      []string{"agent-log", strings.ToLower(level.String()), fmt.Sprintf("module:%s", module)},
-	})
+	event := events.Event{
+		Timestamp: time.Now().UTC(), Type: "agent.log", Category: "agent", Kind: "event",
+		Module: "agent.logger", Severity: severity, AgentID: w.agentID, Hostname: w.hostname,
+		Payload: map[string]interface{}{"message": message, "log.level": level},
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.closed {
+		select {
+		case w.queue <- event:
+		default:
+		}
+	}
+	return len(data), nil
 }
 
-func levelSeverity(level Level) events.Severity {
-	switch level {
-	case LevelDebug, LevelInfo:
-		return events.SeverityInfo
-	case LevelWarn:
-		return events.SeverityMedium
-	case LevelError:
-		return events.SeverityHigh
-	default:
-		return events.SeverityInfo
+func (w *Writer) Close() {
+	w.mu.Lock()
+	if !w.closed {
+		w.closed = true
+		close(w.queue)
 	}
-}
-
-func parseLevel(raw string) Level {
-	switch strings.ToUpper(strings.TrimSpace(raw)) {
-	case "DEBUG":
-		return LevelDebug
-	case "WARN":
-		return LevelWarn
-	case "ERROR":
-		return LevelError
-	default:
-		return LevelInfo
-	}
-}
-
-func (l Level) String() string {
-	switch l {
-	case LevelDebug:
-		return "debug"
-	case LevelWarn:
-		return "warn"
-	case LevelError:
-		return "error"
-	default:
-		return "info"
-	}
+	w.mu.Unlock()
+	<-w.done
 }

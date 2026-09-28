@@ -9,7 +9,7 @@ package network
 // Format: "1:<base64(sha1(seed + ordered_src_ip + ordered_dst_ip + proto + pad + src_port + dst_port))>"
 
 import (
-	"crypto/sha1"  //nolint:gosec // Community ID spec mandates SHA-1
+	"crypto/sha1" //nolint:gosec // Community ID spec mandates SHA-1
 	"encoding/base64"
 	"encoding/binary"
 	"net"

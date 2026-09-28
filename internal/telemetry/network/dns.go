@@ -143,6 +143,7 @@ type parsedDNS struct {
 // for connection state, whereas DNSCollector sniffs packets from the NIC.
 // Both live in the same network package and share helper functions.
 type DNSCollector struct {
+	workers  sync.WaitGroup
 	pipeline *events.Pipeline
 	agentID  string
 	hostname string
@@ -218,8 +219,9 @@ func (d *DNSCollector) Start(ctx context.Context) error {
 	d.health = capability.HealthRunning
 	d.mu.Unlock()
 
-	go d.captureLoop(childCtx, fd)
-	go d.pendingCleaner(childCtx)
+	d.workers.Add(2)
+	go func() { defer d.workers.Done(); d.captureLoop(childCtx, fd) }()
+	go func() { defer d.workers.Done(); d.pendingCleaner(childCtx) }()
 
 	log.Printf("dns collector: started raw socket capture on all interfaces")
 	return nil
@@ -227,15 +229,19 @@ func (d *DNSCollector) Start(ctx context.Context) error {
 
 func (d *DNSCollector) Stop() error {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if d.cancel != nil {
 		d.cancel()
 	}
+	d.mu.Unlock()
+	// Receive timeout lets capture exit before its descriptor is closed and reused.
+	d.workers.Wait()
+	d.mu.Lock()
 	if d.sockfd >= 0 {
 		_ = syscall.Close(d.sockfd)
 		d.sockfd = -1
 	}
 	d.health = capability.HealthStopped
+	d.mu.Unlock()
 	return nil
 }
 

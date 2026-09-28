@@ -1,18 +1,8 @@
-# xdr-agent Documentation
+# Agent documentation
 
-This directory contains the internal documentation for the Linux endpoint agent.
-
-## Read This First
-
-- `architecture.md`: runtime structure, control-plane flow, and design boundaries
-- `event-pipeline.md`: how events move from collectors to OpenSearch
-- `roadmap.md`: delivery priorities and what is deliberately de-prioritized
-- `telemetry-field-reference.md`: stable event envelope and collector-level field ownership
-- `development/adding-capability.md`: how to add a new capability without breaking the current runtime model
-
-## Documentation Principles
-
-- Prefer current implementation over aspirational claims.
-- Keep endpoint responsibilities separate from control-plane responsibilities.
-- Treat policy overlays and signed bundle rollout as first-class runtime behavior.
-- Remove stale detail instead of preserving it for completeness.
+- [Architecture](architecture.md): supported runtime and limits.
+- [Agent API contract](api-endpoints.md): every outbound endpoint and required build checks.
+- [Event pipeline](event-pipeline.md): batching, retries, and shutdown.
+- [Field reference](telemetry-field-reference.md): envelope and retained collectors.
+- [Roadmap](roadmap.md): release gates and future work.
+- [Changing the runtime](development/adding-capability.md): contribution boundaries.

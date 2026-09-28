@@ -59,8 +59,7 @@ type ProcessInfo struct {
 	GroupName string `json:"group"`    // process.group.name  (resolved at process.start)
 
 	// ── Security ─────────────────────────────────────────────────────────────
-	CapEff    string `json:"cap_eff"`    // Linux effective capability bitmask
-	ExeSHA256 string `json:"exe_sha256"` // process.hash.sha256 (computed at process.start)
+	CapEff string `json:"cap_eff"` // Linux effective capability bitmask
 
 	// ── Resource metrics ─────────────────────────────────────────────────────
 	Threads      int    `json:"threads"`        // process.threads.count
@@ -82,6 +81,8 @@ type ProcessInfo struct {
 // ProcessCollector monitors process creation and termination by periodically
 // scanning /proc and diffing the PID set. It implements capability.Capability.
 type ProcessCollector struct {
+	sourceMu sync.RWMutex
+	workers  sync.WaitGroup
 	pipeline *events.Pipeline
 	agentID  string
 	hostname string
@@ -133,7 +134,11 @@ func NewProcessCollector(pipeline *events.Pipeline, agentID, hostname string, in
 
 // SetProcRoot overrides the default /proc path (useful for testing with
 // synthetic /proc trees).
-func (p *ProcessCollector) SetProcRoot(path string) { p.procRoot = path }
+func (p *ProcessCollector) SetProcRoot(path string) {
+	p.sourceMu.Lock()
+	defer p.sourceMu.Unlock()
+	p.procRoot = path
+}
 
 // ── capability.Capability interface ──────────────────────────────────────────
 
@@ -153,17 +158,21 @@ func (p *ProcessCollector) Start(ctx context.Context) error {
 	p.health = capability.HealthRunning
 	p.mu.Unlock()
 
-	go p.loop(childCtx)
+	p.workers.Add(1)
+	go func() { defer p.workers.Done(); p.loop(childCtx) }()
 	return nil
 }
 
 func (p *ProcessCollector) Stop() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.cancel != nil {
 		p.cancel()
 	}
+	p.mu.Unlock()
+	p.workers.Wait()
+	p.mu.Lock()
 	p.health = capability.HealthStopped
+	p.mu.Unlock()
 	return nil
 }
 
@@ -194,6 +203,8 @@ func (p *ProcessCollector) loop(ctx context.Context) {
 
 // scan takes a /proc snapshot and emits events for new/gone processes.
 func (p *ProcessCollector) scan() {
+	p.sourceMu.RLock()
+	defer p.sourceMu.RUnlock()
 	snapshot, err := ScanProcesses(p.procRoot)
 	if err != nil {
 		log.Printf("process collector: scan failed: %v", err)
@@ -230,9 +241,9 @@ func (p *ProcessCollector) scan() {
 	p.health = capability.HealthRunning
 	p.mu.Unlock()
 
-	// Carry forward immutable enrichment fields (Username, GroupName, ExeSHA256)
+	// Carry forward immutable enrichment fields (Username and GroupName)
 	// for processes that were already known. Each scan replaces p.known with a
-	// fresh /proc snapshot, which does not re-run the expensive enrichment pass
+	// fresh /proc snapshot, which does not re-run the user enrichment pass
 	// (enrichNewProcess). Without this step the enriched values are lost after
 	// the first scan cycle and process.end events emit empty strings.
 	for pid, info := range snapshot {
@@ -246,10 +257,6 @@ func (p *ProcessCollector) scan() {
 				info.GroupName = prev.GroupName
 				changed = true
 			}
-			if info.ExeSHA256 == "" && prev.ExeSHA256 != "" {
-				info.ExeSHA256 = prev.ExeSHA256
-				changed = true
-			}
 			if changed {
 				snapshot[pid] = info
 			}
@@ -261,8 +268,6 @@ func (p *ProcessCollector) scan() {
 		// existing process (that would flood the pipeline on agent start).
 		// Enrich username/groupname for all baseline processes so their eventual
 		// process.end events carry complete user/group data.
-		// (Hash computation is intentionally skipped here for all ~N processes
-		// to avoid a blocking SHA-256 pass across all executables at startup.)
 		for pid, info := range snapshot {
 			info.Username = p.uids.lookup(info.UID)
 			info.GroupName = p.gids.lookup(info.GID)
@@ -326,10 +331,10 @@ func (p *ProcessCollector) scan() {
 		if _, existed := prevKnown[pid]; !existed {
 			enrichNewProcess(&info, p.uids, p.gids)
 			p.emitEvent("process.start", info, 0)
-			// Write the enriched info (Username, GroupName, ExeSHA256) back into
+			// Write the enriched info (Username and GroupName) back into
 			// p.known so that the subsequent process.end event inherits these values.
 			// Without this, process.end would use the un-enriched snapshot copy and
-			// emit empty strings for user.name, group.name, and hash.sha256.
+			// emit empty strings for user.name and group.name.
 			p.mu.Lock()
 			p.known[pid] = info
 			p.mu.Unlock()
@@ -439,9 +444,6 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 
 		// Security
 		"cap_eff": info.CapEff,
-		"hash": map[string]interface{}{
-			"sha256": info.ExeSHA256,
-		},
 
 		// Resource metrics
 		"threads": map[string]interface{}{
@@ -467,20 +469,6 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 	if cpuPct > 0 {
 		proc["cpu"] = map[string]interface{}{
 			"pct": cpuPct,
-		}
-	}
-
-	// ── Phase 2c: process.start enrichment ───────────────────────────────────
-	if eventType == "process.start" {
-		// Environment variable capture — read filtered env vars from
-		// /proc/[pid]/environ (MITRE T1574.006).
-		if envVars := readEnvVars(p.procRoot, info.PID, defaultEnvAllowlist); envVars != nil {
-			proc["env"] = envVars
-		}
-		// Script content capture — when the process is an interpreter,
-		// read the first 4 KiB of the script file (MITRE T1059).
-		if sc := captureScriptPayload(info.Executable, info.Args, 4096); sc != nil {
-			proc["script"] = sc
 		}
 	}
 

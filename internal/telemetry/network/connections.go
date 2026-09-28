@@ -78,6 +78,8 @@ func (c ConnectionInfo) key() string {
 // NetworkCollector tracks TCP/UDP connections by periodically polling
 // /proc/net/* and emitting events for changes. It implements capability.Capability.
 type NetworkCollector struct {
+	sourceMu  sync.RWMutex
+	workers   sync.WaitGroup
 	pipeline  *events.Pipeline
 	agentID   string
 	hostname  string
@@ -116,10 +118,18 @@ func NewNetworkCollector(pipeline *events.Pipeline, agentID, hostname string, in
 }
 
 // SetProcRoot overrides the default /proc path (useful for testing).
-func (n *NetworkCollector) SetProcRoot(path string) { n.procRoot = path }
+func (n *NetworkCollector) SetProcRoot(path string) {
+	n.sourceMu.Lock()
+	defer n.sourceMu.Unlock()
+	n.procRoot = path
+}
 
 // SetEtcPasswd overrides the /etc/passwd path (useful for testing).
-func (n *NetworkCollector) SetEtcPasswd(path string) { n.etcPasswd = path }
+func (n *NetworkCollector) SetEtcPasswd(path string) {
+	n.sourceMu.Lock()
+	defer n.sourceMu.Unlock()
+	n.etcPasswd = path
+}
 
 // ── capability.Capability interface ──────────────────────────────────────────
 
@@ -139,17 +149,21 @@ func (n *NetworkCollector) Start(ctx context.Context) error {
 	n.health = capability.HealthRunning
 	n.mu.Unlock()
 
-	go n.loop(childCtx)
+	n.workers.Add(1)
+	go func() { defer n.workers.Done(); n.loop(childCtx) }()
 	return nil
 }
 
 func (n *NetworkCollector) Stop() error {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.cancel != nil {
 		n.cancel()
 	}
+	n.mu.Unlock()
+	n.workers.Wait()
+	n.mu.Lock()
 	n.health = capability.HealthStopped
+	n.mu.Unlock()
 	return nil
 }
 
@@ -181,6 +195,8 @@ func (n *NetworkCollector) loop(ctx context.Context) {
 // scan reads /proc/net/{tcp,tcp6,udp,udp6}, diffs with the previous snapshot,
 // and emits events for new and closed connections.
 func (n *NetworkCollector) scan() {
+	n.sourceMu.RLock()
+	defer n.sourceMu.RUnlock()
 	protocols := []string{"tcp", "tcp6", "udp", "udp6"}
 	snapshot := make(map[string]ConnectionInfo)
 

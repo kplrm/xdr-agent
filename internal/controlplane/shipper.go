@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	defaultShipInterval    = 1 * time.Second
+	defaultShipInterval    = 30 * time.Second
 	defaultBatchSize       = 500
 	defaultMaxQueueBatches = 10
 	defaultMinQueueEvents  = 1000
@@ -40,11 +40,12 @@ type ShipperConfig struct {
 	TelemetryPath   string        // e.g. /api/v1/agents/telemetry
 	AgentID         string        // enrolled agent identifier
 	EnrollmentToken string        // optional bearer token for control-plane auth
-	Interval        time.Duration // how often to flush (0 → 10 s)
+	Interval        time.Duration // how often to flush (0 → 30 s)
 	BatchSize       int           // max events per HTTP request (0 → 500)
 	MaxQueueEvents  int           // max in-memory queued events before dropping (0 → max(BatchSize*10, 1000))
 	RequestTimeout  time.Duration // per-request timeout
 	InsecureSkipTLS bool
+	LogSuccess      bool // log successful nonempty batches; disable for the log shipper
 }
 
 // Shipper subscribes to the event pipeline and ships events to the
@@ -55,7 +56,6 @@ type Shipper struct {
 
 	mu     sync.Mutex
 	buffer []events.Event
-	notify chan struct{} // signaled when new events are enqueued
 
 	dropFrom    time.Time
 	dropCount   int
@@ -89,29 +89,27 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 			},
 		},
 		buffer: make([]events.Event, 0, cfg.BatchSize),
-		notify: make(chan struct{}, 1),
 	}
 }
 
 // Enqueue adds an event to the internal buffer. Intended to be used as
 // a pipeline subscriber callback: pipeline.Subscribe(shipper.Enqueue)
 func (s *Shipper) Enqueue(event events.Event) {
+	if event.ID == "" {
+		event.ID = events.NewID()
+	}
 	s.mu.Lock()
 	if len(s.buffer) >= s.cfg.MaxQueueEvents {
-		if msg := s.recordDropLocked(event.Type, time.Now()); msg != "" {
+		msg := s.recordDropLocked(event.Type, time.Now())
+		s.mu.Unlock()
+		if msg != "" {
 			log.Print(msg)
 		}
-		s.mu.Unlock()
 		return
 	}
 	s.buffer = append(s.buffer, event)
 	s.mu.Unlock()
 
-	// Wake up the shipping loop (non-blocking).
-	select {
-	case s.notify <- struct{}{}:
-	default:
-	}
 }
 
 func (s *Shipper) recordDropLocked(eventType string, now time.Time) string {
@@ -144,105 +142,51 @@ func (s *Shipper) recordDropLocked(eventType string, now time.Time) string {
 	)
 }
 
-// Run starts the shipping loop.
-//
-// Flushes are rate-limited to at most once per configured interval. Notify
-// wakeups can trigger an early flush only when the interval has elapsed since
-// the previous flush; otherwise they are coalesced until the next eligible
-// tick/notify.
-//
-// Blocks until ctx is canceled, then performs a final flush.
+// Run packs events on a fixed interval. Drain producers and call Flush after
+// Run exits to ship the final batch during shutdown.
 func (s *Shipper) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.Interval)
 	defer ticker.Stop()
-
-	lastFlush := time.Time{}
-
-	drainNotify := func() {
-		select {
-		case <-s.notify:
-		default:
-		}
-	}
-
-	flushIfDue := func() {
-		now := time.Now()
-		if !lastFlush.IsZero() && now.Sub(lastFlush) < s.cfg.Interval {
-			drainNotify()
-			return
-		}
-		if s.flush(ctx) {
-			lastFlush = now
-		}
-		drainNotify()
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
-			// Final flush on shutdown
-			s.flush(context.Background())
 			return
-		case <-s.notify:
-			flushIfDue()
 		case <-ticker.C:
-			flushIfDue()
+			if err := s.Flush(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("shipper: %v", err)
+			}
 		}
 	}
 }
 
-// flush drains the buffer and ships events in batches.
-// Returns true when a non-empty buffer was processed.
-func (s *Shipper) flush(ctx context.Context) bool {
+// Flush retains failed batches for retry and bounds the outage queue.
+// The caller must not invoke Flush concurrently with Run.
+func (s *Shipper) Flush(ctx context.Context) error {
 	s.mu.Lock()
-	bufferedBefore := len(s.buffer)
-	if bufferedBefore == 0 {
-		s.mu.Unlock()
-		return false
-	}
 	batch := s.buffer
 	s.buffer = make([]events.Event, 0, s.cfg.BatchSize)
 	s.mu.Unlock()
-
-	shippedCount := 0
-	chunks := 0
-
-	// Ship in batch-sized chunks
 	for i := 0; i < len(batch); i += s.cfg.BatchSize {
 		end := i + s.cfg.BatchSize
 		if end > len(batch) {
 			end = len(batch)
 		}
-		chunk := batch[i:end]
-
-		if err := s.ship(ctx, chunk); err != nil {
-			remaining := batch[i:]
-			// Re-enqueue failed + not-yet-attempted events so they can be retried
+		if err := s.ship(ctx, batch[i:end]); err != nil {
 			s.mu.Lock()
-			s.buffer = append(remaining, s.buffer...)
-			bufferedAfter := len(s.buffer)
+			pending := append(batch[i:], s.buffer...)
+			dropped := len(pending) - s.cfg.MaxQueueEvents
+			if dropped > 0 {
+				pending = pending[:s.cfg.MaxQueueEvents]
+			}
+			s.buffer = pending
 			s.mu.Unlock()
-			log.Printf(
-				"shipper: flush failed buffered_before=%d shipped=%d chunks=%d requeued=%d buffered_after=%d err=%v",
-				bufferedBefore, shippedCount, chunks, len(remaining), bufferedAfter, err,
-			)
-			return true // stop shipping this cycle; retry next tick
+			if dropped > 0 {
+				log.Printf("shipper: retry queue full, dropped %d newest events", dropped)
+			}
+			return err
 		}
-
-		shippedCount += len(chunk)
-		chunks++
 	}
-
-	s.mu.Lock()
-	bufferedAfter := len(s.buffer)
-	s.mu.Unlock()
-
-	log.Printf(
-		"shipper: flush ok buffered_before=%d shipped=%d chunks=%d buffered_after=%d",
-		bufferedBefore, shippedCount, chunks, bufferedAfter,
-	)
-
-	return true
+	return nil
 }
 
 // ship sends a single batch of events to the telemetry endpoint with gzip
@@ -265,7 +209,9 @@ func (s *Shipper) ship(ctx context.Context, batch []events.Event) error {
 		gz.Close()
 		return fmt.Errorf("gzip telemetry batch: %w", err)
 	}
-	gz.Close()
+	if err := gz.Close(); err != nil {
+		return err
+	}
 
 	endpoint, err := joinTelemetryURL(s.cfg.TelemetryURL, s.cfg.TelemetryPath)
 	if err != nil {
@@ -305,7 +251,10 @@ func (s *Shipper) ship(ctx context.Context, batch []events.Event) error {
 		resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil // success
+			if s.cfg.LogSuccess {
+				log.Printf("shipped %d events to %s", len(batch), s.cfg.TelemetryPath)
+			}
+			return nil
 		}
 
 		lastErr = fmt.Errorf("telemetry rejected: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))

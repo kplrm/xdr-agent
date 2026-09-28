@@ -1,16 +1,17 @@
 Name:           xdr-agent
 Version:        @VERSION@
 Release:        1
-Summary:        Lightweight XDR agent (identity and enrollment)
+Summary:        Linux endpoint telemetry and YARA protection
 License:        AGPL-3.0
 URL:            https://example.com/xdr-agent
 BuildArch:      @RPM_ARCH@
+Requires:       yara >= 4.2.0
 Requires(post): systemd
 Requires(preun): systemd
 Requires(postun): systemd
 
 %description
-A minimal host agent that establishes identity and enrolls into a control plane.
+Collects process, file, and network telemetry and applies bundled YARA Forge Core rules.
 
 %prep
 

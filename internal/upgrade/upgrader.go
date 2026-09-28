@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -49,6 +50,9 @@ func osFamilyDebian() bool {
 // packageURL returns the GitHub download URL for the given version, OS family,
 // and CPU architecture.
 func packageURL(version string, debian bool) (string, error) {
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`).MatchString(version) {
+		return "", fmt.Errorf("invalid release version")
+	}
 	arch := runtime.GOARCH // "amd64" or "arm64"
 
 	if debian {
@@ -177,9 +181,8 @@ func Perform(ctx context.Context, version string) error {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
 
-	// Download with an independent context so a cancelled parent ctx does
-	// not abort the HTTP transfer.
-	dlCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Cancel download with the service; the actual install has its own unit.
+	dlCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	log.Printf("upgrade: downloading %s", url)

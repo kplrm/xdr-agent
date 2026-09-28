@@ -1,6 +1,5 @@
 // Package capability defines the interface that all XDR security capabilities must implement.
-// Each capability (telemetry, detection, prevention, response, compliance, etc.) registers
-// itself with the agent and is managed through this common lifecycle interface.
+// Retained telemetry collectors share this lifecycle and health interface.
 package capability
 
 import "context"
@@ -58,17 +57,6 @@ type Capability interface {
 	Health() HealthStatus
 }
 
-// Dependencies bundles the common services that capabilities may need.
-// This avoids each capability needing to wire up its own infrastructure.
-type Dependencies struct {
-	// EventPipeline is the central event bus for emitting telemetry and alerts.
-	// All capabilities should emit structured events here.
-	EventPipeline interface{} // will be *events.Pipeline once that package is built
-
-	// Config provides access to the agent's configuration, including
-	// per-capability settings.
-	Config interface{} // will be config.Config once expanded
-
-	// Logger provides structured logging.
-	Logger interface{} // will be *slog.Logger or similar
-}
+// Dependencies is reserved for collector initialization; collectors receive typed
+// dependencies through their constructors.
+type Dependencies struct{}

@@ -151,13 +151,6 @@ func sharedCriticalPaths() []WatchPath {
 		{Path: "/root/.bashrc", Recursive: false},
 		{Path: "/root/.profile", Recursive: false},
 
-		// ── Critical system binaries ────────────────────────────────────────
-		// T1574.007 — flat watch only (recursive too expensive)
-		{Path: "/usr/bin", Recursive: false},
-		{Path: "/usr/sbin", Recursive: false},
-		{Path: "/usr/local/bin", Recursive: false},
-		{Path: "/usr/local/sbin", Recursive: false},
-
 		// ── Boot loader ─────────────────────────────────────────────────────
 		// T1542.001
 		{Path: "/boot/grub", Recursive: false},
@@ -189,10 +182,6 @@ func debianCriticalPaths() []WatchPath {
 		{Path: "/lib/x86_64-linux-gnu/security", Recursive: false},
 		{Path: "/lib/aarch64-linux-gnu/security", Recursive: false}, // ARM64
 
-		// ── Legacy symlink binary directories (Debian/Ubuntu) ───────────────
-		{Path: "/bin", Recursive: false},
-		{Path: "/sbin", Recursive: false},
-
 		// ── systemd lib location (Debian/Ubuntu) ────────────────────────────
 		{Path: "/lib/systemd/system", Recursive: false},
 
@@ -220,9 +209,6 @@ func debianCriticalPaths() []WatchPath {
 
 		// ── AppArmor profiles (Debian/Ubuntu MAC) ───────────────────────────
 		{Path: "/etc/apparmor.d", Recursive: true},
-
-		// ── dpkg integrity ───────────────────────────────────────────────────
-		{Path: "/var/lib/dpkg/info", Recursive: false},
 	}
 }
 

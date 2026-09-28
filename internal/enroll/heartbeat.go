@@ -14,13 +14,25 @@ import (
 	"xdr-agent/internal/identity"
 )
 
+// ProtectionInventory reports the release rules loaded on the endpoint.
+type ProtectionInventory struct {
+	Source    string            `json:"rule_source"`
+	Version   string            `json:"rule_version"`
+	RuleCount int               `json:"rule_count"`
+	Mode      string            `json:"mode"`
+	Platform  string            `json:"platform"`
+	SHA256    string            `json:"rules_sha256"`
+	Health    map[string]string `json:"health,omitempty"`
+}
+
 type HeartbeatRequest struct {
-	AgentID      string   `json:"agent_id"`
-	MachineID    string   `json:"machine_id"`
-	Hostname     string   `json:"hostname"`
-	PolicyID     string   `json:"policy_id"`
-	Tags         []string `json:"tags"`
-	AgentVersion string   `json:"agent_version"`
+	AgentID      string               `json:"agent_id"`
+	MachineID    string               `json:"machine_id"`
+	Hostname     string               `json:"hostname"`
+	PolicyID     string               `json:"policy_id"`
+	Tags         []string             `json:"tags"`
+	AgentVersion string               `json:"agent_version"`
+	Protection   *ProtectionInventory `json:"protection,omitempty"`
 }
 
 // HeartbeatResponse holds the fields returned by the control plane on a
@@ -33,7 +45,7 @@ type HeartbeatResponse struct {
 
 // Heartbeat sends a heartbeat to the control plane and returns the server's
 // response (including any pending commands) and an error.
-func Heartbeat(ctx context.Context, cfg config.Config, state identity.State, version string) (HeartbeatResponse, error) {
+func Heartbeat(ctx context.Context, cfg config.Config, state identity.State, version string, protection ...ProtectionInventory) (HeartbeatResponse, error) {
 	payload := HeartbeatRequest{
 		AgentID:      state.AgentID,
 		MachineID:    state.MachineID,
@@ -41,6 +53,10 @@ func Heartbeat(ctx context.Context, cfg config.Config, state identity.State, ver
 		PolicyID:     cfg.PolicyID,
 		Tags:         cfg.Tags,
 		AgentVersion: version,
+	}
+
+	if len(protection) > 0 {
+		payload.Protection = &protection[0]
 	}
 
 	body, err := json.Marshal(payload)

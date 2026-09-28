@@ -1,7 +1,5 @@
 // Package events provides the central event pipeline for the XDR agent.
-// All capabilities emit structured events (telemetry, alerts, compliance findings)
-// into this pipeline, which handles enrichment, filtering, buffering, and shipping
-// to the control plane.
+// Collectors and protection publish structured events for bounded, asynchronous dispatch.
 package events
 
 import (
@@ -40,6 +38,9 @@ func NewPipeline(bufferSize int) *Pipeline {
 
 // Emit publishes an event to the pipeline. Non-blocking if buffer is not full.
 func (p *Pipeline) Emit(event Event) {
+	if event.ID == "" {
+		event.ID = NewID()
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -95,25 +96,35 @@ func (p *Pipeline) Subscribe(handler func(Event)) {
 	p.subs = append(p.subs, handler)
 }
 
-// Run starts dispatching events to subscribers. Blocks until ctx is canceled.
+// Run dispatches events and drains the accepted queue before returning on shutdown.
 func (p *Pipeline) Run(ctx context.Context) {
+	dispatch := func(event Event) {
+		p.mu.RLock()
+		subscribers := append([]func(Event){}, p.subs...)
+		p.mu.RUnlock()
+		// Call outside the lock: a detection subscriber can publish an alert.
+		for _, sub := range subscribers {
+			sub(event)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			p.mu.Lock()
-			p.closed = true
-			close(p.ch)
+			if !p.closed {
+				p.closed = true
+				close(p.ch)
+			}
 			p.mu.Unlock()
+			for event := range p.ch {
+				dispatch(event)
+			}
 			return
 		case event, ok := <-p.ch:
 			if !ok {
 				return
 			}
-			p.mu.RLock()
-			for _, sub := range p.subs {
-				sub(event)
-			}
-			p.mu.RUnlock()
+			dispatch(event)
 		}
 	}
 }

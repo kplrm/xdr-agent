@@ -1,61 +1,9 @@
-# Adding a Capability
+# Changing the runtime
 
-Use this guide when adding a new runtime capability to `xdr-agent`.
+Keep changes within process/file/network collection or release-bundled YARA protection. Ransomware, memory, and behavioral features need a separate scope decision before implementation; do not add placeholders for them.
 
-## Decide First
+Use the shared event envelope and lifecycle in `internal/service/run.go`. Keep dependencies explicit in constructors and comments concise. Coordinator policies group agents; they do not distribute protection content.
 
-Before creating a package, decide whether the feature is actually one of these:
+For an HTTP change, update `docs/api-endpoints.md`, its contract/test case, and the receiving Coordinator route together. New endpoints must pass the build's API regression check. Protection changes need positive/negative matching tests and failure-path tests; Linux enforcement needs disposable privileged host validation.
 
-- telemetry collector
-- detection engine logic
-- prevention decision or enforcement logic
-- control-plane sync logic
-
-Do not create a new capability just because a feature exists conceptually on the roadmap.
-
-## Design Rules
-
-- Fit the current service model in `internal/service/run.go`.
-- Reuse the shared event envelope from `internal/events/event.go`.
-- Make posture interaction explicit if the feature is policy-controlled.
-- Keep endpoint-side logic local and deterministic.
-
-## Typical Steps
-
-### 1. Create the package
-Place it under the correct domain:
-
-- `internal/telemetry/<name>`
-- `internal/detection/<name>`
-- `internal/prevention/<name>`
-
-### 2. Define startup and runtime behavior
-The agent currently mixes full capability-style modules and manager-style runtime components.
-
-Match the existing pattern used by the neighboring package instead of forcing a new abstraction.
-
-### 3. Emit events through the pipeline
-Use the shared pipeline so the new component participates in the same shipping and downstream evaluation flow.
-
-### 4. Add config and posture hooks only if needed
-If the feature is toggleable, add:
-- config defaults
-- posture mapping in `internal/controlplane/defense_posture.go`
-- runtime update handling in the relevant engine or manager
-
-### 5. Wire it in `internal/service/run.go`
-Keep orchestration changes explicit and easy to review.
-
-### 6. Test the real boundary
-At minimum, validate:
-- startup behavior
-- event emission
-- posture update handling if applicable
-- failure behavior when control plane or local artifacts are unavailable
-
-## Anti-Patterns
-
-- adding roadmap-only stubs with no runtime path
-- creating a second event model instead of reusing the shared one
-- duplicating feed curation logic that belongs in `xdr-defense`
-- documenting fields or behavior before the runtime actually emits them
+Run `make test` and `make build`. Update architecture and roadmap claims to match the implemented behavior and known limits.

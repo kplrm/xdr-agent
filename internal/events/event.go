@@ -1,6 +1,10 @@
 package events
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
 
 // Severity represents the severity level of an event or alert.
 type Severity int
@@ -54,4 +58,13 @@ type Event struct {
 
 	// Tags for filtering and routing
 	Tags []string `json:"tags,omitempty"`
+}
+
+// NewID is assigned before queueing so retries preserve document identity.
+func NewID() string {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		panic("event identity entropy unavailable: " + err.Error())
+	}
+	return hex.EncodeToString(id[:])
 }

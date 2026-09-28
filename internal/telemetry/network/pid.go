@@ -10,10 +10,10 @@ package network
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"os/user"
 )
 
 // ProcessInfo holds process metadata resolved from a socket inode.

@@ -17,7 +17,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,7 +28,7 @@ import (
 
 	"xdr-agent/internal/buildinfo"
 	"xdr-agent/internal/config"
-	"xdr-agent/internal/controlplane"
+	"xdr-agent/internal/detection/malware"
 	"xdr-agent/internal/service"
 )
 
@@ -46,7 +45,7 @@ func run() error {
 	}
 
 	switch os.Args[1] {
-	case "run", "enroll", "remove", "version", "completion", "defense-posture":
+	case "run", "enroll", "remove", "version", "completion", "check-rules":
 		return runCommand(os.Args[1], os.Args[2:])
 	case "-h", "--help", "help":
 		printHelp()
@@ -58,6 +57,15 @@ func run() error {
 
 func runCommand(command string, args []string) error {
 	switch command {
+	case "check-rules":
+		scanner, err := malware.NewScanner()
+		if err != nil {
+			return err
+		}
+		defer scanner.Close()
+		inventory := malware.Inventory()
+		fmt.Printf("%s %s: %d Linux rules (%s)\n", inventory.Source, inventory.Version, inventory.RuleCount, inventory.SHA256)
+		return nil
 	case "version":
 		fmt.Println(buildinfo.Version)
 		return nil
@@ -66,38 +74,6 @@ func runCommand(command string, args []string) error {
 			return fmt.Errorf("usage: xdr-agent completion bash")
 		}
 		printBashCompletion()
-		return nil
-	case "defense-posture":
-		flags := flag.NewFlagSet(command, flag.ContinueOnError)
-		flags.SetOutput(os.Stdout)
-		configPath := flags.String("config", config.DefaultConfigPath, "path to config json")
-		if err := flags.Parse(args); err != nil {
-			return err
-		}
-
-		rawCfg, err := config.LoadRaw(*configPath)
-		if err != nil {
-			return err
-		}
-		posturePath := rawCfg.DefensePosturePath
-		if posturePath == "" {
-			posturePath = config.DefaultDefensePosturePath
-		}
-
-		posture, err := controlplane.LoadDefensePosture(posturePath)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				fmt.Fprintln(os.Stdout, "{}")
-				return nil
-			}
-			return err
-		}
-
-		output, err := json.MarshalIndent(posture, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(os.Stdout, string(output))
 		return nil
 	case "remove":
 		return removeInstallation()
@@ -138,7 +114,6 @@ func runCommand(command string, args []string) error {
 			if enrollmentToken == "" {
 				return fmt.Errorf("enrollment_token cannot be empty")
 			}
-			fmt.Fprintln(os.Stdout, "xdr-agent install path: /usr/bin/xdr-agent")
 		}
 
 		// Check if config file exists before starting the agent
@@ -150,39 +125,29 @@ func runCommand(command string, args []string) error {
 			return fmt.Errorf("cannot access config file %s: %w", *configPath, err)
 		}
 
-		// Apply CLI overrides to the config file before loading.
-		overridesSet := false
-		if *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS || (command == "enroll" && enrollmentToken != "") {
-			cfg, err := config.LoadRaw(*configPath)
-			if err != nil {
-				return err
-			}
-			if command == "enroll" && enrollmentToken != "" {
-				cfg.EnrollmentToken = enrollmentToken
-				overridesSet = true
-			}
-			if *controlPlaneURL != "" {
-				cfg.ControlPlaneURL = *controlPlaneURL
-				overridesSet = true
-			}
-			if *policyIDFlag != "" {
-				cfg.PolicyID = *policyIDFlag
-				overridesSet = true
-			}
-			if *tagsFlag != "" {
-				cfg.Tags = splitTags(*tagsFlag)
-				overridesSet = true
-			}
-			if *insecureSkipTLS {
-				cfg.InsecureSkipTLSVerify = true
-				overridesSet = true
-			}
-			if overridesSet {
-				if err := config.Save(*configPath, cfg); err != nil {
-					return fmt.Errorf("save config overrides: %w", err)
+		// Enrollment reads --config but installs the resulting config for systemd.
+		activeConfigPath := targetConfigPath(command, *configPath)
+		if command == "enroll" || *controlPlaneURL != "" || *policyIDFlag != "" || *tagsFlag != "" || *insecureSkipTLS {
+			if err := saveConfigWithOverrides(*configPath, activeConfigPath, func(cfg *config.Config) {
+				if command == "enroll" {
+					cfg.EnrollmentToken = enrollmentToken
 				}
-				fmt.Fprintln(os.Stdout, "config overrides saved to", *configPath)
+				if *controlPlaneURL != "" {
+					cfg.ControlPlaneURL = *controlPlaneURL
+				}
+				if *policyIDFlag != "" {
+					cfg.PolicyID = *policyIDFlag
+				}
+				if *tagsFlag != "" {
+					cfg.Tags = splitTags(*tagsFlag)
+				}
+				if *insecureSkipTLS {
+					cfg.InsecureSkipTLSVerify = true
+				}
+			}); err != nil {
+				return fmt.Errorf("save config to %s: %w", activeConfigPath, err)
 			}
+			fmt.Fprintln(os.Stdout, "config saved to", activeConfigPath)
 		}
 
 		// Use signal.NotifyContext to handle graceful shutdown on SIGTERM and SIGINT
@@ -191,7 +156,7 @@ func runCommand(command string, args []string) error {
 
 		// Run the service. If "enroll" command is used, it will attempt enrollment once and exit.
 		once := command == "enroll"
-		if err := service.Run(ctx, *configPath, once, enrollmentToken); err != nil {
+		if err := service.Run(ctx, activeConfigPath, once, enrollmentToken); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
@@ -221,6 +186,22 @@ func splitTags(s string) []string {
 	return tags
 }
 
+func targetConfigPath(command, source string) string {
+	if command == "enroll" {
+		return config.DefaultConfigPath
+	}
+	return source
+}
+
+func saveConfigWithOverrides(source, target string, apply func(*config.Config)) error {
+	cfg, err := config.LoadRaw(source)
+	if err != nil {
+		return err
+	}
+	apply(&cfg)
+	return config.Save(target, cfg)
+}
+
 func enableAndStartServiceAfterEnroll() error {
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stdout, "enrollment successful; run with sudo to auto-enable and start xdr-agent.service")
@@ -233,16 +214,16 @@ func enableAndStartServiceAfterEnroll() error {
 		return nil
 	}
 
-	if err := exec.Command(systemctlPath, "daemon-reload").Run(); err != nil {
-		return fmt.Errorf("systemctl daemon-reload failed: %w", err)
+	if output, err := exec.Command(systemctlPath, "cat", "xdr-agent.service").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stdout, "enrollment successful; xdr-agent.service is not installed (%s). Install the package, or run this build in the foreground.\n", strings.TrimSpace(string(output)))
+		return nil
 	}
-	if err := exec.Command(systemctlPath, "enable", "xdr-agent.service").Run(); err != nil {
-		return fmt.Errorf("systemctl enable xdr-agent.service failed: %w", err)
-	}
-	// Restart guarantees the running service process reloads the config that was
-	// just updated by `xdr-agent enroll` (notably enrollment_token overrides).
-	if err := exec.Command(systemctlPath, "restart", "xdr-agent.service").Run(); err != nil {
-		return fmt.Errorf("systemctl restart xdr-agent.service failed: %w", err)
+
+	// Restart reloads the enrollment token written to the default config.
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", "xdr-agent.service"}, {"restart", "xdr-agent.service"}} {
+		if output, err := exec.Command(systemctlPath, args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("systemctl %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		}
 	}
 
 	fmt.Fprintln(os.Stdout, "xdr-agent.service enabled and restarted")
@@ -257,7 +238,6 @@ func removeInstallation() error {
 	if systemctlPath, err := exec.LookPath("systemctl"); err == nil {
 		_ = exec.Command(systemctlPath, "stop", "xdr-agent.service").Run()
 		_ = exec.Command(systemctlPath, "disable", "xdr-agent.service").Run()
-		_ = exec.Command(systemctlPath, "daemon-reload").Run()
 	}
 
 	paths := []string{
@@ -275,18 +255,22 @@ func removeInstallation() error {
 		}
 	}
 
+	if systemctlPath, err := exec.LookPath("systemctl"); err == nil {
+		_ = exec.Command(systemctlPath, "daemon-reload").Run()
+	}
+
 	fmt.Println("xdr-agent removed")
 	return nil
 }
 
 // printHelp outputs usage information for the xdr-agent CLI.
 func printHelp() {
-	fmt.Println("xdr-agent: lightweight identity and enrollment agent")
+	fmt.Println("xdr-agent: Linux endpoint telemetry and YARA protection")
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  run        Run the long-lived agent process")
 	fmt.Println("  enroll     Perform one enrollment attempt and exit")
-	fmt.Println("  defense-posture Show cached local Defense Posture JSON")
+	fmt.Println("  check-rules Compile and validate bundled rules without enabling protection")
 	fmt.Println("  completion Output shell completion script")
 	fmt.Println("  remove     Remove xdr-agent files and service")
 	fmt.Println()
@@ -301,7 +285,6 @@ func printHelp() {
 	fmt.Printf("Examples:\n")
 	fmt.Printf("  xdr-agent run --config %s\n", config.DefaultConfigPath)
 	fmt.Printf("  xdr-agent enroll <enrollment_token> --config %s\n", config.DefaultConfigPath)
-	fmt.Printf("  xdr-agent defense-posture --config %s\n", config.DefaultConfigPath)
 	fmt.Printf("  xdr-agent completion bash\n")
 	fmt.Printf("  sudo xdr-agent remove\n")
 }
@@ -313,12 +296,12 @@ _xdr_agent_completion() {
 	cur="${COMP_WORDS[COMP_CWORD]}"
 
 	if [[ ${COMP_CWORD} -eq 1 ]]; then
-		COMPREPLY=( $(compgen -W "run enroll defense-posture remove version completion help" -- "${cur}") )
+		COMPREPLY=( $(compgen -W "run enroll remove version check-rules completion help" -- "${cur}") )
 		return 0
 	fi
 
 	case "${COMP_WORDS[1]}" in
-		run|enroll|defense-posture)
+		run|enroll)
 			COMPREPLY=( $(compgen -W "--config -h --help" -- "${cur}") )
 			;;
 		completion)

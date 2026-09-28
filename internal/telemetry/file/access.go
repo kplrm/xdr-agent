@@ -53,6 +53,7 @@ var defaultSensitiveAccessPaths = []string{
 // FileAccessCollector watches sensitive files and directories for read-access
 // events via inotify. It implements capability.Capability.
 type FileAccessCollector struct {
+	workers    sync.WaitGroup
 	pipeline   *events.Pipeline
 	agentID    string
 	hostname   string
@@ -119,7 +120,8 @@ func (a *FileAccessCollector) Start(ctx context.Context) error {
 	a.health = capability.HealthRunning
 	a.mu.Unlock()
 
-	go a.loop(childCtx)
+	a.workers.Add(1)
+	go func() { defer a.workers.Done(); a.loop(childCtx) }()
 	return nil
 }
 
@@ -130,6 +132,7 @@ func (a *FileAccessCollector) Stop() error {
 	}
 	a.mu.Unlock()
 
+	a.workers.Wait()
 	a.inotifyMu.Lock()
 	if a.inotifyFd >= 0 {
 		_ = syscall.Close(a.inotifyFd)

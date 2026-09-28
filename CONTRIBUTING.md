@@ -15,7 +15,7 @@ By submitting a change, you agree that your contribution is distributed under th
 2. Make a focused change.
 3. Add or update tests when behavior changes.
 4. Build and test before opening a pull request.
-5. Include a clear description of the runtime impact, policy impact, and any compatibility implications.
+5. Include a clear description of the runtime impact, and any compatibility implications.
 
 ## Build And Test
 
@@ -33,8 +33,8 @@ Run the smallest relevant test scope when iterating, but do not open a change wi
 - Follow the current runtime architecture in `docs/architecture.md`.
 - Keep capability boundaries clear instead of adding cross-cutting logic in ad hoc places.
 - Prefer minimal, justified dependencies. External libraries are acceptable when they solve a real endpoint-security need better than custom code.
-- Keep policy-driven behavior in config or control-plane overlays rather than hard-coding mode decisions.
-- Update docs when routes, rollout behavior, field ownership, or capability boundaries change.
+- Keep protection configuration local and content tied to agent releases; Coordinator policies are grouping labels.
+- Update docs and contract tests when routes, field ownership, or scope change.
 
 ## Code Style
 

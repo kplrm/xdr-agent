@@ -47,6 +47,8 @@ case "${ARCH_INPUT}" in
     ;;
 esac
 
+make -C "${ROOT_DIR}" test
+
 echo "[1/4] Building binary for ${GOARCH_VALUE}"
 mkdir -p "${DIST_DIR}"
 CGO_ENABLED=0 GOOS=linux GOARCH="${GOARCH_VALUE}" go build \
@@ -65,7 +67,7 @@ mkdir -p \
   "${RPMBUILD_DIR}/SRPMS"
 
 install -m 0755 "${DIST_DIR}/xdr-agent" "${RPMBUILD_DIR}/SOURCES/xdr-agent"
-install -m 0644 "${ROOT_DIR}/config/config.json" "${RPMBUILD_DIR}/SOURCES/config.json"
+install -m 0644 "${ROOT_DIR}/config/config.default.json" "${RPMBUILD_DIR}/SOURCES/config.json"
 install -m 0644 "${ROOT_DIR}/systemd/xdr-agent.service" "${RPMBUILD_DIR}/SOURCES/xdr-agent.service"
 install -m 0644 "${ROOT_DIR}/LICENSE" "${RPMBUILD_DIR}/SOURCES/LICENSE"
 install -m 0644 "${ROOT_DIR}/AUTHORS" "${RPMBUILD_DIR}/SOURCES/AUTHORS"

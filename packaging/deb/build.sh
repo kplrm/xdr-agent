@@ -13,6 +13,8 @@ BIN_PATH="${DIST_DIR}/xdr-agent"
 PKG_ROOT="${DIST_DIR}/${PKG_NAME}_${VERSION}_${ARCH}"
 KEEP_STAGING="${KEEP_STAGING:-0}"
 
+make -C "${ROOT_DIR}" test
+
 echo "[1/4] Building binary"
 mkdir -p "${DIST_DIR}"
 
@@ -41,7 +43,7 @@ mkdir -p \
   "${PKG_ROOT}/var/lib/xdr-agent"
 
 install -m 0755 "${BIN_PATH}" "${PKG_ROOT}/usr/bin/xdr-agent"
-install -m 0644 "${ROOT_DIR}/config/config.json" "${PKG_ROOT}/etc/xdr-agent/config.default.json"
+install -m 0644 "${ROOT_DIR}/config/config.default.json" "${PKG_ROOT}/etc/xdr-agent/config.default.json"
 install -m 0644 "${ROOT_DIR}/packaging/bash_completion/xdr-agent" "${PKG_ROOT}/usr/share/bash-completion/completions/xdr-agent"
 install -m 0644 "${ROOT_DIR}/packaging/systemd-preset/90-xdr-agent.preset" "${PKG_ROOT}/usr/lib/systemd/system-preset/90-xdr-agent.preset"
 install -m 0644 "${ROOT_DIR}/systemd/xdr-agent.service" "${PKG_ROOT}/lib/systemd/system/xdr-agent.service"
@@ -57,9 +59,9 @@ Section: admin
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: XDR Team <xdr@example.com>
-Depends: systemd, bash-completion
-Description: Lightweight XDR agent (identity and enrollment)
- A minimal host agent that establishes identity and enrolls into a control plane.
+Depends: systemd, bash-completion, yara (>= 4.2.0)
+Description: Linux endpoint telemetry and YARA protection
+ Collects process, file, and network telemetry and applies bundled YARA Forge Core rules.
 EOF
 
 # conffiles is intentionally empty — config.json is managed by postinst,
@@ -68,6 +70,7 @@ touch "${PKG_ROOT}/DEBIAN/conffiles"
 
 install -m 0755 "${ROOT_DIR}/packaging/deb/postinst" "${PKG_ROOT}/DEBIAN/postinst"
 install -m 0755 "${ROOT_DIR}/packaging/deb/prerm" "${PKG_ROOT}/DEBIAN/prerm"
+install -m 0755 "${ROOT_DIR}/packaging/deb/postrm" "${PKG_ROOT}/DEBIAN/postrm"
 
 echo "[3/4] Building .deb"
 dpkg-deb --build --root-owner-group "${PKG_ROOT}" >/dev/null

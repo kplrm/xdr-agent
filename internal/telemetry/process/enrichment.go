@@ -15,7 +15,6 @@ package process
 //   process.io.write_bytes       → /proc/[pid]/io (write_bytes)
 //   container.id                 → /proc/[pid]/cgroup (Docker/containerd/k8s)
 //   process.entity_id            → SHA-256(hostname+pid+starttime)[:16]
-//   process.hash.sha256          → SHA-256 of executable image (new procs only)
 //   process.user.name            → /etc/passwd lookup for process.user.id
 //   process.group.name           → /etc/group  lookup for process.group.id
 
@@ -24,7 +23,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -256,28 +254,6 @@ func buildEntityID(hostname string, pid int, startTime uint64) string {
 	return hex.EncodeToString(h[:])[:16]
 }
 
-// ── Executable hash ───────────────────────────────────────────────────────────
-
-// hashFile computes the SHA-256 digest of the file at path.
-// Returns an empty string on any error (missing, permission denied, etc.).
-// ECS: process.hash.sha256
-func hashFile(path string) string {
-	if path == "" {
-		return ""
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
 // ── enrichProcessInfo ─────────────────────────────────────────────────────────
 
 // enrichProcessInfo fills in optional "fast" enrichment fields on a ProcessInfo.
@@ -292,12 +268,9 @@ func enrichProcessInfo(procRoot string, info *ProcessInfo) {
 	info.ContainerID = detectContainerID(pidDir)
 }
 
-// enrichNewProcess adds expensive, one-shot enrichment for newly discovered
+// enrichNewProcess adds user context for newly discovered
 // processes. Only called when a process is first seen (process.start event).
 func enrichNewProcess(info *ProcessInfo, uids *uidCache, gids *gidCache) {
-	if info.Executable != "" {
-		info.ExeSHA256 = hashFile(info.Executable)
-	}
 	info.Username = uids.lookup(info.UID)
 	info.GroupName = gids.lookup(info.GID)
 }

@@ -1,2 +1,6 @@
 dist/
 *.deb
+__pycache__/
+*.pyc
+yara-forge-core/
+config/config.json

@@ -10,25 +10,22 @@ import (
 
 const DefaultConfigPath = "/etc/xdr-agent/config.json"
 
-const (
-	DefaultDefensePosturePath            = "/var/lib/xdr-agent/defense_posture.json"
-	DefaultDefensePostureAckPath         = "/api/xdr-defense/policy-rollouts/ack"
-	DefaultYaraRolloutAckPath            = "/api/xdr-defense/yara/rollouts/ack"
-	DefaultYaraRuleStatusPath            = "/api/xdr-defense/yara/rollouts/status"
-	DefaultDefensePosturePollIntervalSec = 30
-)
-
 type Config struct {
-	ControlPlaneURL       string   `json:"control_plane_url"`
-	EnrollmentPath        string   `json:"enrollment_path"`
-	HeartbeatPath         string   `json:"heartbeat_path"`
-	EnrollmentToken       string   `json:"enrollment_token"`
-	PolicyID              string   `json:"policy_id"`
-	Tags                  []string `json:"tags"`
-	EnrollIntervalSeconds int      `json:"enroll_interval_seconds"`
-	RequestTimeoutSeconds int      `json:"request_timeout_seconds"`
-	StatePath             string   `json:"state_path"`
-	InsecureSkipTLSVerify bool     `json:"insecure_skip_tls_verify"`
+	// MaxCPUCores limits logical CPUs for the agent and its child processes; 0 removes the limit.
+	MaxCPUCores int `json:"max_cpu_cores"`
+	// ExecutionWatchPaths bounds the directories covered by execution prevention.
+	ExecutionWatchPaths      []string `json:"execution_watch_paths,omitempty"`
+	ControlPlaneURL          string   `json:"control_plane_url"`
+	EnrollmentPath           string   `json:"enrollment_path"`
+	HeartbeatPath            string   `json:"heartbeat_path"`
+	EnrollmentToken          string   `json:"enrollment_token"`
+	PolicyID                 string   `json:"policy_id"`
+	Tags                     []string `json:"tags"`
+	EnrollIntervalSeconds    int      `json:"enroll_interval_seconds"`
+	HeartbeatIntervalSeconds int      `json:"heartbeat_interval_seconds,omitempty"`
+	RequestTimeoutSeconds    int      `json:"request_timeout_seconds"`
+	StatePath                string   `json:"state_path"`
+	InsecureSkipTLSVerify    bool     `json:"insecure_skip_tls_verify"`
 
 	// Telemetry shipping — optional fields.
 	// When TelemetryURL is empty the agent ships telemetry to ControlPlaneURL.
@@ -46,18 +43,8 @@ type Config struct {
 	CommandsPath               string `json:"commands_path,omitempty"`
 	CommandPollIntervalSeconds int    `json:"command_poll_interval_seconds,omitempty"`
 
-	DefensePosturePath                string `json:"defense_posture_path,omitempty"`
-	DefensePosturePollIntervalSeconds int    `json:"defense_posture_poll_interval_seconds,omitempty"`
-	DefensePostureAckPath             string `json:"defense_posture_ack_path,omitempty"`
-	YaraRolloutAckPath                string `json:"yara_rollout_ack_path,omitempty"`
-	YaraRuleStatusPath                string `json:"yara_rule_status_path,omitempty"`
-	YaraRuleInventoryPath             string `json:"yara_rule_inventory_path,omitempty"`
-	YaraBundleSyncIntervalSeconds     int    `json:"yara_bundle_sync_interval_seconds,omitempty"`
-	YaraInventoryCheckIntervalSeconds int    `json:"yara_inventory_check_interval_seconds,omitempty"`
-
 	DetectionPrevention DetectionPreventionConfig `json:"detection_prevention,omitempty"`
 	Logging             LoggingConfig             `json:"logging,omitempty"`
-	Rules               RulesConfig               `json:"rules,omitempty"`
 }
 
 type DetectionPreventionMode string
@@ -68,62 +55,7 @@ const (
 )
 
 type DetectionPreventionConfig struct {
-	Mode         DetectionPreventionMode `json:"mode,omitempty"`
-	Capabilities CapabilityOptions       `json:"capabilities,omitempty"`
-}
-
-type CapabilityOptions struct {
-	Malware      MalwareCapabilityOptions     `json:"malware,omitempty"`
-	Ransomware   RansomwareCapabilityOptions  `json:"ransomware,omitempty"`
-	Behavioral   BehavioralCapabilityOptions  `json:"behavioral,omitempty"`
-	ThreatIntel  ThreatIntelCapabilityOptions `json:"threatintel,omitempty"`
-	Memory       MemoryCapabilityOptions      `json:"memory,omitempty"`
-	Rollback     RollbackCapabilityOptions    `json:"rollback,omitempty"`
-	Prevention   PreventionCapabilityOptions  `json:"prevention,omitempty"`
-	Correlation  CorrelationCapabilityOptions `json:"correlation,omitempty"`
-	LocalUpdates LocalUpdateCapabilityOptions `json:"local_updates,omitempty"`
-}
-
-type MalwareCapabilityOptions struct {
-	HashDetection     bool `json:"hash_detection,omitempty"`
-	YaraDetection     bool `json:"yara_detection,omitempty"`
-	StaticDetection   bool `json:"static_detection,omitempty"`
-	ExecutionBlocking bool `json:"execution_blocking,omitempty"`
-}
-
-type RansomwareCapabilityOptions struct {
-	BehaviorDetection bool `json:"behavior_detection,omitempty"`
-	Shield            bool `json:"shield,omitempty"`
-}
-
-type BehavioralCapabilityOptions struct {
-	Rules bool `json:"rules,omitempty"`
-}
-
-type ThreatIntelCapabilityOptions struct {
-	LocalIOCMatch bool `json:"local_ioc_match,omitempty"`
-}
-
-type MemoryCapabilityOptions struct {
-	Injection bool `json:"injection,omitempty"`
-	Hollowing bool `json:"hollowing,omitempty"`
-	Fileless  bool `json:"fileless,omitempty"`
-}
-
-type RollbackCapabilityOptions struct {
-	Enabled bool `json:"enabled,omitempty"`
-}
-
-type PreventionCapabilityOptions struct {
-	Enabled bool `json:"enabled,omitempty"`
-}
-
-type CorrelationCapabilityOptions struct {
-	OpenSearchTimeWindow bool `json:"opensearch_time_window,omitempty"`
-}
-
-type LocalUpdateCapabilityOptions struct {
-	EnableHotReload bool `json:"enable_hot_reload,omitempty"`
+	Mode DetectionPreventionMode `json:"mode,omitempty"`
 }
 
 type LoggingConfig struct {
@@ -139,19 +71,28 @@ type LoggingShipConfig struct {
 	ShipIntervalSeconds int    `json:"ship_interval_seconds,omitempty"`
 }
 
-type RulesConfig struct {
-	BehavioralDir  string `json:"behavioral_dir,omitempty"`
-	MemoryDir      string `json:"memory_dir,omitempty"`
-	RansomwareDir  string `json:"ransomware_dir,omitempty"`
-	YaraDir        string `json:"yara_dir,omitempty"`
-	HashesFile     string `json:"hashes_file,omitempty"`
-	ThreatIntelDir string `json:"threatintel_dir,omitempty"`
+// Detection is the safe default. Prevention requires an explicit mode change.
+func defaults() Config {
+	return Config{
+		MaxCPUCores:              1,
+		ExecutionWatchPaths:      []string{"/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/opt", "/tmp", "/var/tmp", "/home"},
+		EnrollmentPath:           "/api/v1/agents/enroll",
+		HeartbeatPath:            "/api/v1/agents/heartbeat",
+		CommandsPath:             "/api/v1/agents/commands",
+		PolicyID:                 "default-endpoint",
+		StatePath:                "/var/lib/xdr-agent/state.json",
+		EnrollIntervalSeconds:    30,
+		HeartbeatIntervalSeconds: 30,
+		RequestTimeoutSeconds:    10,
+		DetectionPrevention:      DetectionPreventionConfig{Mode: ModeDetect},
+		Logging:                  LoggingConfig{Level: "INFO", Ship: LoggingShipConfig{Enabled: true}},
+	}
 }
 
 // LoadRaw reads a config file and unmarshals it without validation.
 // Useful for applying CLI overrides before saving back.
 func LoadRaw(path string) (Config, error) {
-	var cfg Config
+	cfg := defaults()
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return cfg, fmt.Errorf("read config %s: %w", path, err)
@@ -163,7 +104,7 @@ func LoadRaw(path string) (Config, error) {
 }
 
 func Load(path string) (Config, error) {
-	var cfg Config
+	cfg := defaults()
 	// Read the config file
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -176,6 +117,9 @@ func Load(path string) (Config, error) {
 	}
 
 	// Validate required fields and set defaults
+	if cfg.MaxCPUCores < 0 {
+		return cfg, fmt.Errorf("max_cpu_cores must be >= 0")
+	}
 	if cfg.ControlPlaneURL == "" {
 		return cfg, fmt.Errorf("control_plane_url is required")
 	}
@@ -212,18 +156,11 @@ func Load(path string) (Config, error) {
 	}
 
 	setLoggingDefaults(&cfg)
-	setRulePathDefaults(&cfg)
-	setDefensePostureDefaults(&cfg)
 
 	// Ensure the "state_path" directory exists and create state directory if missing
 	dir := filepath.Dir(cfg.StatePath)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return cfg, fmt.Errorf("create state dir %s: %w", dir, err)
-	}
-
-	postureDir := filepath.Dir(cfg.DefensePosturePath)
-	if err := os.MkdirAll(postureDir, 0o750); err != nil {
-		return cfg, fmt.Errorf("create Defense Posture state dir %s: %w", postureDir, err)
 	}
 
 	return cfg, nil
@@ -241,54 +178,6 @@ func setLoggingDefaults(cfg *Config) {
 	}
 }
 
-func setRulePathDefaults(cfg *Config) {
-	if cfg.Rules.BehavioralDir == "" {
-		cfg.Rules.BehavioralDir = "/etc/xdr-agent/rules/behavioral"
-	}
-	if cfg.Rules.MemoryDir == "" {
-		cfg.Rules.MemoryDir = "/etc/xdr-agent/rules/memory"
-	}
-	if cfg.Rules.RansomwareDir == "" {
-		cfg.Rules.RansomwareDir = "/etc/xdr-agent/rules/ransomware"
-	}
-	if cfg.Rules.YaraDir == "" {
-		cfg.Rules.YaraDir = "/etc/xdr-agent/rules/malware/yara"
-	}
-	if cfg.Rules.HashesFile == "" {
-		cfg.Rules.HashesFile = "/etc/xdr-agent/rules/malware/hashes"
-	}
-	if cfg.Rules.ThreatIntelDir == "" {
-		cfg.Rules.ThreatIntelDir = "/etc/xdr-agent/rules/threatintel"
-	}
-}
-
-func setDefensePostureDefaults(cfg *Config) {
-	if cfg.DefensePosturePath == "" {
-		cfg.DefensePosturePath = DefaultDefensePosturePath
-	}
-	if cfg.DefensePostureAckPath == "" {
-		cfg.DefensePostureAckPath = DefaultDefensePostureAckPath
-	}
-	if cfg.YaraRolloutAckPath == "" {
-		cfg.YaraRolloutAckPath = DefaultYaraRolloutAckPath
-	}
-	if cfg.DefensePosturePollIntervalSeconds <= 0 {
-		cfg.DefensePosturePollIntervalSeconds = DefaultDefensePosturePollIntervalSec
-	}
-	if cfg.YaraRuleStatusPath == "" {
-		cfg.YaraRuleStatusPath = DefaultYaraRuleStatusPath
-	}
-	if cfg.YaraRuleInventoryPath == "" {
-		cfg.YaraRuleInventoryPath = "/api/xdr-defense/yara-rules/inventory"
-	}
-	if cfg.YaraBundleSyncIntervalSeconds <= 0 {
-		cfg.YaraBundleSyncIntervalSeconds = 5
-	}
-	if cfg.YaraInventoryCheckIntervalSeconds <= 0 {
-		cfg.YaraInventoryCheckIntervalSeconds = 300 // 5 minutes
-	}
-}
-
 // Save writes the config back to the given path as indented JSON.
 func Save(path string, cfg Config) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -296,8 +185,21 @@ func Save(path string, cfg Config) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o640); err != nil {
+	// Enrollment tokens must never inherit the sample config's read permissions.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".xdr-agent-config-*")
+	if err != nil {
+		return fmt.Errorf("create config file: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close config %s: %w", path, err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replace config %s: %w", path, err)
 	}
 	return nil
 }
@@ -311,6 +213,9 @@ func (c Config) RequestTimeout() time.Duration {
 }
 
 func (c Config) HeartbeatInterval() time.Duration {
+	if c.HeartbeatIntervalSeconds > 0 {
+		return time.Duration(c.HeartbeatIntervalSeconds) * time.Second
+	}
 	return 30 * time.Second
 }
 
@@ -320,22 +225,6 @@ func (c Config) HeartbeatInterval() time.Duration {
 func (c Config) CommandPollInterval() time.Duration {
 	if c.CommandPollIntervalSeconds > 0 {
 		return time.Duration(c.CommandPollIntervalSeconds) * time.Second
-	}
-	return 5 * time.Second
-}
-
-func (c Config) DefensePosturePollInterval() time.Duration {
-	if c.DefensePosturePollIntervalSeconds > 0 {
-		return time.Duration(c.DefensePosturePollIntervalSeconds) * time.Second
-	}
-	return DefaultDefensePosturePollIntervalSec * time.Second
-}
-
-// YaraBundleSyncInterval returns how often the agent polls for signed YARA bundles.
-// This decouples YARA rollout reaction time from the slower defense posture poll loop.
-func (c Config) YaraBundleSyncInterval() time.Duration {
-	if c.YaraBundleSyncIntervalSeconds > 0 {
-		return time.Duration(c.YaraBundleSyncIntervalSeconds) * time.Second
 	}
 	return 5 * time.Second
 }
@@ -357,22 +246,20 @@ func (c Config) TelemetryEndpointPath() string {
 	return "/api/v1/agents/telemetry"
 }
 
-// TelemetryInterval returns the collection interval for telemetry metrics.
+// TelemetryInterval bounds /proc polling even when an older config requests faster scans.
 func (c Config) TelemetryInterval() time.Duration {
-	if c.TelemetryIntervalSeconds > 0 {
+	if c.TelemetryIntervalSeconds >= 5 {
 		return time.Duration(c.TelemetryIntervalSeconds) * time.Second
 	}
-	return 60 * time.Second
+	return 5 * time.Second
 }
 
-// TelemetryShipInterval returns the maximum linger time before the shipper
-// flushes buffered events. Events are also shipped immediately when the
-// buffer receives new data, so this is effectively a ceiling.
+// TelemetryShipInterval controls periodic batch delivery.
 func (c Config) TelemetryShipInterval() time.Duration {
 	if c.TelemetryShipIntervalSeconds > 0 {
 		return time.Duration(c.TelemetryShipIntervalSeconds) * time.Second
 	}
-	return 1 * time.Second
+	return 30 * time.Second
 }
 
 // SecurityBaseURL returns the base URL for shipping security-classified events.
@@ -414,14 +301,6 @@ func (c Config) LogsBaseURL() string {
 	return c.ControlPlaneURL
 }
 
-// YaraInventoryCheckInterval returns the interval for periodic YARA rule inventory reporting.
-func (c Config) YaraInventoryCheckInterval() time.Duration {
-	if c.YaraInventoryCheckIntervalSeconds > 0 {
-		return time.Duration(c.YaraInventoryCheckIntervalSeconds) * time.Second
-	}
-	return 5 * time.Minute
-}
-
 func (c Config) LogsEndpointPath() string {
 	if c.Logging.Ship.Path != "" {
 		return c.Logging.Ship.Path
@@ -433,5 +312,5 @@ func (c Config) LogsShipInterval() time.Duration {
 	if c.Logging.Ship.ShipIntervalSeconds > 0 {
 		return time.Duration(c.Logging.Ship.ShipIntervalSeconds) * time.Second
 	}
-	return 2 * time.Second
+	return 30 * time.Second
 }
