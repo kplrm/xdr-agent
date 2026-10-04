@@ -95,6 +95,7 @@ func NewFileAccessCollector(
 
 // ── capability.Capability interface ──────────────────────────────────────────
 
+// Keep health separate even though emitted events share the file module.
 func (a *FileAccessCollector) Name() string { return "telemetry.file.access" }
 
 func (a *FileAccessCollector) Init(_ capability.Dependencies) error {
@@ -340,7 +341,7 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 		Category:      "file",
 		Kind:          "event",
 		Severity:      events.SeverityHigh,
-		Module:        "telemetry.file.access",
+		Module:        "telemetry.file",
 		AgentID:       a.agentID,
 		Hostname:      a.hostname,
 		MitreTactic:   "Credential Access",

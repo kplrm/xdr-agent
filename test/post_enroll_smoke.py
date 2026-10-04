@@ -52,6 +52,13 @@ with tempfile.TemporaryDirectory(prefix="xdr-post-enroll-") as temp:
     root = Path(temp)
     binary = root / "xdr-agent"
     subprocess.run([os.environ.get("GO", "go"), "build", "-o", str(binary), "./cmd/xdr-agent"], check=True)
+    compiled = root / "core.yarc"
+    subprocess.run(["yarac", "internal/detection/malware/bundle/linux.yar", str(compiled)], check=True)
+    self_scan = subprocess.run(["yara", "-C", "-a", "5", str(compiled), str(binary)],
+                               text=True, capture_output=True, check=True)
+    if self_scan.stdout.strip():
+        raise SystemExit("Agent binary matches its own YARA bundle: " +
+                         ", ".join(self_scan.stdout.splitlines()[:3]))
     server = HTTPServer(("127.0.0.1", 0), Coordinator)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     config = root / "config.json"
@@ -66,6 +73,7 @@ with tempfile.TemporaryDirectory(prefix="xdr-post-enroll-") as temp:
         "logging": {"ship": {"enabled": False}},
     }))
     with (root / "agent.log").open("w+") as log:
+        usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
         agent = subprocess.Popen([str(binary), "run", "--config", str(config)],
                                  stdout=log, stderr=subprocess.STDOUT,
                                  start_new_session=True)
@@ -80,7 +88,11 @@ with tempfile.TemporaryDirectory(prefix="xdr-post-enroll-") as temp:
             workload_sent = False
             while time.monotonic() - started < 12:
                 if agent.poll() is not None:
-                    failure = f"Agent exited early: {agent.returncode}"
+                    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+                    used = usage.ru_utime + usage.ru_stime - usage_before.ru_utime - usage_before.ru_stime
+                    failure = (f"Agent exited early: {agent.returncode} "
+                               f"(last sampled CPU={agent_cpu + child_cpu:.2f}s, "
+                               f"reaped children CPU={used:.2f}s)")
                     break
                 agent_cpu, child_cpu = cpu_seconds(agent.pid)
                 if agent_cpu + child_cpu > 4:

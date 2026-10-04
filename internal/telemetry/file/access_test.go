@@ -3,9 +3,12 @@
 package file
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
+
+	"xdr-agent/internal/events"
 )
 
 func TestShouldEmitPerPathDebounce(t *testing.T) {
@@ -40,5 +43,26 @@ func TestShouldEmitBurstWindowCap(t *testing.T) {
 
 	if !collector.shouldEmit("/etc/ssh/new-window", base.Add(fileAccessBurstWindow+100*time.Millisecond)) {
 		t.Fatalf("expected event to emit after burst window reset")
+	}
+}
+
+func TestAccessEventUsesFileModuleAndAccessType(t *testing.T) {
+	pipeline := events.NewPipeline(2)
+	received := make(chan events.Event, 1)
+	pipeline.Subscribe(func(event events.Event) { received <- event })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { pipeline.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	collector := NewFileAccessCollector(pipeline, "agent", "host", []string{"/etc/shadow"})
+	collector.emitAccessEvent("/etc/shadow")
+	select {
+	case event := <-received:
+		if event.Module != "telemetry.file" || event.Type != "file.access" {
+			t.Fatalf("access event module/type = %q/%q", event.Module, event.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("access event was not dispatched")
 	}
 }

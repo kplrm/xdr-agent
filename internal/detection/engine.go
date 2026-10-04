@@ -88,7 +88,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	ctx, e.cancel = context.WithCancel(ctx)
 	e.pipeline.Subscribe(func(event events.Event) {
-		if event.Kind != "event" || (event.Category != "process" && event.Category != "file") || strings.HasSuffix(event.Type, ".end") || event.Module == "telemetry.file.access" {
+		if !shouldScanEvent(event) {
 			return
 		}
 		select {
@@ -177,6 +177,13 @@ func (e *Engine) Start(ctx context.Context) error {
 	log.Print("execution blocking: directory watch setup complete")
 	return nil
 }
+
+// Opening or reading a file alone does not warrant another YARA scan.
+func shouldScanEvent(event events.Event) bool {
+	return event.Kind == "event" && (event.Category == "process" || event.Category == "file") &&
+		!strings.HasSuffix(event.Type, ".end") && event.Type != "file.access"
+}
+
 func (e *Engine) Close() error {
 	if e.cancel != nil {
 		e.cancel()

@@ -18,7 +18,7 @@ The supported runtime collects process, file, and network telemetry and protects
 
 ## Protection and content
 
-The release build selects explicitly Linux-targeted YARA Forge Core rules and their compatible dependencies, excluding Windows and other incompatible rules. Generated source is embedded into the binary so protection does not depend on a rule download at enrollment. The source release and filtered digest identify the installed inventory.
+The release build selects explicitly Linux-targeted YARA Forge Core rules and their compatible dependencies, excluding Windows and other incompatible rules. Generated source and catalog are embedded in compressed form, then expanded locally; this prevents the Agent executable from matching its own rule text while keeping protection independent of rule downloads. The source release and filtered digest identify the installed inventory.
 
 YARA compilation and scanning use the native `yarac` and `yara` executables. Initialization fails visibly if the installed scanner or rules cannot be loaded. Process/file telemetry drives scanning; fanotify execution permission events allow decisions before executable launch under explicitly configured directories. The event reader starts before any directory marks are installed and stays active during watch refresh. A YARA match can deny execution or terminate a matching running process after verifying its identity. Detection is the local default; prevention must be selected explicitly. Two execution scan workers share a bounded queue. Each permission request has a 500 ms deadline from kernel delivery; overload, timeout, or response failure allows execution, disables fanotify blocking until restart, and reports degraded health. Directory roots are counted before any blocking mark is installed; an oversized tree disables pre-execution blocking while detection and verified process termination continue.
 
@@ -27,8 +27,7 @@ Heartbeat metadata reports installed source/version/digest, rule count, mode, an
 ## Telemetry
 
 - `telemetry.process`: procfs snapshots, process lifecycle, executable and parent context.
-- `telemetry.file`: inotify plus periodic integrity rescans of selected critical configuration paths; broad binary and package directories are excluded from the startup baseline, and scans pause briefly between 16-file batches.
-- `telemetry.file.access`: access events for sensitive paths.
+- `telemetry.file`: integrity changes from inotify and periodic rescans, plus read/open events for sensitive paths. `event.type` separates `file.access` from changes; the access watcher has its own health and rate limits. Broad binary and package directories are excluded from the startup baseline, and scans pause briefly between 16-file batches.
 - `telemetry.network`: procfs connection snapshots and process attribution.
 - `telemetry.dns`: DNS traffic capture; requires packet capture privileges.
 

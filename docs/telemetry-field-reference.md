@@ -33,10 +33,11 @@ The following modules own their payload structure:
 | Module | Responsibility |
 |---|---|
 | `telemetry.process` | process lifecycle and execution context |
-| `telemetry.file` | integrity monitoring |
-| `telemetry.file.access` | sensitive file access |
+| `telemetry.file` | file integrity changes and sensitive file access; `event.type` distinguishes the actions |
 | `telemetry.network` | connection telemetry |
 | `telemetry.dns` | DNS activity |
+
+The access watcher remains a separate collector with health key `telemetry.file.access`, so a failed access watch does not hide the integrity monitor’s status. Its events use `event.module=telemetry.file` and `event.type=file.access`; integrity events use types such as `file.modified`.
 
 Detection and prevention emit additional modules such as:
 

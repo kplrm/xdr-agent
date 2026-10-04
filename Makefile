@@ -77,7 +77,7 @@ clean:
 # Every package regenerates the platform bundle from the supplied local snapshot.
 YARA_SOURCE ?= yara-forge-core/yara-rules-core.yar
 
-# bundle_yara.py filters Linux rules, and writes internal/detection/malware/bundle/{linux.yar,catalog.json}
+# bundle_yara.py filters Linux rules and embeds compressed source and catalog to avoid self-matches.
 rules:
 	python3 tools/bundle_yara.py --source "$(YARA_SOURCE)" --platform linux
 

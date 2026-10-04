@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build a reproducible Linux-only release bundle from the local YARA Forge Core file."""
 import argparse
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -137,8 +138,12 @@ def main():
     source = args.source.read_text()
     content, catalog = build(source, args.platform)
     args.output.mkdir(parents=True, exist_ok=True)
+    catalog_text = json.dumps(catalog, indent=2) + '\n'
     (args.output / 'linux.yar').write_text(content)
-    (args.output / 'catalog.json').write_text(json.dumps(catalog, indent=2) + '\n')
+    (args.output / 'catalog.json').write_text(catalog_text)
+    # Embed compressed bytes: raw signatures inside the Agent match their own rules.
+    (args.output / 'linux.yar.gz').write_bytes(gzip.compress(content.encode(), mtime=0))
+    (args.output / 'catalog.json.gz').write_bytes(gzip.compress(catalog_text.encode(), mtime=0))
     print(f"Bundled {catalog['rule_count']} Linux rules ({catalog['rules_sha256']})")
 
 
