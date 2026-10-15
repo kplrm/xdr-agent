@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+# Serialize releases so two pushes cannot publish the same VERSION concurrently.
+concurrency:
+  group: xdr-agent-release
+  cancel-in-progress: false
+
 # Opt into Node.js 24 now to silence the Node.js 20 deprecation warnings from
 # actions/checkout, actions/setup-go, actions/upload-artifact, etc.
 # Remove once those actions ship native Node.js 24 support (expected mid-2026).
@@ -28,7 +33,13 @@ jobs:
 
       - name: Read VERSION file
         id: v
-        run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION=$(cat VERSION)
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || {
+            echo 'VERSION must contain a release version, for example 0.4.4.' >&2
+            exit 1
+          }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check if release tag already exists
         id: tag
@@ -41,17 +52,8 @@ jobs:
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Stage 2 — Build & smoke-test all four target combinations.
-  #
-  #   OS      × arch   package   test container
-  #   ──────────────────────────────────────────
-  #   Debian    amd64  .deb      debian:stable-slim  (native)
-  #   Debian    arm64  .deb      debian:stable-slim  (QEMU)
-  #   CentOS    amd64  .rpm      almalinux:9         (native)
-  #   CentOS    arm64  .rpm      almalinux:9         (QEMU)
-  #
-  # ALL four jobs must pass before the release stage is allowed to run.
-  # fail-fast: true means a single failure cancels the other three immediately.
+  # Stage 2 — Freeze one rules snapshot, then build and test Debian packages
+  # for AMD64 and ARM64. Both architectures must pass before publication.
   # ────────────────────────────────────────────────────────────────────────────
   rules:
     name: Freeze latest Forge Core for all release targets
@@ -71,46 +73,17 @@ jobs:
           retention-days: 1
 
   build-test:
-    name: "[${{ matrix.os }}/${{ matrix.arch }}] build & smoke-test"
+    name: "[Debian/${{ matrix.arch }}] build & smoke-test"
     needs: [version, rules]
     if: needs.version.outputs.tag_exists == 'false'
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
 
     strategy:
       fail-fast: true
       matrix:
-        include:
-          # ── Debian / x86_64 ────────────────────────────────────────────────
-          - os: debian
-            arch: amd64
-            pkg_type: deb
-            pkg_install: "apt-get update -qq && apt-get install -y"
-            test_image: debian:stable-slim
-            platform: linux/amd64
-
-          # ── Debian / arm64 ─────────────────────────────────────────────────
-          - os: debian
-            arch: arm64
-            pkg_type: deb
-            pkg_install: "apt-get update -qq && apt-get install -y"
-            test_image: debian:stable-slim
-            platform: linux/arm64
-
-          # ── CentOS Stream (AlmaLinux 9) / x86_64 ───────────────────────────
-          - os: centos
-            arch: amd64
-            pkg_type: rpm
-            pkg_install: "dnf install -y epel-release && dnf install -y"
-            test_image: almalinux:9
-            platform: linux/amd64
-
-          # ── CentOS Stream (AlmaLinux 9) / arm64 ────────────────────────────
-          - os: centos
-            arch: arm64
-            pkg_type: rpm
-            pkg_install: "dnf install -y epel-release && dnf install -y"
-            test_image: almalinux:9
-            platform: linux/arm64
+        arch: [amd64, arm64]
 
     steps:
       - uses: actions/checkout@v4
@@ -126,14 +99,6 @@ jobs:
       - run: |
           mkdir -p yara-forge-core
           cp frozen-rules/release-rules/yara-rules-core.yar yara-forge-core/yara-rules-core.yar
-      - name: Validate rules and endpoint clients
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y yara
-          make rules test build
-          make prevention-test
-          ./dist/xdr-agent check-rules
-
       # Enable QEMU binfmt_misc so the x86_64 runner can execute arm64
       # container images transparently via Docker.
       - name: Set up QEMU (arm64 only)
@@ -142,122 +107,51 @@ jobs:
         with:
           platforms: arm64
 
-      # Install host packaging tools.
-      # centos/arm64 builds its RPM inside a QEMU arm64 container so it does
-      # NOT need rpm-build on the host — only dpkg-dev + rpm (for other jobs).
-      - name: Install host packaging tools
+      - name: Install host packaging and test tools
         run: |
           sudo apt-get update -qq
-          if [ "${{ matrix.pkg_type }}" = "deb" ] || [ "${{ matrix.arch }}" = "amd64" ]; then
-            sudo apt-get install -y dpkg-dev rpm
-          else
-            sudo apt-get install -y dpkg-dev
-          fi
+          sudo apt-get install -y dpkg-dev yara
 
-      # Build the package.
-      #
-      # centos/arm64 is a special case: rpmbuild --target aarch64 fails on an
-      # x86_64 host because there is no aarch64 RPM toolchain installed. The
-      # fix is to run rpmbuild *natively* inside a QEMU-emulated arm64
-      # AlmaLinux container. We:
-      #   1. Cross-compile the Go binary on the host (CGO_ENABLED=0 + GOARCH)
-      #   2. Mount the binary + sources into an arm64 almalinux:9 container
-      #   3. Run rpmbuild inside the container — it sees itself as aarch64
-      #
-      # All other combinations call the existing packaging script directly.
-      - name: "Build ${{ matrix.pkg_type }} package — ${{ matrix.os }}/${{ matrix.arch }}"
+      # The packaging script runs regression/prevention tests before compiling
+      # the target binary. VERSION also becomes its reported runtime version.
+      - name: Build Debian package
         run: |
-          VERSION=$(cat VERSION)
-          if [ "${{ matrix.pkg_type }}" = "rpm" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
-            # Step 1: cross-compile binary on the x86_64 host
-            mkdir -p dist
-            CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-              -trimpath \
-              -ldflags "-s -w -X xdr-agent/internal/buildinfo.Version=${VERSION}" \
-              -o dist/xdr-agent \
-              ./cmd/xdr-agent
+          test "$(cat VERSION)" = "$VERSION"
+          bash packaging/deb/build.sh "$VERSION" "${{ matrix.arch }}"
 
-            # Step 2: build RPM inside native arm64 container via QEMU
-            # rpmbuild sees itself running on aarch64 — no --target hacks needed
-            docker run --rm --platform linux/arm64 \
-              -v "${PWD}:/src:ro" \
-              -v "${PWD}/dist:/out" \
-              almalinux:9 \
-              bash -c "
-                set -euo pipefail
-                dnf install -y rpm-build >/dev/null 2>&1
-                RBDIR=/tmp/rpmbuild
-                mkdir -p \${RBDIR}/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-                install -m 0755 /out/xdr-agent                        \${RBDIR}/SOURCES/xdr-agent
-                install -m 0644 /src/config/config.default.json               \${RBDIR}/SOURCES/config.json
-                install -m 0644 /src/systemd/xdr-agent.service        \${RBDIR}/SOURCES/xdr-agent.service
-                install -m 0644 /src/LICENSE                          \${RBDIR}/SOURCES/LICENSE
-                install -m 0644 /src/AUTHORS                          \${RBDIR}/SOURCES/AUTHORS
-                sed -e 's/@VERSION@/${VERSION}/g' -e 's/@RPM_ARCH@/aarch64/g' \
-                  /src/packaging/rpm/xdr-agent.spec.template > \${RBDIR}/SPECS/xdr-agent.spec
-                rpmbuild --define '_topdir '\${RBDIR} -bb \${RBDIR}/SPECS/xdr-agent.spec >/dev/null
-                find \${RBDIR}/RPMS -name '*.rpm' -exec cp {} /out/ \;
-                echo 'RPM built:' && find /out -maxdepth 1 -name '*.rpm'
-              "
-          else
-            bash packaging/${{ matrix.pkg_type }}/build.sh "${VERSION}" "${{ matrix.arch }}"
-          fi
-
-      # Resolve the exact path of the built package so later steps don't need
-      # to re-derive it.
-      - name: Locate built package
+      - name: Verify package version and architecture
         id: pkg
         run: |
-          VERSION=$(cat VERSION)
-          if [ "${{ matrix.pkg_type }}" = "deb" ]; then
-            PKG_PATH=$(ls dist/xdr-agent_${VERSION}_${{ matrix.arch }}.deb)
-          else
-            # For centos/arm64 the RPM is in dist/ (copied by the container).
-            # For centos/amd64 it is also copied to dist/ by build.sh.
-            PKG_PATH=$(find dist -maxdepth 1 -name "*.rpm" | head -1)
-          fi
-          if [ -z "${PKG_PATH}" ]; then
-            echo "ERROR: built package not found in dist/" >&2
-            ls -la dist/ >&2
-            exit 1
-          fi
-          echo "path=${PKG_PATH}" >> "$GITHUB_OUTPUT"
-          echo "Resolved package: ${PKG_PATH}"
+          PKG_PATH="dist/xdr-agent_${VERSION}_${{ matrix.arch }}.deb"
+          test "$(dpkg-deb -f "$PKG_PATH" Version)" = "$VERSION"
+          test "$(dpkg-deb -f "$PKG_PATH" Architecture)" = "${{ matrix.arch }}"
+          echo "path=$PKG_PATH" >> "$GITHUB_OUTPUT"
 
-      # Install the package inside the exact target container and run
-      # `xdr-agent version` to verify the binary is functional.
-      # Install declared dependencies and compile the full bundled ruleset.
-      - name: "Smoke test — ${{ matrix.os }}/${{ matrix.arch }}"
+      # Install dependencies and compile the full ruleset on the target CPU.
+      - name: Smoke test Debian package
         run: |
-          cp "${{ steps.pkg.outputs.path }}" dist/smoke-test-pkg.${{ matrix.pkg_type }}
-          docker run --rm \
-            --platform ${{ matrix.platform }} \
-            -v "${PWD}/dist:/pkg:ro" \
-            ${{ matrix.test_image }} \
-            sh -c "
-              set -e
-              echo '==> Installing package'
-              ${{ matrix.pkg_install }} /pkg/smoke-test-pkg.${{ matrix.pkg_type }}
-              echo '==> Running: xdr-agent version'
-              /usr/bin/xdr-agent version
+          cp "${{ steps.pkg.outputs.path }}" dist/smoke-test-pkg.deb
+          docker run --rm --platform "linux/${{ matrix.arch }}" \
+            -e EXPECTED_VERSION="$VERSION" \
+            -v "${PWD}/dist:/pkg:ro" debian:stable-slim \
+            sh -ec '
+              apt-get update -qq
+              apt-get install -y /pkg/smoke-test-pkg.deb
+              test "$(/usr/bin/xdr-agent version)" = "$EXPECTED_VERSION"
               /usr/bin/xdr-agent check-rules
-              echo '==> Smoke test PASSED'
-            "
+            '
 
       # Upload the built package so the release job can attach it to the
       # GitHub Release without rebuilding.
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pkg-${{ matrix.os }}-${{ matrix.arch }}
+          name: pkg-${{ matrix.arch }}
           path: ${{ steps.pkg.outputs.path }}
           retention-days: 1
 
-      # Upload the cross-compiled binary once per arch (only the debian job
-      # does this; centos produces the identical binary for the same arch).
-      # The release job uses these to create the .tar.gz archives.
+      # Reuse the tested binary to create the release tarball.
       - name: Upload binary artifact
-        if: matrix.os == 'debian'
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.arch }}
@@ -268,7 +162,7 @@ jobs:
   # Stage 3 — Publish the GitHub Release.
   #
   # This job runs ONLY when every build-test matrix entry is green.
-  # If any of the four combinations failed, this job is skipped and GitHub
+  # If either architecture failed, this job is skipped and GitHub
   # marks the overall workflow run as failed — no partial releases.
   # ────────────────────────────────────────────────────────────────────────────
   release:
@@ -277,6 +171,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -295,7 +191,6 @@ jobs:
       # Build tarballs from the pre-built, already-tested binaries.
       - name: Create binary tarballs
         run: |
-          VERSION=$(cat VERSION)
           for arch in amd64 arm64; do
             SRC="release-artifacts/binary-${arch}/xdr-agent"
             TAR="release-artifacts/xdr-agent_${VERSION}_linux_${arch}.tar.gz"
@@ -310,10 +205,10 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${{ needs.version.outputs.version }}"
+          git tag "v${{ needs.version.outputs.version }}" "$GITHUB_SHA"
           git push origin "v${{ needs.version.outputs.version }}"
 
-      # Publish the GitHub Release, attaching all four packages and both tarballs.
+      # Publish the GitHub Release, attaching both Debian packages and binary tarballs.
       # generate_release_notes: true auto-populates from merged PR titles.
       # fail_on_unmatched_files: true prevents a silent empty-files release.
       - name: Publish GitHub Release
@@ -327,6 +222,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-artifacts/**/*.deb
-            release-artifacts/**/*.rpm
             release-artifacts/**/*.tar.gz
             release-artifacts/release-rules/internal/detection/malware/bundle/catalog.json

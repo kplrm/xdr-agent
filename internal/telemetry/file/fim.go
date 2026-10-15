@@ -13,7 +13,7 @@
 // Events are ECS-compatible (file.*, fim.*) and indexed in OpenSearch as
 // event.category="file" with event.kind="event".
 //
-// Supported Linux distributions: Debian/Ubuntu, RedHat/CentOS (via DefaultLinuxCriticalPaths).
+// Supported Linux distributions: Debian/Ubuntu (via DefaultLinuxCriticalPaths).
 package file
 
 import (
@@ -522,14 +522,7 @@ func (f *FIMCollector) scanLoop(ctx context.Context) {
 // runBaselineScan walks all watched paths and populates BoltDB without emitting
 // events.  Files already in the DB are left unchanged (supports warm restarts).
 func (f *FIMCollector) runBaselineScan(ctx context.Context) {
-	distroName := "unknown"
-	switch DetectDistro() {
-	case DistroDebian:
-		distroName = "debian"
-	case DistroRHEL:
-		distroName = "rhel"
-	}
-	log.Printf("fim: starting initial baseline scan (%d watch paths, distro=%s)", len(f.watchPaths), distroName)
+	log.Printf("fim: starting initial baseline scan (%d watch paths)", len(f.watchPaths))
 	count := 0
 	skipped := 0
 	processed := 0

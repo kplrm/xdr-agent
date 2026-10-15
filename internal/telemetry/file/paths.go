@@ -3,19 +3,10 @@ package file
 // paths.go defines the default set of filesystem paths that the FIM collector
 // monitors on Linux.
 //
-// DefaultLinuxCriticalPaths() detects the running distribution at runtime and
-// returns the combined set of shared + distro-specific paths, so the same
-// binary works correctly on both Debian/Ubuntu and RedHat/CentOS/Fedora without
-// producing noisy "no such file" log messages for inapplicable paths.
+// DefaultLinuxCriticalPaths returns shared and Debian/Ubuntu paths.
 //
 // Paths that do not exist at scan time are silently skipped — non-existence is
 // not an error for optional distro-specific entries.
-
-import (
-	"bufio"
-	"os"
-	"strings"
-)
 
 // WatchPath describes a single path to monitor and whether to watch it
 // recursively (subdirectory contents included).
@@ -28,74 +19,9 @@ type WatchPath struct {
 	Recursive bool
 }
 
-// Distro identifies the Linux distribution family.
-type Distro int
-
-const (
-	DistroUnknown Distro = iota
-	DistroDebian         // Debian, Ubuntu, Linux Mint, Pop!_OS, …
-	DistroRHEL           // RHEL, CentOS, Fedora, Rocky, AlmaLinux, …
-)
-
-// DetectDistro reads /etc/os-release (or fallback indicator files) and
-// returns the distribution family.  Falls back to DistroUnknown if the
-// distribution cannot be determined.
-func DetectDistro() Distro {
-	// Primary: /etc/os-release (systemd standard, present on all modern distros)
-	if d := distroFromOSRelease("/etc/os-release"); d != DistroUnknown {
-		return d
-	}
-	// Fallback indicator files
-	if fileExists("/etc/debian_version") {
-		return DistroDebian
-	}
-	if fileExists("/etc/redhat-release") || fileExists("/etc/centos-release") || fileExists("/etc/fedora-release") {
-		return DistroRHEL
-	}
-	return DistroUnknown
-}
-
-func distroFromOSRelease(path string) Distro {
-	f, err := os.Open(path)
-	if err != nil {
-		return DistroUnknown
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Check both ID= and ID_LIKE= so derivatives are matched correctly.
-		if !strings.HasPrefix(line, "ID=") && !strings.HasPrefix(line, "ID_LIKE=") {
-			continue
-		}
-		val := strings.ToLower(strings.Trim(strings.SplitN(line, "=", 2)[1], `"' `))
-		// Debian family
-		if containsAny(val, "debian", "ubuntu", "mint", "pop", "elementary", "kali", "parrot", "deepin", "raspbian") {
-			return DistroDebian
-		}
-		// RHEL family
-		if containsAny(val, "rhel", "centos", "fedora", "rocky", "alma", "oracle", "amzn", "scientific") {
-			return DistroRHEL
-		}
-	}
-	return DistroUnknown
-}
-
-// DefaultLinuxCriticalPaths returns the FIM watch-list appropriate for the
-// running distribution.  Detects the distro once at call time; the result is
-// stable for the lifetime of the process.
+// DefaultLinuxCriticalPaths returns the default Debian/Ubuntu FIM watch-list.
 func DefaultLinuxCriticalPaths() []WatchPath {
-	shared := sharedCriticalPaths()
-	switch DetectDistro() {
-	case DistroDebian:
-		return append(shared, debianCriticalPaths()...)
-	case DistroRHEL:
-		return append(shared, rhelCriticalPaths()...)
-	default:
-		// Unknown distro: return both sets; non-existent paths are skipped silently.
-		return append(shared, append(debianCriticalPaths(), rhelCriticalPaths()...)...)
-	}
+	return append(sharedCriticalPaths(), debianCriticalPaths()...)
 }
 
 // sharedCriticalPaths returns paths that exist on every supported Linux distro.
@@ -210,58 +136,4 @@ func debianCriticalPaths() []WatchPath {
 		// ── AppArmor profiles (Debian/Ubuntu MAC) ───────────────────────────
 		{Path: "/etc/apparmor.d", Recursive: true},
 	}
-}
-
-// rhelCriticalPaths returns paths specific to RHEL, CentOS, Fedora, and derivatives.
-func rhelCriticalPaths() []WatchPath {
-	return []WatchPath{
-		// ── PAM modules ─────────────────────────────────────────────────────
-		{Path: "/lib64/security", Recursive: false},
-
-		// ── Shell init files ────────────────────────────────────────────────
-		{Path: "/etc/bashrc", Recursive: false},
-		{Path: "/root/.bash_profile", Recursive: false},
-		{Path: "/root/.bash_login", Recursive: false},
-
-		// ── Dynamic linker preload ───────────────────────────────────────────
-		{Path: "/etc/ld.so.preload", Recursive: false},
-
-		// ── Boot loader (GRUB2 on RHEL) ─────────────────────────────────────
-		{Path: "/boot/grub2", Recursive: false},
-		{Path: "/boot/grub2/grub.cfg", Recursive: false},
-
-		// ── Cron (RHEL location) ─────────────────────────────────────────────
-		{Path: "/var/spool/cron", Recursive: true},
-
-		// ── SELinux policy ───────────────────────────────────────────────────
-		{Path: "/etc/selinux/config", Recursive: false},
-		{Path: "/etc/selinux", Recursive: false},
-
-		// ── YUM/DNF package manager (supply chain) ───────────────────────────
-		// T1195
-		{Path: "/etc/yum.repos.d", Recursive: true},
-		{Path: "/etc/yum.conf", Recursive: false},
-		{Path: "/etc/dnf/dnf.conf", Recursive: false},
-		{Path: "/etc/dnf/plugins", Recursive: true},
-		{Path: "/etc/pki/rpm-gpg", Recursive: false},
-
-		// ── Kernel modules (RHEL path) ───────────────────────────────────────
-		{Path: "/etc/modules", Recursive: false},
-	}
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-func fileExists(path string) bool {
-	_, err := os.Lstat(path)
-	return err == nil
-}
-
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
 }

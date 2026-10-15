@@ -1,6 +1,6 @@
 # xdr-agent
 
-Linux endpoint for process, file, and network telemetry with release-bundled YARA Forge Core rules. Detection is the default: matches generate alerts without stopping execution. Check the mode in the config passed to `enroll`; enrollment copies that file into the installed service config, including an existing `prevent` setting. Set `detection_prevention.mode` to `prevent` to enable execution denial and termination of matched processes. The installed rules change with agent releases.
+Debian/Ubuntu endpoint for process, file, and network telemetry with release-bundled YARA Forge Core rules. Detection is the default: matches generate alerts without stopping execution. Check the mode in the config passed to `enroll`; enrollment copies that file into the installed service config, including an existing `prevent` setting. Set `detection_prevention.mode` to `prevent` to enable execution denial and termination of matched processes. The installed rules change with agent releases. `VERSION` selects the latest release; GitHub builds and publishes its AMD64 and ARM64 Debian packages when that version is pushed to `main`.
 
 ## Build, test, and install locally (Debian/Ubuntu, amd64)
 
@@ -14,7 +14,7 @@ sudo apt install "./dist/xdr-agent_$(cat VERSION)_amd64.deb"
 sudo /usr/bin/xdr-agent enroll '<TOKEN>' --config ./config/config.json
 ```
 
-Replace `<TOKEN>` with the token from **Coordinator → Enroll new XDR**. Enrollment reads `--config`, saves the enrolled config to `/etc/xdr-agent/config.json` without changing the source file, and starts the service. `make build` creates a binary; `make deb` packages it with the systemd unit. The agent uses the external `yara` and `yarac` programs; installing the DEB pulls in the `yara` package automatically. `make test` runs a non-root, CPU-limited post-enrollment smoke test and a bounded Docker prevention test before packaging. Without it, `make test` skips the native YARA scanner test.
+Replace `<TOKEN>` with the token from **Coordinator → Enroll new XDR Agent**. Enrollment reads `--config`, saves the enrolled config to `/etc/xdr-agent/config.json` without changing the source file, and starts the service. `make build` creates a binary; `make deb` packages it with the systemd unit. The agent uses the external `yara` and `yarac` programs; installing the DEB pulls in the `yara` package automatically. `make test` runs a non-root, CPU-limited post-enrollment smoke test and a bounded Docker prevention test before packaging. Without it, `make test` skips the native YARA scanner test.
 
 ## Operate and remove
 

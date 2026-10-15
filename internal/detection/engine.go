@@ -18,10 +18,17 @@ import (
 	"xdr-agent/internal/platform/linux"
 )
 
+type yaraScanner interface {
+	Executable() string
+	ScanFile(context.Context, string) (malware.Result, error)
+	ScanOpenFile(context.Context, *os.File) (malware.Result, error)
+	Close() error
+}
+
 type Engine struct {
 	cfg         config.Config
 	pipeline    *events.Pipeline
-	scanner     *malware.Scanner
+	scanner     yaraScanner
 	helperFiles []os.FileInfo // Avoid spawning YARA to scan its own short-lived child.
 	guard       *linux.ExecGuard
 	queue       chan events.Event
@@ -32,7 +39,7 @@ type Engine struct {
 }
 
 func NewEngine(cfg config.Config, pipeline *events.Pipeline) (*Engine, error) {
-	e := &Engine{cfg: cfg, pipeline: pipeline, queue: make(chan events.Event, 256), health: map[string]string{"yara": "disabled", "execution_blocking": "disabled"}}
+	e := &Engine{cfg: cfg, pipeline: pipeline, queue: make(chan events.Event, 256), health: map[string]string{"yara": "starting", "execution_blocking": "not_applicable"}}
 	log.Print("YARA: compiling bundled Linux rules")
 	scanner, err := malware.NewScanner()
 	if err != nil {
@@ -126,6 +133,9 @@ func (e *Engine) Start(ctx context.Context) error {
 				}
 				if result.Matched() {
 					e.emitAlert(event, path, result, false)
+				}
+				if len(e.queue) < cap(e.queue) && e.setHealth("yara", "running") {
+					log.Print("YARA scanning recovered")
 				}
 			}
 		}

@@ -1,6 +1,6 @@
 // Package upgrade handles self-upgrading the xdr-agent binary from a GitHub
-// release.  It detects the host OS family (Debian/Ubuntu vs RHEL/CentOS) and
-// architecture, downloads the appropriate package, and launches the install
+// release on Debian-based hosts. It detects the architecture, downloads the
+// appropriate Debian package, and launches the install
 // in an isolated transient systemd unit so the package manager survives the
 // service restart triggered by the package scripts.
 package upgrade
@@ -29,8 +29,7 @@ const (
 	cacheDir = "/var/cache/xdr-agent"
 )
 
-// osFamilyDebian reports whether the host is Debian/Ubuntu.  It falls back to
-// false (RPM) when /etc/os-release is unreadable or the ID_LIKE field is absent.
+// osFamilyDebian reports whether the host belongs to the supported Debian family.
 func osFamilyDebian() bool {
 	data, err := os.ReadFile("/etc/os-release")
 	if err != nil {
@@ -47,42 +46,17 @@ func osFamilyDebian() bool {
 	return false
 }
 
-// packageURL returns the GitHub download URL for the given version, OS family,
-// and CPU architecture.
-func packageURL(version string, debian bool) (string, error) {
+// packageURL returns the Debian download URL for a supported version and architecture.
+func packageURL(version, arch string) (string, error) {
 	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$`).MatchString(version) {
 		return "", fmt.Errorf("invalid release version")
 	}
-	arch := runtime.GOARCH // "amd64" or "arm64"
-
-	if debian {
-		// e.g. xdr-agent_0.3.2_amd64.deb
-		return fmt.Sprintf(
-			"%s/v%s/xdr-agent_%s_%s.deb",
-			githubReleaseBase, version, version, arch,
-		), nil
+	if arch != "amd64" && arch != "arm64" {
+		return "", fmt.Errorf("unsupported architecture: %s", arch)
 	}
-
-	// RPM uses different arch names
-	rpmArch := arch
-	switch arch {
-	case "amd64":
-		rpmArch = "x86_64"
-	case "arm64":
-		rpmArch = "aarch64"
-	}
-
-	if rpmArch == "aarch64" {
-		// ARM64 RPM was built in a QEMU almalinux:9 container
-		return fmt.Sprintf(
-			"%s/v%s/xdr-agent-%s-1.el9.%s.rpm",
-			githubReleaseBase, version, version, rpmArch,
-		), nil
-	}
-	// x86_64 RPM
 	return fmt.Sprintf(
-		"%s/v%s/xdr-agent-%s-1.%s.rpm",
-		githubReleaseBase, version, version, rpmArch,
+		"%s/v%s/xdr-agent_%s_%s.deb",
+		githubReleaseBase, version, version, arch,
 	), nil
 }
 
@@ -128,16 +102,11 @@ func download(ctx context.Context, url, dir, suffix string) (string, error) {
 // The command is launched with --no-block so this function returns
 // immediately.  The package's postinst script is responsible for re-enabling
 // and starting the service once the install completes.
-func launchInstall(pkgPath string, debian bool) error {
+func launchInstall(pkgPath string) error {
 	// Clear any leftover failed transient unit from a previous attempt.
 	_ = exec.Command("systemctl", "reset-failed", "xdr-agent-upgrade.service").Run()
 
-	var installCmd string
-	if debian {
-		installCmd = fmt.Sprintf("dpkg -i '%s' && rm -f '%s'", pkgPath, pkgPath)
-	} else {
-		installCmd = fmt.Sprintf("rpm -Uvh --force '%s' && rm -f '%s'", pkgPath, pkgPath)
-	}
+	installCmd := fmt.Sprintf("dpkg -i '%s' && rm -f '%s'", pkgPath, pkgPath)
 
 	cmd := exec.Command(
 		"systemd-run",
@@ -165,15 +134,12 @@ func launchInstall(pkgPath string, debian bool) error {
 // If any step fails the function returns an error and the agent continues
 // running on the current version.
 func Perform(ctx context.Context, version string) error {
-	debian := osFamilyDebian()
-	url, err := packageURL(version, debian)
+	if !osFamilyDebian() {
+		return fmt.Errorf("self-upgrade requires a Debian-based system")
+	}
+	url, err := packageURL(version, runtime.GOARCH)
 	if err != nil {
 		return fmt.Errorf("resolve package URL: %w", err)
-	}
-
-	suffix := ".rpm"
-	if debian {
-		suffix = ".deb"
 	}
 
 	// Ensure cache directory exists.
@@ -186,20 +152,20 @@ func Perform(ctx context.Context, version string) error {
 	defer cancel()
 
 	log.Printf("upgrade: downloading %s", url)
-	pkgPath, err := download(dlCtx, url, cacheDir, suffix)
+	pkgPath, err := download(dlCtx, url, cacheDir, ".deb")
 	if err != nil {
 		return fmt.Errorf("download package: %w", err)
 	}
 
 	// Give the file a predictable name so the transient unit command is
 	// easy to inspect in journal logs.
-	namedPath := filepath.Join(cacheDir, "xdr-agent-update"+suffix)
+	namedPath := filepath.Join(cacheDir, "xdr-agent-update.deb")
 	if err := os.Rename(pkgPath, namedPath); err != nil {
 		namedPath = pkgPath // fall back to random temp name
 	}
 
 	log.Printf("upgrade: launching install %s via transient systemd unit", namedPath)
-	if err := launchInstall(namedPath, debian); err != nil {
+	if err := launchInstall(namedPath); err != nil {
 		os.Remove(namedPath)
 		return fmt.Errorf("launch install: %w", err)
 	}

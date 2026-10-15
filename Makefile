@@ -28,7 +28,7 @@ GO := /usr/local/go/bin/go
 endif
 endif
 
-.PHONY: build rules rules-test api-test run enroll deb rpm packages clean test prevention-test vet
+.PHONY: build rules rules-test api-test run enroll deb packages clean test prevention-test vet
 
 # Generate Linux rules, check the API contract, and compile dist/xdr-agent.
 build: rules api-test
@@ -48,11 +48,7 @@ enroll: build
 deb:
 	KEEP_STAGING=$(KEEP_STAGING) bash ./packaging/deb/build.sh $(VERSION) amd64
 
-# Build an amd64 RPM package with the agent and systemd unit.
-rpm:
-	bash ./packaging/rpm/build.sh $(VERSION) amd64
-
-# Build Debian and RPM packages for amd64 and arm64 by default.
+# Build Debian packages for amd64 and arm64 by default.
 packages:
 	bash ./packaging/build_multi_arch.sh $(VERSION)
 

@@ -17,6 +17,8 @@ Enrollment sends `agent_id`, `machine_id`, `hostname`, `architecture`, `os_type`
 
 Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus `protection`: `rule_source`, `rule_version`, `rules_sha256`, `rule_count`, `platform`, `mode`, and `health` (component-to-status map). Heartbeat and command responses contain `message` and optional `pending_commands`, currently `upgrade:<version>`.
 
+Health is independent of version checks. Execution blocking is `not_applicable` in detection mode. YARA scan failures report degraded health and successful scans restore it when the scan queue is no longer full; execution-blocking failures remain separate.
+
 Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Events follow `internal/events/event.go`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
 
 ## Direct OpenSearch ingestion
@@ -50,6 +52,8 @@ The packaged systemd unit reads this file; foreground runs must export the same 
 The account can be shared across agents while their Agent IDs and hostnames stay separate. It can write all three streams without Coordinator's per-agent ownership enforcement. Revoking enrollment does **not** revoke direct writes. Changing the shared account's password affects every Agent using it: update each environment file and restart the service. When migrating, replace the old OpenSearch authentication fields in the installed config with the block above and replace the environment file's contents.
 
 Bulk operations use `create` in `xdr-agent-telemetry`, `xdr-agent-security` and `xdr-agent-logs`, with `@timestamp` and `_id=agent_id:event_id`. Both delivery paths retain failed batches and accept duplicate-ID conflicts on retry. Deduplication applies within the current backing index; a retry after rollover can duplicate an event. Other bulk errors retain the batch. Credentials are sent only to the configured API, and redirects are rejected. Regression tests: `internal/controlplane/opensearch_test.go`.
+
+The security stream contains detection alerts (currently YARA matches) and prevention actions, including action failures. It can remain empty when no such events occur. Ordinary process/file/network/DNS activity goes to telemetry; Agent diagnostic messages go to logs.
 
 Defaults: health every 30 seconds, command polling every 5 seconds, enrollment retry every 30 seconds, process/network snapshots every 5 seconds, and telemetry/security/log batches every 30 seconds. Paths, base URLs, and intervals can be overridden locally. Delivery retains a bounded in-memory queue; crash replay is future work. TLS validation is enabled by default.
 
