@@ -51,10 +51,11 @@ type ShipperConfig struct {
 // Shipper subscribes to the event pipeline and ships events to the
 // configured telemetry endpoint in compressed batches.
 type Shipper struct {
-	cfg    ShipperConfig
-	client *http.Client
-	stream string
-	apiKey string
+	cfg      ShipperConfig
+	client   *http.Client
+	stream   string
+	username string
+	password string
 
 	mu     sync.Mutex
 	buffer []events.Event

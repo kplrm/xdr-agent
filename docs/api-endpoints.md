@@ -23,19 +23,20 @@ Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Co
 
 Set `opensearch.url` to send **all telemetry, security events and runtime logs** directly to OpenSearch with gzip NDJSON `POST /_bulk`. Enrollment, heartbeats and commands still use Coordinator. An empty URL retains Coordinator event delivery; the per-topic URL overrides use the Coordinator JSON contract, not OpenSearch bulk.
 
-Requires OpenSearch **3.7+** with API keys enabled. Add this block to the installed `/etc/xdr-agent/config.json`; replace the API address and CA path:
+Requires OpenSearch **3.7+** with Security username/password authentication enabled. Add this block to the installed `/etc/xdr-agent/config.json`; replace the API address and CA path:
 
 ```json
 "opensearch": {
   "url": "https://OPENSEARCH_HOST:PORT",
-  "api_key_env": "XDR_OPENSEARCH_API_KEY",
+  "username": "xdr-agent",
+  "password_env": "XDR_OPENSEARCH_PASSWORD",
   "ca_file": "/etc/xdr-agent/opensearch-ca.pem"
 }
 ```
 
-First deploy Coordinator's data-stream support and create a restricted API key using the [bundle installation steps](https://github.com/kplrm/xdr-security#4-send-agent-events-directly-to-opensearch). Install the updated Agent package. Copy the issuing CA certificate to `ca_file`; HTTPS verifies both the certificate chain and the API hostname/IP. Leave `ca_file` empty only when the system already trusts the certificate.
+First deploy Coordinator's data-stream support and create the restricted `xdr-agent` user using the [bundle installation steps](https://github.com/kplrm/xdr-security#4-send-agent-events-directly-to-opensearch). Install the updated Agent package. Copy the issuing CA certificate to `ca_file`; HTTPS verifies both the certificate chain and the API hostname/IP. Leave `ca_file` empty only when the system already trusts the certificate.
 
-Using `sudoedit`, create `/etc/xdr-agent/opensearch.env` containing `XDR_OPENSEARCH_API_KEY='YOUR_API_TOKEN'`, then run:
+Using `sudoedit`, create `/etc/xdr-agent/opensearch.env` containing `XDR_OPENSEARCH_PASSWORD='YOUR_USER_PASSWORD'`, then run:
 
 ```bash
 sudo chmod 600 /etc/xdr-agent/opensearch.env
@@ -44,7 +45,9 @@ sudo systemctl restart xdr-agent
 sudo journalctl -u xdr-agent -f
 ```
 
-The packaged systemd unit reads this file; foreground runs must export the same variable. Requests use `Authorization: ApiKey <token>`. The API key carries its own identity and permissions; no username or password is used. Enrollment tokens are separate credentials. Revoking enrollment does **not** revoke direct writes: revoke the API key separately. Prefer a separate key per agent; each key can write all three streams without Coordinator's per-agent ownership enforcement. Replace expiring keys in the environment file and restart the service (the supplied key definition expires after 90 days).
+The packaged systemd unit reads this file; foreground runs must export the same variable. Requests use **HTTP Basic authentication over verified HTTPS**. The username defaults to `xdr-agent`; change `opensearch.username` to use another account. Keep the password out of `config.json`.
+
+The account can be shared across agents while their Agent IDs and hostnames stay separate. It can write all three streams without Coordinator's per-agent ownership enforcement. Revoking enrollment does **not** revoke direct writes. Changing the shared account's password affects every Agent using it: update each environment file and restart the service. When migrating, replace the old OpenSearch authentication fields in the installed config with the block above and replace the environment file's contents.
 
 Bulk operations use `create` in `xdr-agent-telemetry`, `xdr-agent-security` and `xdr-agent-logs`, with `@timestamp` and `_id=agent_id:event_id`. Both delivery paths retain failed batches and accept duplicate-ID conflicts on retry. Deduplication applies within the current backing index; a retry after rollover can duplicate an event. Other bulk errors retain the batch. Credentials are sent only to the configured API, and redirects are rejected. Regression tests: `internal/controlplane/opensearch_test.go`.
 

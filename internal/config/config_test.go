@@ -21,6 +21,9 @@ func TestMinimalConfigurationDefaultsToDetectionAndPeriodicDelivery(t *testing.T
 	if cfg.OpenSearch.URL != "" {
 		t.Fatal("direct delivery enabled without an API URL")
 	}
+	if cfg.OpenSearch.Username != "xdr-agent" {
+		t.Fatal("wrong default OpenSearch username")
+	}
 	if cfg.HeartbeatInterval() != 30*time.Second || cfg.TelemetryInterval() != 5*time.Second || cfg.TelemetryShipInterval() != 30*time.Second || cfg.SecurityShipInterval() != 30*time.Second || cfg.LogsShipInterval() != 30*time.Second || len(cfg.ExecutionWatchPaths) == 0 {
 		t.Fatal("wrong defaults")
 	}
@@ -67,18 +70,23 @@ func TestSaveKeepsEnrollmentTokenPrivate(t *testing.T) {
 
 func TestDirectIngestionRequiresHTTPS(t *testing.T) {
 	for _, url := range []string{"http://localhost:9200", "https://user:password@localhost:9200", "https://localhost:9200?token=secret", "https://localhost:9200/#fragment"} {
-		if err := (OpenSearchConfig{URL: url}).Validate(); err == nil {
+		if err := (OpenSearchConfig{URL: url, Username: "xdr-agent"}).Validate(); err == nil {
 			t.Errorf("invalid direct URL accepted: %s", url)
 		}
 	}
-	if err := (OpenSearchConfig{URL: "https://localhost:9200"}).Validate(); err != nil {
+	if err := (OpenSearchConfig{URL: "https://localhost:9200", Username: "custom-writer"}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if err := (OpenSearchConfig{}).Validate(); err != nil {
 		t.Fatal("Coordinator-only configuration rejected")
 	}
-	if (OpenSearchConfig{}).APIKeyVariable() != "XDR_OPENSEARCH_API_KEY" {
+	if (OpenSearchConfig{}).PasswordVariable() != "XDR_OPENSEARCH_PASSWORD" {
 		t.Fatal("wrong default credential variable")
+	}
+	for _, username := range []string{"", " ", "user:password"} {
+		if err := (OpenSearchConfig{URL: "https://localhost:9200", Username: username}).Validate(); err == nil {
+			t.Error("invalid Basic-auth username accepted")
+		}
 	}
 }
 

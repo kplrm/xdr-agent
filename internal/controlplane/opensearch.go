@@ -36,9 +36,9 @@ func NewOpenSearchShipper(settings ShipperConfig, target config.OpenSearchConfig
 	if stream != TelemetryStream && stream != SecurityStream && stream != LogsStream {
 		return nil, fmt.Errorf("unknown XDR data stream")
 	}
-	apiKey := os.Getenv(target.APIKeyVariable())
-	if apiKey == "" {
-		return nil, fmt.Errorf("direct ingestion requires environment variable %s", target.APIKeyVariable())
+	password := os.Getenv(target.PasswordVariable())
+	if password == "" {
+		return nil, fmt.Errorf("direct ingestion requires environment variable %s", target.PasswordVariable())
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -62,7 +62,7 @@ func NewOpenSearchShipper(settings ShipperConfig, target config.OpenSearchConfig
 	s.client.Transport = transport
 	// Do not send event contents to an unexpected redirect destination.
 	s.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	s.stream, s.apiKey = stream, apiKey
+	s.stream, s.username, s.password = stream, target.Username, password
 	return s, nil
 }
 
@@ -104,7 +104,7 @@ func (s *Shipper) shipOpenSearch(ctx context.Context, batch []events.Event) erro
 		req.Header.Set("Content-Type", "application/x-ndjson")
 		req.Header.Set("Content-Encoding", "gzip")
 		req.Header.Set("User-Agent", "xdr-agent")
-		req.Header.Set("Authorization", "ApiKey "+s.apiKey)
+		req.SetBasicAuth(s.username, s.password)
 		resp, err := s.client.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("OpenSearch bulk transport: %w", err)

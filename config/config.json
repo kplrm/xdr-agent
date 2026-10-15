@@ -13,7 +13,8 @@
   "control_plane_url": "https://dashboard.casaverdalia.com",
   "opensearch": {
     "url": "https://192.168.2.52:30920",
-    "api_key_env": "XDR_OPENSEARCH_API_KEY",
+    "username": "xdr-agent",
+    "password_env": "XDR_OPENSEARCH_PASSWORD",
     "ca_file": "/etc/xdr-agent/opensearch-ca.pem"
   },
   "enrollment_path": "/api/v1/agents/enroll",

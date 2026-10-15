@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -51,9 +52,10 @@ type Config struct {
 // OpenSearchConfig enables direct event delivery when URL is set. Enrollment,
 // heartbeats and commands continue to use ControlPlaneURL and its bearer token.
 type OpenSearchConfig struct {
-	URL       string `json:"url,omitempty"`
-	APIKeyEnv string `json:"api_key_env,omitempty"`
-	CAFile    string `json:"ca_file,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Username    string `json:"username,omitempty"`
+	PasswordEnv string `json:"password_env,omitempty"`
+	CAFile      string `json:"ca_file,omitempty"`
 }
 
 func (c OpenSearchConfig) Validate() error {
@@ -64,14 +66,17 @@ func (c OpenSearchConfig) Validate() error {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("opensearch.url must be an HTTPS URL without credentials, query or fragment")
 	}
+	if strings.TrimSpace(c.Username) == "" || strings.Contains(c.Username, ":") {
+		return fmt.Errorf("opensearch.username must be nonempty and must not contain a colon")
+	}
 	return nil
 }
 
-func (c OpenSearchConfig) APIKeyVariable() string {
-	if c.APIKeyEnv != "" {
-		return c.APIKeyEnv
+func (c OpenSearchConfig) PasswordVariable() string {
+	if c.PasswordEnv != "" {
+		return c.PasswordEnv
 	}
-	return "XDR_OPENSEARCH_API_KEY"
+	return "XDR_OPENSEARCH_PASSWORD"
 }
 
 type DetectionPreventionMode string
@@ -111,6 +116,7 @@ func defaults() Config {
 		EnrollIntervalSeconds:    30,
 		HeartbeatIntervalSeconds: 30,
 		RequestTimeoutSeconds:    10,
+		OpenSearch:               OpenSearchConfig{Username: "xdr-agent"},
 		DetectionPrevention:      DetectionPreventionConfig{Mode: ModeDetect},
 		Logging:                  LoggingConfig{Level: "INFO", Ship: LoggingShipConfig{Enabled: true}},
 	}

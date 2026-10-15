@@ -27,19 +27,20 @@ func directFixture(t *testing.T, handler http.HandlerFunc) (config.OpenSearchCon
 	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("XDR_TEST_API_KEY", "os_private-token")
-	return config.OpenSearchConfig{URL: server.URL + "/opensearch", APIKeyEnv: "XDR_TEST_API_KEY", CAFile: ca}, server
+	t.Setenv("XDR_TEST_PASSWORD", "private-password:with-special-chars!")
+	return config.OpenSearchConfig{URL: server.URL + "/opensearch", Username: "custom-writer", PasswordEnv: "XDR_TEST_PASSWORD", CAFile: ca}, server
 }
 
-func TestDirectBulkUsesTrustedTLSAPIKeyNDJSONAndStableCreates(t *testing.T) {
+func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 	var requests atomic.Int32
 	target, _ := directFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
 		if r.URL.Path != "/opensearch/_bulk" || r.Method != "POST" {
 			t.Errorf("wrong request target: %s %s", r.Method, r.URL.Path)
 		}
-		if r.Header.Get("Authorization") != "ApiKey os_private-token" {
-			t.Error("missing OpenSearch API-key authentication")
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "custom-writer" || password != "private-password:with-special-chars!" {
+			t.Error("missing OpenSearch Basic authentication")
 		}
 		if strings.Contains(r.Header.Get("Authorization"), "enrollment-token") {
 			t.Error("enrollment token leaked to OpenSearch")
@@ -95,12 +96,12 @@ func TestDirectBulkUsesTrustedTLSAPIKeyNDJSONAndStableCreates(t *testing.T) {
 }
 
 func TestDirectBulkRejectsMissingCredentialsInvalidCAAndUnexpectedStreams(t *testing.T) {
-	t.Setenv("XDR_TEST_MISSING_KEY", "")
-	target := config.OpenSearchConfig{URL: "https://localhost:9200", APIKeyEnv: "XDR_TEST_MISSING_KEY"}
+	t.Setenv("XDR_TEST_PASSWORD", "")
+	target := config.OpenSearchConfig{URL: "https://localhost:9200", Username: "xdr-agent", PasswordEnv: "XDR_TEST_PASSWORD"}
 	if _, err := NewOpenSearchShipper(ShipperConfig{}, target, TelemetryStream); err == nil {
-		t.Fatal("missing API key accepted")
+		t.Fatal("missing password accepted")
 	}
-	t.Setenv("XDR_TEST_MISSING_KEY", "os_private-token")
+	t.Setenv("XDR_TEST_PASSWORD", "private-password")
 	target.CAFile = filepath.Join(t.TempDir(), "missing.pem")
 	if _, err := NewOpenSearchShipper(ShipperConfig{}, target, TelemetryStream); err == nil {
 		t.Fatal("missing CA accepted")
@@ -134,6 +135,27 @@ func TestDirectBulkRetainsEventsOnIncompleteResponsesAndDoesNotFollowRedirects(t
 	}
 	if len(s.buffer) != 1 {
 		t.Fatal("failed event not retained")
+	}
+}
+
+func TestDirectBulkRetainsEventsOnAuthenticationFailure(t *testing.T) {
+	var requests atomic.Int32
+	target, _ := directFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":"private-password:with-special-chars!"}`)
+	})
+	s, err := NewOpenSearchShipper(ShipperConfig{AgentID: "agent"}, target, SecurityStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Enqueue(events.Event{ID: "event", Timestamp: time.Now()})
+	err = s.Flush(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") || strings.Contains(err.Error(), s.password) {
+		t.Fatal("authentication failure was lost or leaked credentials")
+	}
+	if len(s.buffer) != 1 || requests.Load() != 1 {
+		t.Fatal("authentication failure discarded the batch or retried immediately")
 	}
 }
 
