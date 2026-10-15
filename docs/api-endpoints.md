@@ -1,6 +1,6 @@
 # XDR Agent HTTP contract
 
-The Linux agent has **no inbound HTTP server**. This is the authoritative list of requests it sends to Coordinator, relative to `control_plane_url` (including any Dashboards base path).
+The Linux agent has **no inbound HTTP server**. This is the authoritative ingestion/control contract. Coordinator paths are relative to `control_plane_url` (including any Dashboards base path).
 
 | Method | Path | Purpose | Regression test |
 | --- | --- | --- | --- |
@@ -11,13 +11,42 @@ The Linux agent has **no inbound HTTP server**. This is the authoritative list o
 | POST | /api/v1/agents/security | Deliver YARA alerts and prevention outcomes | `internal/enroll/api_contract_test.go` (`TestAgentAPI/security`) |
 | POST | /api/v1/agents/logs | Deliver runtime logs | `internal/enroll/api_contract_test.go` (`TestAgentAPI/logs`) |
 
-Every request sends `Authorization: Bearer <enrollment_token>` and `osd-xsrf: true`. Coordinator binds a consumed token to one agent. Revocation or agent removal rejects subsequent traffic. Operator APIs use Dashboards authentication and are listed in Coordinator's API/data model.
+Every Coordinator request sends `Authorization: Bearer <enrollment_token>` and `osd-xsrf: true`. Coordinator binds a consumed token to one agent. Revocation or agent removal rejects subsequent Coordinator traffic. Operator APIs use Dashboards authentication and are listed in Coordinator's API/data model.
 
 Enrollment sends `agent_id`, `machine_id`, `hostname`, `architecture`, `os_type`, `ip_addresses`, `policy_id`, `tags`, and `agent_version`; the response contains `enrollment_id` and `message`.
 
 Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus `protection`: `rule_source`, `rule_version`, `rules_sha256`, `rule_count`, `platform`, `mode`, and `health` (component-to-status map). Heartbeat and command responses contain `message` and optional `pending_commands`, currently `upgrade:<version>`.
 
-Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Events follow `internal/events/event.go`. Stable IDs make retries idempotent within the daily destination index. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
+Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Events follow `internal/events/event.go`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
+
+## Direct OpenSearch ingestion
+
+Set `opensearch.url` to send **all telemetry, security events and runtime logs** directly to OpenSearch with gzip NDJSON `POST /_bulk`. Enrollment, heartbeats and commands still use Coordinator. An empty URL retains Coordinator event delivery; the per-topic URL overrides use the Coordinator JSON contract, not OpenSearch bulk.
+
+Requires OpenSearch **3.7+** with API keys enabled. Add this block to the installed `/etc/xdr-agent/config.json`; replace the API address and CA path:
+
+```json
+"opensearch": {
+  "url": "https://OPENSEARCH_HOST:PORT",
+  "api_key_env": "XDR_OPENSEARCH_API_KEY",
+  "ca_file": "/etc/xdr-agent/opensearch-ca.pem"
+}
+```
+
+First deploy Coordinator's data-stream support and create a restricted API key using the [bundle installation steps](https://github.com/kplrm/xdr-security#4-send-agent-events-directly-to-opensearch). Install the updated Agent package. Copy the issuing CA certificate to `ca_file`; HTTPS verifies both the certificate chain and the API hostname/IP. Leave `ca_file` empty only when the system already trusts the certificate.
+
+Using `sudoedit`, create `/etc/xdr-agent/opensearch.env` containing `XDR_OPENSEARCH_API_KEY='YOUR_API_TOKEN'`, then run:
+
+```bash
+sudo chmod 600 /etc/xdr-agent/opensearch.env
+sudo systemctl daemon-reload
+sudo systemctl restart xdr-agent
+sudo journalctl -u xdr-agent -f
+```
+
+The packaged systemd unit reads this file; foreground runs must export the same variable. Requests use `Authorization: ApiKey <token>`. The API key carries its own identity and permissions; no username or password is used. Enrollment tokens are separate credentials. Revoking enrollment does **not** revoke direct writes: revoke the API key separately. Prefer a separate key per agent; each key can write all three streams without Coordinator's per-agent ownership enforcement. Replace expiring keys in the environment file and restart the service (the supplied key definition expires after 90 days).
+
+Bulk operations use `create` in `xdr-agent-telemetry`, `xdr-agent-security` and `xdr-agent-logs`, with `@timestamp` and `_id=agent_id:event_id`. Both delivery paths retain failed batches and accept duplicate-ID conflicts on retry. Deduplication applies within the current backing index; a retry after rollover can duplicate an event. Other bulk errors retain the batch. Credentials are sent only to the configured API, and redirects are rejected. Regression tests: `internal/controlplane/opensearch_test.go`.
 
 Defaults: health every 30 seconds, command polling every 5 seconds, enrollment retry every 30 seconds, process/network snapshots every 5 seconds, and telemetry/security/log batches every 30 seconds. Paths, base URLs, and intervals can be overridden locally. Delivery retains a bounded in-memory queue; crash replay is future work. TLS validation is enabled by default.
 

@@ -18,6 +18,8 @@ Replace `<TOKEN>` with the token from **Coordinator → Enroll new XDR**. Enroll
 
 ## Operate and remove
 
+For direct event delivery to OpenSearch 3.7+, configure a restricted API key and trusted CA using [these steps](docs/api-endpoints.md#direct-opensearch-ingestion). Health and enrollment continue through Coordinator.
+
 ```bash
 sudo systemctl status xdr-agent.service
 sudo journalctl -u xdr-agent.service -f

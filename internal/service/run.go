@@ -58,17 +58,30 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	}
 
 	pipeline := events.NewPipeline(4096)
-	newShipper := func(base, path string, interval time.Duration, logSuccess bool) *controlplane.Shipper {
-		return controlplane.NewShipper(controlplane.ShipperConfig{
+	newShipper := func(base, path, stream string, interval time.Duration, logSuccess bool) (*controlplane.Shipper, error) {
+		settings := controlplane.ShipperConfig{
 			TelemetryURL: base, TelemetryPath: path, AgentID: state.AgentID,
 			EnrollmentToken: cfg.EnrollmentToken, Interval: interval, BatchSize: 500,
 			RequestTimeout: cfg.RequestTimeout(), InsecureSkipTLS: cfg.InsecureSkipTLSVerify,
 			LogSuccess: logSuccess,
-		})
+		}
+		if cfg.OpenSearch.URL != "" {
+			return controlplane.NewOpenSearchShipper(settings, cfg.OpenSearch, stream)
+		}
+		return controlplane.NewShipper(settings), nil
 	}
-	telemetry := newShipper(cfg.TelemetryBaseURL(), cfg.TelemetryEndpointPath(), cfg.TelemetryShipInterval(), true)
-	security := newShipper(cfg.SecurityBaseURL(), cfg.SecurityEndpointPath(), cfg.SecurityShipInterval(), true)
-	logs := newShipper(cfg.LogsBaseURL(), cfg.LogsEndpointPath(), cfg.LogsShipInterval(), false)
+	telemetry, err := newShipper(cfg.TelemetryBaseURL(), cfg.TelemetryEndpointPath(), controlplane.TelemetryStream, cfg.TelemetryShipInterval(), true)
+	if err != nil {
+		return err
+	}
+	security, err := newShipper(cfg.SecurityBaseURL(), cfg.SecurityEndpointPath(), controlplane.SecurityStream, cfg.SecurityShipInterval(), true)
+	if err != nil {
+		return err
+	}
+	logs, err := newShipper(cfg.LogsBaseURL(), cfg.LogsEndpointPath(), controlplane.LogsStream, cfg.LogsShipInterval(), false)
+	if err != nil {
+		return err
+	}
 	shippers := []*controlplane.Shipper{telemetry, security}
 	pipeline.Subscribe(func(event events.Event) {
 		if event.AgentID == "" {

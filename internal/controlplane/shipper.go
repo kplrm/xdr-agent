@@ -53,6 +53,8 @@ type ShipperConfig struct {
 type Shipper struct {
 	cfg    ShipperConfig
 	client *http.Client
+	stream string
+	apiKey string
 
 	mu     sync.Mutex
 	buffer []events.Event
@@ -192,6 +194,9 @@ func (s *Shipper) Flush(ctx context.Context) error {
 // ship sends a single batch of events to the telemetry endpoint with gzip
 // compression and retry logic.
 func (s *Shipper) ship(ctx context.Context, batch []events.Event) error {
+	if s.stream != "" {
+		return s.shipOpenSearch(ctx, batch)
+	}
 	payload := TelemetryBatch{
 		AgentID: s.cfg.AgentID,
 		Events:  batch,

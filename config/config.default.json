@@ -11,6 +11,11 @@
     "/home"
   ],
   "control_plane_url": "http://localhost:5601",
+  "opensearch": {
+    "url": "",
+    "api_key_env": "XDR_OPENSEARCH_API_KEY",
+    "ca_file": ""
+  },
   "enrollment_path": "/api/v1/agents/enroll",
   "heartbeat_path": "/api/v1/agents/heartbeat",
   "commands_path": "/api/v1/agents/commands",

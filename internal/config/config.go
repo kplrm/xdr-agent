@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,22 +15,22 @@ type Config struct {
 	// MaxCPUCores limits logical CPUs for the agent and its child processes; 0 removes the limit.
 	MaxCPUCores int `json:"max_cpu_cores"`
 	// ExecutionWatchPaths bounds the directories covered by execution prevention.
-	ExecutionWatchPaths      []string `json:"execution_watch_paths,omitempty"`
-	ControlPlaneURL          string   `json:"control_plane_url"`
-	EnrollmentPath           string   `json:"enrollment_path"`
-	HeartbeatPath            string   `json:"heartbeat_path"`
-	EnrollmentToken          string   `json:"enrollment_token"`
-	PolicyID                 string   `json:"policy_id"`
-	Tags                     []string `json:"tags"`
-	EnrollIntervalSeconds    int      `json:"enroll_interval_seconds"`
-	HeartbeatIntervalSeconds int      `json:"heartbeat_interval_seconds,omitempty"`
-	RequestTimeoutSeconds    int      `json:"request_timeout_seconds"`
-	StatePath                string   `json:"state_path"`
-	InsecureSkipTLSVerify    bool     `json:"insecure_skip_tls_verify"`
+	ExecutionWatchPaths      []string         `json:"execution_watch_paths,omitempty"`
+	ControlPlaneURL          string           `json:"control_plane_url"`
+	EnrollmentPath           string           `json:"enrollment_path"`
+	HeartbeatPath            string           `json:"heartbeat_path"`
+	EnrollmentToken          string           `json:"enrollment_token"`
+	PolicyID                 string           `json:"policy_id"`
+	Tags                     []string         `json:"tags"`
+	EnrollIntervalSeconds    int              `json:"enroll_interval_seconds"`
+	HeartbeatIntervalSeconds int              `json:"heartbeat_interval_seconds,omitempty"`
+	RequestTimeoutSeconds    int              `json:"request_timeout_seconds"`
+	StatePath                string           `json:"state_path"`
+	InsecureSkipTLSVerify    bool             `json:"insecure_skip_tls_verify"`
+	OpenSearch               OpenSearchConfig `json:"opensearch,omitempty"`
 
-	// Telemetry shipping — optional fields.
-	// When TelemetryURL is empty the agent ships telemetry to ControlPlaneURL.
-	// Setting a different URL allows routing through Kafka, Logstash, etc.
+	// Coordinator-compatible event delivery when direct OpenSearch is disabled.
+	// Empty per-topic URLs use ControlPlaneURL; overrides keep the JSON/token contract.
 	TelemetryURL                 string `json:"telemetry_url,omitempty"`
 	TelemetryPath                string `json:"telemetry_path,omitempty"`
 	TelemetryIntervalSeconds     int    `json:"telemetry_interval_seconds,omitempty"`
@@ -45,6 +46,32 @@ type Config struct {
 
 	DetectionPrevention DetectionPreventionConfig `json:"detection_prevention,omitempty"`
 	Logging             LoggingConfig             `json:"logging,omitempty"`
+}
+
+// OpenSearchConfig enables direct event delivery when URL is set. Enrollment,
+// heartbeats and commands continue to use ControlPlaneURL and its bearer token.
+type OpenSearchConfig struct {
+	URL       string `json:"url,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+	CAFile    string `json:"ca_file,omitempty"`
+}
+
+func (c OpenSearchConfig) Validate() error {
+	if c.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(c.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("opensearch.url must be an HTTPS URL without credentials, query or fragment")
+	}
+	return nil
+}
+
+func (c OpenSearchConfig) APIKeyVariable() string {
+	if c.APIKeyEnv != "" {
+		return c.APIKeyEnv
+	}
+	return "XDR_OPENSEARCH_API_KEY"
 }
 
 type DetectionPreventionMode string
@@ -122,6 +149,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.ControlPlaneURL == "" {
 		return cfg, fmt.Errorf("control_plane_url is required")
+	}
+	if err := cfg.OpenSearch.Validate(); err != nil {
+		return cfg, err
 	}
 	if cfg.EnrollmentPath == "" {
 		return cfg, fmt.Errorf("enrollment_path is required")

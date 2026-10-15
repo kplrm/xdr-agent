@@ -9,6 +9,8 @@ Type=simple
 # Go runtime tuning for low-memory environments.
 Environment=GOMEMLIMIT=320MiB
 Environment=GOGC=80
+# Optional root-owned credentials for direct OpenSearch event delivery.
+EnvironmentFile=-/etc/xdr-agent/opensearch.env
 # systemd cgroup controls: soft pressure at 350M, hard ceiling at 500M.
 MemoryHigh=350M
 MemoryMax=500M
