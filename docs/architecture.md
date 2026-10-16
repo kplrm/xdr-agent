@@ -1,38 +1,42 @@
 # Agent architecture
 
-The supported runtime collects process, file, and network telemetry and protects Linux hosts using release-bundled YARA Forge Core rules. Coordinator policies group agents.
+The Linux agent collects process, file, connection, and DNS events and scans files with release-bundled YARA Forge Core rules. [Telemetry](telemetry.md) defines monitored sources and emitted fields; [HTTP contract](api-endpoints.md) defines external requests. Coordinator policies group agents; protection configuration stays local.
 
-## Runtime
+## Runtime and configuration
 
-`internal/service/run.go` owns startup and shutdown:
+[`internal/service/run.go`](../internal/service/run.go) loads config and persistent identity, starts event dispatch, initializes YARA, starts five collectors, then enrolls or retries enrollment. Collection and protection continue during Coordinator outages; periodic shipping starts after enrollment. Scanner initialization failure stops startup; individual collector or execution-blocking failures report separate health.
 
-1. Load local configuration and persistent identity.
-2. Start event dispatch and runtime log capture.
-3. Initialize the embedded YARA release and, in prevention mode, local execution protection.
-4. Start process, file integrity, file access, network connection, and DNS collectors.
-5. Enroll or retry enrollment without stopping local protection.
-6. Send immediate and periodic health reports, poll upgrade commands, and ship gzip batches.
-7. Stop collectors, drain event/log queues, and attempt a bounded final shipment.
+The installed service reads `/etc/xdr-agent/config.json`. Enrollment copies the supplied config there; reinstalls preserve it. Restart after edits. [`config.default.json`](../config/config.default.json) lists packaged settings.
 
-`internal/enroll` implements Coordinator requests; `internal/controlplane` batches and delivers events. The complete agent HTTP surface is documented and checked in [api-endpoints.md](api-endpoints.md). The endpoint agent has no inbound HTTP listener.
+| Setting | Default / effect |
+| --- | --- |
+| `telemetry_interval_seconds` | Process/network polling: minimum and default 5 s |
+| `heartbeat_interval_seconds`, `enroll_interval_seconds` | Health and enrollment retries: 30 s each |
+| `command_poll_interval_seconds` | Upgrade polling: 5 s |
+| `telemetry_ship_interval_seconds`, `security_ship_interval_seconds`, `logging.ship.ship_interval_seconds` | Separate batches: 30 s each |
+| `request_timeout_seconds` | HTTP timeout and shared final-flush deadline: 10 s |
+| `max_cpu_cores` | 1 logical CPU; 0 keeps inherited affinity. YARA inherits the limit |
+| `detection_prevention.mode` | `detect`; `prevent` enables blocking and verified termination |
+| `execution_watch_paths` | Execution watches only; file-integrity/access paths are fixed in code |
+| `logging.level`, `logging.ship.enabled` | `INFO`, `true`; shipped diagnostics can be filtered or disabled |
+| `state_path` | `/var/lib/xdr-agent/state.json`; persistent identity and enrollment state |
 
-## Protection and content
+`fim_baseline.db` beside `state_path` persists file metadata, hashes, entropy, and header bytes. It is not an event queue. The packaged [systemd unit](../systemd/xdr-agent.service) runs as root, limits CPU to 75% of one CPU, lowers CPU priority, and sets memory pressure/hard limits of 350M/500M.
 
-The release build selects explicitly Linux-targeted YARA Forge Core rules and their compatible dependencies, excluding Windows and other incompatible rules. Generated source and catalog are embedded in compressed form, then expanded locally; this prevents the Agent executable from matching its own rule text while keeping protection independent of rule downloads. The source release and filtered digest identify the installed inventory.
+## Protection
 
-YARA compilation and scanning use the native `yarac` and `yara` executables. Initialization fails visibly if the installed scanner or rules cannot be loaded. Process/file telemetry drives scanning; fanotify execution permission events allow decisions before executable launch under explicitly configured directories. The event reader starts before any directory marks are installed and stays active during watch refresh. A YARA match can deny execution or terminate a matching running process after verifying its identity. Detection is the local default; prevention must be selected explicitly. Two execution scan workers share a bounded queue. Each permission request has a 500 ms deadline from kernel delivery; overload, timeout, or response failure allows execution, disables fanotify blocking until restart, and reports degraded health. Directory roots are counted before any blocking mark is installed; an oversized tree disables pre-execution blocking while detection and verified process termination continue.
+The build filters explicitly Linux-targeted Core rules and dependencies and embeds compressed source/catalog. Rules change with agent releases. Startup runs native `yarac`; scanning runs native `yara`. There is no remote rule feed. Heartbeats report bundle source, version, digest, rule count, mode, collector health, YARA health, and execution-blocking health.
 
-Heartbeat metadata reports installed source/version/digest, rule count, mode, and runtime health. Availability of scanning and execution blocking must be reported separately. No remote rule editing, rule feed ingestion, or bundle rollout runs on the endpoint.
+Process-start and file-change events trigger asynchronous scans; process-end and file-access events do not. Existing process/file baselines do not trigger a startup sweep. One worker consumes up to 256 queued scan events; overflow skips scans and degrades YARA health. A regular file scan has a 6 s context deadline. Successful scans can restore YARA health. [Telemetry](telemetry.md#protection-and-runtime-logs) lists scan inputs and result fields.
 
-## Telemetry
+In `prevent` mode, fanotify checks executable opens under `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/opt`, `/tmp`, `/var/tmp`, and `/home` by default. Existing subdirectories are included only when the complete configured tree fits within 2,048 directory watches. Oversized trees install no blocking watches. Watches refresh every 30 s; new directories have a coverage gap. Two workers handle decisions with a 500 ms deadline including queue time. Overload, timeout, or response failure allows execution, disables blocking until restart, and reports degraded health. Kernel/filesystem support and `CAP_SYS_ADMIN` are required. Interpreted scripts and execution outside watched paths are not universally intercepted.
 
-- `telemetry.process`: procfs snapshots, process lifecycle, executable and parent context.
-- `telemetry.file`: integrity changes from inotify and periodic rescans, plus read/open events for sensitive paths. `event.type` separates `file.access` from changes; the access watcher has its own health and rate limits. Broad binary and package directories are excluded from the startup baseline, and scans pause briefly between 16-file batches.
-- `telemetry.network`: procfs connection snapshots and process attribution.
-- `telemetry.dns`: DNS traffic capture; requires packet capture privileges.
+After a process YARA match, prevention uses a pidfd and rechecks start ticks plus executable device, inode, size, and modification time before `SIGKILL`. Failed identity checks skip termination. Detection mode produces alerts and `alert_only` outcomes. Execution-denial requests and confirmed outcomes are separate events.
 
-Process and network snapshots run no faster than every five seconds, even with an older config requesting a shorter interval, and gzip batches ship every 30 seconds. The systemd service uses a 75% CPU quota, lower CPU priority, and memory limits. Polling can miss short-lived processes and connections. File monitoring covers watched paths. The default execution watch roots are `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/opt`, `/tmp`, `/var/tmp`, and `/home`. Existing subdirectories are marked recursively only when the complete configured tree fits within 2,048 directory watches. Oversized trees do not install blocking watches and health reports degraded; process/file YARA scanning remains available. Watches refresh every 30 seconds while below the cap; new directories have a coverage gap until refresh. The file-integrity baseline is separate from these execution watches. Interpreted scripts and execution outside these paths are not universally intercepted. Fanotify coverage depends on kernel, privileges, and filesystem support; a degraded health report does not mean execution is blocked everywhere.
+## Event delivery and loss
 
-## Removed and deferred scope
+Collectors/protection → 4,096-event memory pipeline → subscribers → telemetry/security shippers. Runtime logs use a separate 1,024-event writer queue. Alerts and `detection.*`/`prevention.*` modules go to security; collector events go to telemetry; diagnostics go to logs.
 
-Unused orchestrators, remote response shell/playbooks, vulnerability/compliance/cloud modules, extra telemetry domains, hash feed synchronization, behavioral engines, ransomware rollback, and memory detection are removed from the active runtime. Process environment, script-content capture, and executable hashing are excluded to keep collection bounded. XDR Defense and XDR Sentry are outside the current work scope.
+Each shipper holds up to 5,000 queued events and sends up to 500 per request on its interval, using gzip. Failures retain the unsent batch ahead of newer events. Transport/server errors and HTTP 429 receive up to three retries after 2/4/8 s within a flush; other client errors stop that attempt but remain queued for the next flush. OpenSearch item errors also retain the batch. Full queues drop new events; pipeline/shipper drops are logged, log-writer drops are silent. All event buffering is in memory: crashes, prolonged outages, and overload can lose data.
+
+Shutdown stops collectors and protection, drains accepted pipeline/log events, stops periodic shippers, then attempts a final shipment within one shared timeout. It does not persist unsent events. Destination, authentication, and duplicate handling are defined once in the [HTTP contract](api-endpoints.md).

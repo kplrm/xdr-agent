@@ -31,4 +31,10 @@ sudo apt purge xdr-agent
 
 `apt purge` also deletes `/etc/xdr-agent` and `/var/lib/xdr-agent`, including enrollment identity and local state. `apt remove` keeps them for reinstall. The `_apt` "unsandboxed" notice during local installation only means `_apt` could not read the `.deb` inside your home directory; installation still succeeds.
 
-[Architecture](docs/architecture.md) · [API endpoints](docs/api-endpoints.md) · [Roadmap](docs/roadmap.md)
+## Documentation
+
+- [Telemetry](docs/telemetry.md): monitored paths, field meanings, emitted events, and collection limits.
+- [Architecture](docs/architecture.md): runtime, protection, configuration, and delivery reliability.
+- [HTTP contract](docs/api-endpoints.md): enrollment, health, ingestion, upgrades, and contract checks.
+- [Roadmap](docs/roadmap.md): release gates and planned work.
+- [Contributing](CONTRIBUTING.md): development and validation guidelines.

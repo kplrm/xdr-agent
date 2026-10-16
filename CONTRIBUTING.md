@@ -20,10 +20,8 @@ By submitting a change, you agree that your contribution is distributed under th
 ## Build And Test
 
 ```bash
-cd /home/kplrm/github/xdr-agent
 make build
-go build ./...
-go test ./...
+make test
 ```
 
 Run the smallest relevant test scope when iterating, but do not open a change without a clean build.
@@ -35,6 +33,11 @@ Run the smallest relevant test scope when iterating, but do not open a change wi
 - Prefer minimal, justified dependencies. External libraries are acceptable when they solve a real endpoint-security need better than custom code.
 - Keep protection configuration local and content tied to agent releases; Coordinator policies are grouping labels.
 - Update docs and contract tests when routes, field ownership, or scope change.
+- Keep runtime changes within process/file/network collection and release-bundled YARA protection. Additional protection domains require a separate scope decision.
+- Use the shared event envelope and lifecycle in `internal/service/run.go`; keep constructor dependencies explicit.
+- For HTTP changes, update `docs/api-endpoints.md`, the Go contract test, and the Coordinator handler test together. Builds enforce route compatibility.
+- Protection changes need matching/nonmatching and failure-path tests; kernel enforcement needs disposable privileged Linux validation.
+- Update the source-to-field mappings in `docs/telemetry.md` when collection or emission changes; keep current behavior separate from planned work in `docs/roadmap.md`.
 
 ## Code Style
 

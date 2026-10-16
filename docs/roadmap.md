@@ -1,15 +1,6 @@
 # Agent roadmap
 
-Updated: 2026-09-28
-
-## Current scope
-
-- Linux `amd64`/`arm64` process, file, and network telemetry.
-- Release-bundled Linux-relevant YARA Forge Core content.
-- Detection by default; optional execution denial on configured fanotify directories and verified process termination.
-- Coordinator enrollment, periodic health, grouped fleet policies, and agent upgrades.
-- Health every 30 seconds; compressed telemetry, security, and log batches every 30 seconds.
-- A central HTTP contract with build-time endpoint regression checks.
+Current behavior: [architecture](architecture.md) and [telemetry](telemetry.md). This file tracks release gates and unimplemented work.
 
 ## Release gates
 
@@ -27,4 +18,4 @@ Updated: 2026-09-28
 
 ## Deferred scope
 
-XDR Defense and XDR Sentry need separate redesigns. Ransomware, memory, and behavioral protection, Windows support, remote shell/playbooks, compliance scanning, and cloud posture have no work scheduled in this Agent roadmap.
+Ransomware, memory and behavioral protection, Windows support, remote shell/playbooks, compliance scanning, and cloud posture require separate scope decisions.
