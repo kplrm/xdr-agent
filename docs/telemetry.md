@@ -31,11 +31,9 @@ Payload paths below are relative to `payload`; braces list sibling fields. Colle
 
 [`monitor.go`](../internal/telemetry/process/monitor.go) and [`enrichment.go`](../internal/telemetry/process/enrichment.go) scan numeric `/proc/<PID>/` directories on the [configured interval](architecture.md#runtime-and-configuration). The first scan establishes a silent baseline. Later PID-set differences emit `process.start` / `process.end`, module `telemetry.process`, category `process`, kind `event`, severity `0`.
 
-Kernel threads are identified by `PF_KTHREAD` in `stat` field 9 (`flags & 0x00200000 != 0` implies `PF_KTHREAD`). These are not sent in any payload field. Kernel threads retain only stat-derived metadata locally for lineage; status, arguments, file descriptors, I/O, and container enrichment are skipped, and no kernel-thread start/end events are emitted. User-space descendants and file/network collection remain eligible for collection.
+The table describes collected fields. Sources without a leading / are relative to /proc/<PID>/. Usage explains each field’s purpose in Agent operation or security investigations.
 
-Rows describe emitted values except the explicitly marked internal classification. Sources without a leading `/` are relative to `/proc/<PID>/`. **Purpose** identifies Agent behavior or investigation context; investigation fields do not drive active behavioral rules.
-
-| Payload field | Source | Meaning / format | Purpose |
+| Payload field | Source | Meaning / format | Usage |
 | --- | --- | --- | --- |
 | `process.pid` | Numeric directory name | Process ID; reusable after exit | Snapshot comparison, executable scan, termination target |
 | `process.ppid` | `stat` field 4 | Parent process ID | Build process lineage |
@@ -73,11 +71,15 @@ Rows describe emitted values except the explicitly marked internal classificatio
 | `process.ancestors[]` | `pid`, `ppid`, `entity_id`, `name`, `executable` | Up to 10 known ancestors ordered from direct parent toward root; `[]` when unavailable |
 | `process.group_leader` | `pid`, `name`, `entity_id` | Current implementation looks up the session leader using `session_id`; it does not collect the actual process-group ID. `{}` when unresolved |
 
-CPU uses `100 × Δ(utime+stime)/Δsystem ticks`. Only the first aggregate `cpu` line of `/proc/stat` is read, summing all numeric columns; per-CPU lines, `intr`, `btime`, and `ctxt` are unused. Raw CPU ticks are used internally but not emitted. `/proc/uptime` is not read.
+Notes:
 
-Values refresh each scan but are shipped only with lifecycle events. Start events omit CPU percentage; end events carry the last snapshot and last retained percentage ≥0.01%, which may predate the last interval. There is no continuous resource stream or exit code. Event time records discovery/disappearance, not exact execution/exit time.
+- Kernel threads are identified by `PF_KTHREAD` in `stat` field 9. These are not sent in any payload field. Kernel threads retain only stat-derived metadata locally for lineage; status, arguments, file descriptors, I/O, and container enrichment are skipped, and no kernel-thread start/end events are emitted. User-space descendants and file/network collection remain eligible for collection. E.g. field 9 value `69238848` (`0x04208040`) implies `PF_KTHREAD`: `0x04208040 & 0x00200000 = 0x00200000`.
 
-Unreadable `stat` skips the PID. Other read failures leave empty strings, `null`, or numeric zeros; a zero UID does not establish root ownership, and zero I/O/FD counts do not establish inactivity. Command line and argument reads can disagree if the process changes/exits between reads. The payload has no per-field collection-success flags. Polling and PID-only comparisons can miss short-lived processes, PID reuse, and exec changes within an existing PID.
+- CPU uses `100 × Δ(utime+stime)/Δsystem ticks`. Only the first aggregate `cpu` line of `/proc/stat` is read, summing all numeric columns; per-CPU lines, `intr`, `btime`, and `ctxt` are unused. Raw CPU ticks are used internally but not emitted. `/proc/uptime` is not read.
+
+- Values refresh each scan but are shipped only with lifecycle events. Start events omit CPU percentage; end events carry the last snapshot and last retained percentage ≥0.01%, which may predate the last interval. There is no continuous resource stream or exit code. Event time records discovery/disappearance, not exact execution/exit time.
+
+- Unreadable `stat` skips the PID. Other read failures leave empty strings, `null`, or numeric zeros; a zero UID does not establish root ownership, and zero I/O/FD counts do not establish inactivity. Command line and argument reads can disagree if the process changes/exits between reads. The payload has no per-field collection-success flags. Polling and PID-only comparisons can miss short-lived processes, PID reuse, and exec changes within an existing PID.
 
 ## Connections and DNS
 
