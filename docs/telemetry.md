@@ -83,44 +83,70 @@ Notes:
 
 ## Connections and DNS
 
+Connections and DNS use separate modules because socket changes and DNS messages are different observations. Both use `event.category=network` and the same telemetry stream. `network.community_id` links observations of the same flow; it is not a unique DNS-transaction ID.
+
+Payload paths below are relative to `payload`. **Usage** explains each field's role in attribution, correlation, or investigation; these collectors do not apply behavioral detection rules.
+
 [`connections.go`](../internal/telemetry/network/connections.go) reads only `/proc/net/{tcp,tcp6,udp,udp6}`: local/remote address and port, state, UID, inode. It emits `network.connection_opened` / `network.connection_closed`, module `telemetry.network`, category `network`, severity 0, after a silent first baseline.
 
-| Payload field(s) | Meaning / source |
-| --- | --- |
-| `source.ip`, `source.port` | Local socket IP address and port, including inbound connections |
-| `destination.ip`, `destination.port` | Remote socket IP address and port |
-| `source.user.id`, `source.user.name` | Socket-owning UID as a string and its resolved user name |
-| `network.transport`, `network.type` | Protocol (`tcp`/`udp`) and address family (`ipv4`/`ipv6`) |
-| `network.state` | Kernel socket state mapped to a TCP state name or raw hex; the same mapping is also used for UDP |
-| `network.inode` | Socket inode number used to locate its owner through `/proc/<PID>/fd/*` links |
-| `network.community_id` | Direction-independent Community ID v1 hash of the flow endpoints/protocol |
-| `network.direction` | Heuristic: listening, internal, inbound, outbound; not proof of initiator |
-| `process.pid`, `process.name`, `process.executable` | Optional owning PID, short name from `comm`, and `exe` path; opened events only |
+Field numbers count whitespace-separated data columns from 1, including `sl`; combined values such as `IP:port` count as one field.
 
-The snapshot key includes protocol, endpoints, and state; a TCP state transition can emit a closed/opened pair. Polling can miss connections; attribution can race with socket closure. Network tables reflect the Agent's network namespace; it does not walk `/proc/<PID>/net` or container namespaces. All other `/proc/net` entries are unused.
+| Payload field | Source | Meaning / format | Usage |
+| --- | --- | --- | --- |
+| `source.ip` | Field 2 (`local_address`), before `:` | Local socket IP, including inbound connections | Identify the local endpoint |
+| `source.port` | Field 2 (`local_address`), after `:` | Local socket port as an integer | Identify the local service/client socket |
+| `source.user.id` | Field 8 (`uid`) | Socket-owning user ID as a string | Attribute socket ownership |
+| `source.user.name` | Field 8 (UID), resolved via system user database or `/etc/passwd` | Resolved user name; numeric UID string if unresolved | Readable ownership label |
+| `destination.ip` | Field 3 (`rem_address`), before `:` | Remote socket IP | Identify the peer |
+| `destination.port` | Field 3 (`rem_address`), after `:` | Remote socket port as an integer | Identify the peer service/client socket |
+| `network.transport` | Network table filename; no data field | `tcp` or `udp` | Group by transport protocol |
+| `network.type` | Network table filename; no data field | `ipv4` or `ipv6`; determined by the table, not the printed IP string | Identify address family |
+| `network.state` | Field 4 (`st`) | Mapped TCP state name or raw hex; mapping also applies to UDP | Describe socket state; UDP `ESTABLISHED` does not imply a TCP handshake |
+| `network.inode` | Field 10 (`inode`) | Kernel socket inode; 0 when unavailable | Locate ownership through `/proc/<PID>/fd/*` links |
+| `network.community_id` | Derived from fields 2/3 and filename (protocol) | Direction-independent Community ID v1 flow hash | Correlate observations across collectors |
+| `network.direction` | Derived from fields 2/3/4 (endpoints and state) | listening, internal, inbound, outbound; internal means both endpoints are loopback | Orient traffic; not proof of connection initiator |
+| `process.pid` | Field 10 matched to `/proc/<PID>/fd/*`; PID from directory name | Optional owning PID; opened events only | Attribute the socket to a process |
+| `process.name` | Owning PID's `comm` | Short process name; empty if unreadable | Readable process label |
+| `process.executable` | Owning PID's `exe` symlink | Executable path; empty if unresolved | Identify the owning program |
+
+The snapshot key includes protocol, endpoints, and state; a TCP state transition can emit a closed/opened pair. Polling can miss connections; attribution can race with socket closure. The entire `process` object is omitted when ownership is unresolved and on closed events. Direction is approximate; services on ports above 1023 can be labelled outbound. Network tables reflect the Agent's network namespace; it does not walk `/proc/<PID>/net` or container namespaces. All other `/proc/net` entries are unused.
 
 [`dns.go`](../internal/telemetry/network/dns.go) captures Ethernet IPv4/IPv6 UDP traffic to/from port 53 on all interfaces through `AF_PACKET` (`CAP_NET_RAW` required). It emits `dns.query` / `dns.answer`, module `telemetry.dns`, category `network`, severity 0.
 
-| Payload field(s) | Meaning / source |
-| --- | --- |
-| `dns.id`, `dns.type` | 16-bit transaction ID and message role (`query`/`answer`) |
-| `dns.op_code` | Requested DNS operation, usually `QUERY` |
-| `dns.question.name` | First queried domain name |
-| `dns.question.type`, `dns.question.class` | Requested record type (e.g. A/AAAA) and DNS class (usually IN) |
-| `dns.question.registered_domain` | Last two labels of the question name; not public-suffix aware |
-| `dns.recursion_desired`, `dns.recursion_available` | Header booleans: client requests recursion (RD); server advertises it (RA) |
-| `dns.authoritative` | Header AA flag: response claims to be authoritative |
-| `dns.header_flags` | Active flags: qr response, aa authoritative, tc truncated, rd recursion desired, ra recursion available |
-| `dns.response_code` | Response outcome such as NOERROR/NXDOMAIN; responses only |
-| `dns.answers_count` | Number of parsed/emitted answers, capped at 64; omitted without answers |
-| `dns.answers[].name`, `dns.answers[].type` | Answer record's owner domain and record type |
-| `dns.answers[].ttl`, `dns.answers[].data` | Cache lifetime in seconds and decoded record content (hex fallback for unsupported types) |
-| `dns.resolved_ips` | IP values from A/AAAA answers; omitted when none |
-| `source.{ip,port}`, `destination.{ip,port}` | Packet source/destination addresses and ports; responses reverse client/resolver direction |
-| `network.{transport,type,community_id}` | UDP, IPv4/IPv6, and the flow hash defined above |
-| `process.{pid,name,executable}` | Optional querying-process identity; UDP socket ownership snapshots cached for 2 s and query-response correlation |
+DNS sources are packet fields, not `/proc/net` columns, except for process attribution. Byte offsets below start at 0 within the named header. Question/answer offsets vary with encoded names.
 
-No TCP DNS, DoH/DoT, raw packet payload, authority/additional records, or full packet capture is shipped. Process attribution uses `/proc/net/udp{,6}` and PID socket links/`comm`/`exe` and is best effort.
+| Payload field | Source | Meaning / format | Usage |
+| --- | --- | --- | --- |
+| `dns.id` | DNS header bytes 0–1: ID | 16-bit transaction ID; not globally unique | Match queries and responses with endpoint context |
+| `dns.type` | DNS header bytes 2–3: QR flag | `query` or `answer` | Distinguish message role |
+| `dns.op_code` | DNS header bytes 2–3: opcode | Operation name, usually `QUERY` | Identify the requested operation |
+| `dns.question.name` | First question: QNAME, starting at DNS byte 12 | Queried domain name | Identify the requested name |
+| `dns.question.type` | First question: QTYPE | Requested record type, e.g. A/AAAA | Identify the requested data; independent of transport address family |
+| `dns.question.class` | First question: QCLASS | DNS class, usually `IN` (Internet) | Interpret the question |
+| `dns.question.registered_domain` | Derived from question name's last two labels | Approximate domain grouping; not public-suffix aware | Group related names |
+| `dns.recursion_desired` | DNS header bytes 2–3: RD flag | Boolean: client requests recursive resolution | Describe resolver behavior requested |
+| `dns.recursion_available` | DNS header bytes 2–3: RA flag | Boolean: server advertises recursion support | Describe resolver capability |
+| `dns.authoritative` | DNS header bytes 2–3: AA flag | Boolean: response claims to be authoritative | Interpret response provenance |
+| `dns.header_flags` | DNS header bytes 2–3: flags | Array of active qr/aa/tc/rd/ra flags; tc means truncated; null if none | Inspect message flags |
+| `dns.response_code` | DNS header bytes 2–3: RCODE | Outcome such as NOERROR/NXDOMAIN; responses only | Investigate resolution success/failure |
+| `dns.answers_count` | Count of parsed answer records | Number of emitted answers, capped at 64; omitted without answers | Summarize returned records |
+| `dns.answers[].name` | Answer record: NAME | Domain owning the answer record | Associate returned data with a name |
+| `dns.answers[].type` | Answer record: TYPE | Returned record type, e.g. A/AAAA/CNAME | Interpret record data |
+| `dns.answers[].ttl` | Answer record: TTL | Cache lifetime in seconds | Understand cache duration |
+| `dns.answers[].data` | Answer record: RDATA | Decoded value or possibly shortened hexadecimal fallback | Inspect returned addresses, aliases, or other data |
+| `dns.resolved_ips` | Derived from A/AAAA answer RDATA | IP-address array; omitted when none | Correlate names with addresses |
+| `source.ip` | IPv4 header bytes 12–15 / IPv6 bytes 8–23 | Packet sender's IP | Identify sender; normally client on queries, resolver on responses |
+| `source.port` | UDP header bytes 0–1: source port | Sender's UDP port as an integer | Identify source socket and transaction context |
+| `destination.ip` | IPv4 header bytes 16–19 / IPv6 bytes 24–39 | Packet recipient's IP | Identify recipient; normally resolver on queries, client on responses |
+| `destination.port` | UDP header bytes 2–3: destination port | Recipient's UDP port as an integer | Identify destination socket and transaction context |
+| `network.transport` | IPv4 header byte 9 / IPv6 byte 6; must be 17 (UDP) | `udp` | Identify the captured transport |
+| `network.type` | Derived from parsed `source.ip` format | `ipv4` or `ipv6` | Identify packet address family |
+| `network.community_id` | Derived from transport and packet endpoints | Direction-independent Community ID v1 flow hash | Correlate query/response flows and connection observations |
+| `process.pid` | `/proc/net/udp{,6}` fields 2/10 matched to `/proc/<PID>/fd/*`, or matched query context | Optional querying-process PID | Attribute the DNS activity |
+| `process.name` | Querying PID's `comm` | Short process name; empty if unreadable | Readable querying-process label |
+| `process.executable` | Querying PID's `exe` symlink | Executable path; empty if unresolved | Identify the querying program |
+
+No TCP DNS, DoH/DoT, raw packet payload, authority/additional records, or full packet capture is shipped. Process attribution uses `/proc/net/udp{,6}` and PID socket links/`comm`/`exe`, with ownership snapshots cached for 2 s. Response events can inherit the matched query's process context. The entire `process` object is omitted when attribution is unavailable.
 
 ## File changes and access
 
