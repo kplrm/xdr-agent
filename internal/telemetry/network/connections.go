@@ -92,6 +92,7 @@ type NetworkCollector struct {
 	etcPasswd       string // path to /etc/passwd for UID → username resolution
 	sockets         *SocketSnapshotProvider
 	perimeter       *Perimeter
+	classification  *Perimeter // Last immutable host-address snapshot.
 
 	mu         sync.Mutex
 	health     capability.HealthStatus
@@ -153,8 +154,9 @@ func (n *NetworkCollector) SetPerimeter(perimeter *Perimeter) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.directions = make(map[string]string)
+	n.classification = perimeter.snapshot()
 	for key, conn := range n.known {
-		n.directions[key] = perimeter.ConnectionDirection(conn)
+		n.directions[key] = n.classification.ConnectionDirection(conn)
 	}
 }
 
@@ -253,6 +255,15 @@ func (n *NetworkCollector) loop(ctx context.Context) {
 func (n *NetworkCollector) scan() {
 	n.sourceMu.RLock()
 	defer n.sourceMu.RUnlock()
+	perimeter := n.perimeter.snapshot()
+	if n.classification != nil && n.classification.local != perimeter.local {
+		for key, conn := range n.known {
+			if n.classification.Direction(conn.LocalAddr, conn.RemoteAddr) != perimeter.Direction(conn.LocalAddr, conn.RemoteAddr) {
+				n.directions[key] = perimeter.ConnectionDirection(conn)
+			}
+		}
+	}
+	n.classification = perimeter
 	collected := n.sockets.Refresh()
 	snapshot := make(map[string]ConnectionInfo)
 
@@ -290,7 +301,7 @@ func (n *NetworkCollector) scan() {
 
 	if !wasBaseline {
 		for key, conn := range snapshot {
-			n.directions[key] = n.perimeter.ConnectionDirection(conn)
+			n.directions[key] = perimeter.ConnectionDirection(conn)
 		}
 		log.Printf("network collector: baseline established with %d connections", len(snapshot))
 		return
@@ -299,7 +310,7 @@ func (n *NetworkCollector) scan() {
 	// Enrich a generation in one descriptor walk, retaining context for closure.
 	for key, conn := range snapshot {
 		previous, existed := prevKnown[key]
-		if candidate := n.perimeter.ConnectionDirection(conn); candidate != "unknown" || n.directions[key] == "" {
+		if candidate := perimeter.ConnectionDirection(conn); candidate != "unknown" || n.directions[key] == "" {
 			n.directions[key] = candidate
 		}
 		if n.owners[key] == nil && collected.readOK[conn.Protocol] {

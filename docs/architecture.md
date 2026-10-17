@@ -11,7 +11,7 @@ The installed service reads `/etc/xdr-agent/config.json`; `run --config` selects
 | Setting | Default / effect |
 | --- | --- |
 | `process_scan_interval_seconds`, `network_scan_interval_seconds` | Independent process/shared-socket polling: 1 s each by default; omitted values use a positive legacy `telemetry_interval_seconds`, then 1 s |
-| `internal_networks` | Perimeter CIDRs: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`; loopback is always internal |
+| `internal_networks` | Perimeter CIDRs: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`; loopback and assigned host IPs are always inside |
 | `heartbeat_interval_seconds`, `enroll_interval_seconds` | Health and enrollment retries: 30 s each |
 | `command_poll_interval_seconds` | Upgrade polling: 5 s |
 | `telemetry_ship_interval_seconds`, `security_ship_interval_seconds`, `logging.ship.ship_interval_seconds` | Separate batches: 30 s each |

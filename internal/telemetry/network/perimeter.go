@@ -3,21 +3,27 @@ package network
 import (
 	"fmt"
 	"net"
+	"net/netip"
 
 	"xdr-agent/internal/config"
 )
 
-// Perimeter classifies endpoints against explicitly configured internal CIDRs.
-// It is immutable after construction and safe to share between collectors.
+// Perimeter combines configured CIDRs with exact assigned host addresses.
+// Its configuration is immutable; the optional host cache is shared safely.
 type Perimeter struct {
 	internal []*net.IPNet
+	hosts    *HostAddresses
+	local    *hostIPSet
 }
 
-func NewPerimeter(cidrs []string) (*Perimeter, error) {
+func NewPerimeter(cidrs []string, hosts ...*HostAddresses) (*Perimeter, error) {
 	if cidrs == nil {
 		cidrs = config.DefaultInternalNetworks()
 	}
 	p := &Perimeter{}
+	if len(hosts) > 0 {
+		p.hosts = hosts[0]
+	}
 	for _, cidr := range cidrs {
 		_, prefix, err := net.ParseCIDR(cidr)
 		if err != nil {
@@ -28,10 +34,24 @@ func NewPerimeter(cidrs []string) (*Perimeter, error) {
 	return p, nil
 }
 
+// snapshot keeps both endpoints and retained connection context on one address set.
+func (p *Perimeter) snapshot() *Perimeter {
+	if p == nil || p.hosts == nil {
+		return p
+	}
+	return &Perimeter{internal: p.internal, local: p.hosts.current.Load()}
+}
+
 func (p *Perimeter) contains(ip net.IP) bool {
 	// Loopback communication never crosses the network perimeter.
 	if ip.IsLoopback() {
 		return true
+	}
+	if p.local != nil {
+		addr, _ := netip.AddrFromSlice(ip)
+		if _, assigned := (*p.local)[addr.Unmap()]; assigned {
+			return true
+		}
 	}
 	for _, prefix := range p.internal {
 		if prefix.Contains(ip) {
@@ -43,6 +63,7 @@ func (p *Perimeter) contains(ip net.IP) bool {
 
 // Direction follows the observed packet's source and destination, rather than ports.
 func (p *Perimeter) Direction(sourceIP, destinationIP string) string {
+	p = p.snapshot()
 	source, destination := net.ParseIP(sourceIP), net.ParseIP(destinationIP)
 	if p == nil || source == nil || destination == nil || source.IsUnspecified() || destination.IsUnspecified() {
 		return "unknown"
@@ -63,6 +84,7 @@ func (p *Perimeter) Direction(sourceIP, destinationIP string) string {
 // ConnectionDirection uses handshake state only when a perimeter crossing needs
 // an initiator. Established socket snapshots alone cannot prove who initiated.
 func (p *Perimeter) ConnectionDirection(conn ConnectionInfo) string {
+	p = p.snapshot()
 	direction := p.Direction(conn.LocalAddr, conn.RemoteAddr)
 	if direction != "inbound" && direction != "outbound" {
 		return direction

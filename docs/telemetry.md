@@ -93,7 +93,9 @@ Payload paths below are relative to `payload`. **Usage** explains each field's r
 
 [`connections.go`](../internal/telemetry/network/connections.go) emits `network.connection_opened`, `network.connection_state_changed`, and `network.connection_closed`, module `telemetry.network`, category `network`, severity 0, after a silent first baseline. Unchanged snapshots emit nothing; state changes update a socket instance rather than generating a new connection. Known process identity and handshake direction are retained for later state/closure events.
 
-`internal_networks` in `/etc/xdr-agent/config.json` defaults to RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and IPv6 ULA (`fc00::/7`, RFC 4193). A configured list replaces these defaults; `[]` clears them. Loopback is always internal. Direction is `internal` when both endpoints are inside, `external` when both are outside, `outbound` for inside-to-outside, and `inbound` for outside-to-inside. Unspecified/invalid endpoints are `unknown`. Crossing connection direction requires observed `SYN_SENT`/`SYN_RECV` evidence; otherwise it is `unknown`. Ports do not establish direction. DNS direction follows packet sender/recipient, so responses can reverse it. `network.state` uses the kernel-state mapping below.
+`internal_networks` in `/etc/xdr-agent/config.json` defaults to RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and IPv6 ULA (`fc00::/7`, RFC 4193). A configured list replaces these CIDRs; `[]` clears them. Loopback and exact IPs assigned to host interfaces are always inside, including public IPv4/IPv6 addresses; their surrounding subnets are not automatically included. A shared in-memory address cache reads the local kernel at startup, follows IPv4/IPv6 address-change notifications, and resyncs every minute (also the fallback when notifications are unavailable). No internet requests or config-file rewrites are needed. Discovery uses the Agent's network namespace and cannot discover a router's NAT public IP unless assigned locally or configured explicitly.
+
+Direction is `internal` when both endpoints are inside, `external` when both are outside, `outbound` for inside-to-outside, and `inbound` for outside-to-inside. Unspecified/invalid endpoints are `unknown`. Crossing connection direction requires observed `SYN_SENT`/`SYN_RECV` evidence; otherwise it is `unknown`. Address changes reclassify affected sockets without discarding unrelated handshake evidence or emitting duplicate events. Ports do not establish direction. DNS direction follows packet sender/recipient, so responses can reverse it. `network.state` uses the kernel-state mapping below.
 
 Field numbers count whitespace-separated data columns from 1, including `sl`; combined values such as `IP:port` count as one field.
 
@@ -110,7 +112,7 @@ Field numbers count whitespace-separated data columns from 1, including `sl`; co
 | `network.state` | Field 4 (`st`) | Mapped TCP state name or raw hex; mapping also applies to UDP | Describe socket state; UDP `ESTABLISHED` does not imply a TCP handshake |
 | `network.inode` | Field 10 (`inode`) | Kernel socket inode; 0 when unavailable | Locate ownership through `/proc/<PID>/fd/*` links |
 | `network.community_id` | Derived from fields 2/3 and filename (protocol) | Direction-independent Community ID v1 flow hash | Correlate observations across collectors |
-| `network.direction` | Fields 2/3/4 and configured `internal_networks` | Perimeter classification: internal, external, inbound, outbound, unknown | Orient traffic using endpoint membership and retained handshake evidence |
+| `network.direction` | Fields 2/3/4, configured `internal_networks`, and kernel interface addresses | Perimeter classification: internal, external, inbound, outbound, unknown | Orient traffic using endpoint membership and retained handshake evidence |
 | `process.pid` | Field 10 matched to `/proc/<PID>/fd/*`; PID from directory name | Optional first observed socket holder; retained for closure | Attribute the socket to a process |
 | `process.name` | Owning PID's `comm` | Short process name; empty if unreadable | Readable process label |
 | `process.executable` | Owning PID's `exe` symlink | Executable path; empty if unresolved | Identify the owning program |
@@ -149,7 +151,7 @@ DNS sources are packet fields, not `/proc/net` columns, except for process attri
 | `network.transport` | IPv4 header byte 9 / IPv6 byte 6; must be 17 (UDP) | `udp` | Identify the captured transport |
 | `network.type` | Derived from parsed `source.ip` format | `ipv4` or `ipv6` | Identify packet address family |
 | `network.community_id` | Derived from transport and packet endpoints | Direction-independent Community ID v1 flow hash | Correlate query/response flows and connection observations |
-| `network.direction` | Packet endpoints and configured `internal_networks` | Perimeter classification: internal, external, inbound, outbound, unknown | Classify each observed message relative to the perimeter |
+| `network.direction` | Packet endpoints, configured `internal_networks`, and kernel interface addresses | Perimeter classification: internal, external, inbound, outbound, unknown | Classify each observed message relative to the perimeter |
 | `process.pid` | Shared `/proc/net/udp{,6}` fields 2/3/10 matched to `/proc/<PID>/fd/*`, or matched query context | Optional querying-process PID | Attribute the DNS activity |
 | `process.name` | Querying PID's `comm` | Short process name; empty if unreadable | Readable querying-process label |
 | `process.executable` | Querying PID's `exe` symlink | Executable path; empty if unresolved | Identify the querying program |

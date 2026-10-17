@@ -151,7 +151,9 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	manager := prevention.NewManager(cfg, pipeline)
 	pipeline.Subscribe(manager.Handle)
 
-	perimeter, err := network.NewPerimeter(cfg.EffectiveInternalNetworks())
+	hostAddresses, stopAddresses := network.WatchHostAddresses(ctx)
+	defer stopAddresses()
+	perimeter, err := network.NewPerimeter(cfg.EffectiveInternalNetworks(), hostAddresses)
 	if err != nil {
 		return err
 	}
@@ -214,7 +216,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			return next, err
 		}
 		if !reflect.DeepEqual(current.EffectiveInternalNetworks(), next.EffectiveInternalNetworks()) {
-			perimeter, _ := network.NewPerimeter(next.EffectiveInternalNetworks()) // Validated before saving.
+			perimeter, _ := network.NewPerimeter(next.EffectiveInternalNetworks(), hostAddresses) // Validated before saving.
 			connections.SetPerimeter(perimeter)
 			dns.SetPerimeter(perimeter)
 		}

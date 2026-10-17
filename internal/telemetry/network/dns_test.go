@@ -139,6 +139,31 @@ func TestDNSDirectionFollowsPacketEndpoints(t *testing.T) {
 	}
 }
 
+func TestDNSDirectionUsesUpdatedHostAddresses(t *testing.T) {
+	d, pipeline := dnsTestCollector(t)
+	local, remote := "2003:e5:bf04:d325:2949:ef93:1438:d7f5", "2606:4700:3034::6815:427e"
+	addresses := []net.Addr{&net.IPAddr{IP: net.ParseIP(local)}}
+	hosts := &HostAddresses{read: func() ([]net.Addr, error) { return addresses, nil }}
+	hosts.refresh()
+	perimeter, _ := NewPerimeter([]string{}, hosts)
+	d.SetPerimeter(perimeter)
+	query := &parsedDNS{ID: 42, Questions: []dnsQuestion{{Name: "example.com", Type: 1, Class: 1}}}
+	d.emitDNSEvent(query, local, remote, 50000, 53, nil)
+	d.emitDNSEvent(query, remote, local, 53, 50000, nil)
+	addresses = nil
+	hosts.refresh()
+	d.emitDNSEvent(query, local, remote, 50000, 53, nil)
+	got := dnsDrainEvents(pipeline)
+	if len(got) != 3 {
+		t.Fatalf("got %d DNS events, want three", len(got))
+	}
+	for i, event := range got {
+		if got, want := event.Payload["network"].(map[string]interface{})["direction"], []string{"outbound", "inbound", "external"}[i]; got != want {
+			t.Errorf("event %d direction=%v, want %s", i, got, want)
+		}
+	}
+}
+
 func TestDNSObservationTimestampPrecedesOwnershipEnrichment(t *testing.T) {
 	d, pipeline := dnsTestCollector(t)
 	provider := NewSocketSnapshotProvider(t.TempDir(), "test-agent")

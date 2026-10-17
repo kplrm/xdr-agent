@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,64 @@ func TestPerimeterUpdateDiscardsRetainedDirection(t *testing.T) {
 	got := dnsDrainEvents(pipeline)
 	if len(got) != 4 || got[1].Payload["network"].(map[string]interface{})["direction"] != "outbound" || got[2].Payload["network"].(map[string]interface{})["direction"] != "unknown" || got[3].Payload["network"].(map[string]interface{})["direction"] != "unknown" {
 		t.Fatalf("old perimeter direction survived updated policy: %+v", got)
+	}
+}
+
+func TestHostAddressChangesReclassifyOnlyAffectedConnections(t *testing.T) {
+	pipeline := events.NewPipeline(32)
+	collector := NewNetworkCollector(pipeline, "agent", "host", time.Second)
+	var addresses []net.Addr
+	hosts := &HostAddresses{read: func() ([]net.Addr, error) { return addresses, nil }}
+	hosts.refresh()
+	perimeter, _ := NewPerimeter(nil, hosts)
+	collector.SetPerimeter(perimeter)
+	provider := NewSocketSnapshotProvider(t.TempDir(), "agent")
+	var sockets []ConnectionInfo
+	provider.read = func(_, proto string) ([]ConnectionInfo, error) {
+		if proto == "tcp" {
+			return sockets, nil
+		}
+		return nil, nil
+	}
+	provider.owners = func(_, _ string) map[uint64]*ProcessInfo { return nil }
+	collector.SetSocketSnapshotProvider(provider)
+	collector.scan()
+	public := "2003:e5:bf04:d325:2949:ef93:1438:d7f5"
+	sockets = []ConnectionInfo{
+		{Protocol: "tcp", LocalAddr: public, LocalPort: 50000, RemoteAddr: "2606:4700:3034::6815:427e", RemotePort: 443, State: "SYN_SENT", Inode: 123},
+		{Protocol: "tcp", LocalAddr: "10.0.0.2", LocalPort: 50001, RemoteAddr: "8.8.8.8", RemotePort: 443, State: "SYN_SENT", Inode: 124},
+	}
+	collector.scan()
+	for i := range sockets {
+		sockets[i].State = "ESTABLISHED"
+	}
+	collector.scan()
+	addresses = []net.Addr{&net.IPAddr{IP: net.ParseIP(public)}}
+	hosts.refresh()
+	collector.scan()
+	for i := range sockets {
+		sockets[i].State = "TIME_WAIT"
+	}
+	collector.scan()
+	addresses = nil
+	hosts.refresh()
+	sockets = nil
+	collector.scan()
+	got := dnsDrainEvents(pipeline)
+	if len(got) != 8 {
+		t.Fatalf("got %d events, want eight socket transitions without refresh duplicates", len(got))
+	}
+	for i, event := range got {
+		want := "outbound"
+		if event.Payload["source"].(map[string]interface{})["ip"] == public {
+			want = "external"
+			if i >= 4 && event.Type != "network.connection_closed" {
+				want = "unknown" // No handshake observed with this IP recognized as local.
+			}
+		}
+		if direction := event.Payload["network"].(map[string]interface{})["direction"]; direction != want {
+			t.Errorf("event %d direction=%v, want %s", i, direction, want)
+		}
 	}
 }
 
