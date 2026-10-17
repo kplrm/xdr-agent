@@ -10,7 +10,7 @@
 //   - source.user.id / source.user.name — process owner resolved from UID
 //   - network.transport — "tcp" or "udp"
 //   - network.type      — "ipv4" or "ipv6"
-//   - network.direction — "inbound", "outbound", "listening", "internal"
+//   - network.direction — perimeter direction, or "unknown"
 //   - network.community_id — deterministic 5-tuple flow identifier (Community ID v1)
 //   - network.state     — TCP state string (non-ECS; useful for security analysis)
 //   - process.pid / process.name / process.executable — enriched on opened events
@@ -26,7 +26,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +37,7 @@ import (
 
 const (
 	defaultNetProcRoot = "/proc"
-	defaultNetInterval = 15 * time.Second
+	defaultNetInterval = time.Second
 )
 
 // tcpStateNames maps the hex TCP state codes from /proc/net/tcp to names.
@@ -70,28 +69,37 @@ type ConnectionInfo struct {
 
 // key returns a stable string suitable for snapshot diffing.
 func (c ConnectionInfo) key() string {
-	return fmt.Sprintf("%s:%s:%d->%s:%d:%s",
+	return fmt.Sprintf("%s:%d", c.flowKey(), c.Inode)
+}
+
+func (c ConnectionInfo) flowKey() string {
+	return fmt.Sprintf("%s:%s:%d->%s:%d",
 		c.Protocol, c.LocalAddr, c.LocalPort,
-		c.RemoteAddr, c.RemotePort, c.State)
+		c.RemoteAddr, c.RemotePort)
 }
 
 // NetworkCollector tracks TCP/UDP connections by periodically polling
 // /proc/net/* and emitting events for changes. It implements capability.Capability.
 type NetworkCollector struct {
-	sourceMu  sync.RWMutex
-	workers   sync.WaitGroup
-	pipeline  *events.Pipeline
-	agentID   string
-	hostname  string
-	interval  time.Duration
-	procRoot  string // path to /proc; defaults to /proc
-	etcPasswd string // path to /etc/passwd for UID → username resolution
+	sourceMu        sync.RWMutex
+	workers         sync.WaitGroup
+	pipeline        *events.Pipeline
+	agentID         string
+	hostname        string
+	interval        time.Duration
+	intervalChanged chan struct{}
+	procRoot        string // path to /proc; defaults to /proc
+	etcPasswd       string // path to /etc/passwd for UID → username resolution
+	sockets         *SocketSnapshotProvider
+	perimeter       *Perimeter
 
-	mu       sync.Mutex
-	health   capability.HealthStatus
-	cancel   context.CancelFunc
-	known    map[string]ConnectionInfo
-	baseline bool
+	mu         sync.Mutex
+	health     capability.HealthStatus
+	cancel     context.CancelFunc
+	known      map[string]ConnectionInfo
+	owners     map[string]*ProcessInfo
+	directions map[string]string
+	baseline   bool
 }
 
 // NewNetworkCollector creates a new network telemetry collector.
@@ -100,20 +108,26 @@ type NetworkCollector struct {
 //   - pipeline: the central event bus to emit events into
 //   - agentID:  the enrolled agent identifier
 //   - hostname: the host's name (for event enrichment)
-//   - interval: how often to scan /proc/net (0 → 15 s default)
+//   - interval: how often to scan /proc/net (0 → 1 s default)
 func NewNetworkCollector(pipeline *events.Pipeline, agentID, hostname string, interval time.Duration) *NetworkCollector {
 	if interval <= 0 {
 		interval = defaultNetInterval
 	}
+	perimeter, _ := NewPerimeter(nil)
 	return &NetworkCollector{
-		pipeline:  pipeline,
-		agentID:   agentID,
-		hostname:  hostname,
-		interval:  interval,
-		procRoot:  defaultNetProcRoot,
-		etcPasswd: "/etc/passwd",
-		health:    capability.HealthStopped,
-		known:     make(map[string]ConnectionInfo),
+		pipeline:        pipeline,
+		agentID:         agentID,
+		hostname:        hostname,
+		interval:        interval,
+		intervalChanged: make(chan struct{}, 1),
+		procRoot:        defaultNetProcRoot,
+		etcPasswd:       "/etc/passwd",
+		health:          capability.HealthStopped,
+		known:           make(map[string]ConnectionInfo),
+		owners:          make(map[string]*ProcessInfo),
+		directions:      make(map[string]string),
+		sockets:         NewSocketSnapshotProvider(defaultNetProcRoot, agentID),
+		perimeter:       perimeter,
 	}
 }
 
@@ -122,6 +136,46 @@ func (n *NetworkCollector) SetProcRoot(path string) {
 	n.sourceMu.Lock()
 	defer n.sourceMu.Unlock()
 	n.procRoot = path
+	n.sockets.setProcRoot(path)
+}
+
+func (n *NetworkCollector) SetSocketSnapshotProvider(provider *SocketSnapshotProvider) {
+	n.sourceMu.Lock()
+	defer n.sourceMu.Unlock()
+	n.sockets = provider
+}
+
+func (n *NetworkCollector) SetPerimeter(perimeter *Perimeter) {
+	n.sourceMu.Lock()
+	defer n.sourceMu.Unlock()
+	n.perimeter = perimeter
+	// Retained handshake classifications belong to the previous perimeter.
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.directions = make(map[string]string)
+	for key, conn := range n.known {
+		n.directions[key] = perimeter.ConnectionDirection(conn)
+	}
+}
+
+// SetInterval changes the running scan schedule without losing socket history.
+func (n *NetworkCollector) SetInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	n.mu.Lock()
+	n.interval = interval
+	n.mu.Unlock()
+	select {
+	case n.intervalChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (n *NetworkCollector) scanInterval() time.Duration {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.interval
 }
 
 // SetEtcPasswd overrides the /etc/passwd path (useful for testing).
@@ -179,13 +233,15 @@ func (n *NetworkCollector) Health() capability.HealthStatus {
 func (n *NetworkCollector) loop(ctx context.Context) {
 	n.scan()
 
-	ticker := time.NewTicker(n.interval)
+	ticker := time.NewTicker(n.scanInterval())
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-n.intervalChanged:
+			ticker.Reset(n.scanInterval())
 		case <-ticker.C:
 			n.scan()
 		}
@@ -197,55 +253,78 @@ func (n *NetworkCollector) loop(ctx context.Context) {
 func (n *NetworkCollector) scan() {
 	n.sourceMu.RLock()
 	defer n.sourceMu.RUnlock()
-	protocols := []string{"tcp", "tcp6", "udp", "udp6"}
+	collected := n.sockets.Refresh()
 	snapshot := make(map[string]ConnectionInfo)
-
-	parsed := 0
-	for _, proto := range protocols {
-		path := filepath.Join(n.procRoot, "net", proto)
-		conns, err := ParseProcNet(path, proto)
-		if err != nil {
-			continue // file may not exist (e.g. no IPv6)
-		}
-		for _, c := range conns {
-			snapshot[c.key()] = c
-		}
-		parsed += len(conns)
-	}
 
 	n.mu.Lock()
 	prevKnown := n.known
 	wasBaseline := n.baseline
+	// A failed table read is not evidence that every socket disappeared.
+	for key, conn := range prevKnown {
+		if !collected.readOK[conn.Protocol] {
+			snapshot[key] = conn
+		}
+	}
+	previousFlows := make(map[string][]string)
+	for key, conn := range prevKnown {
+		previousFlows[conn.flowKey()] = append(previousFlows[conn.flowKey()], key)
+	}
+	for _, conn := range collected.Connections {
+		key := conn.key()
+		// Keep a stable instance across inode loss and TCP handshake inode
+		// assignment. A later socket reusing a TIME_WAIT tuple is a new instance.
+		if matches := previousFlows[conn.flowKey()]; len(matches) == 1 {
+			previous := prevKnown[matches[0]]
+			promoted := previous.Inode == 0 && strings.HasPrefix(conn.Protocol, "tcp") &&
+				(previous.State == "SYN_RECV" || previous.State == "SYN_SENT")
+			if conn.Inode == previous.Inode || conn.Inode == 0 || promoted {
+				key = matches[0]
+			}
+		}
+		snapshot[key] = conn
+	}
 	n.known = snapshot
 	n.baseline = true
 	n.health = capability.HealthRunning
 	n.mu.Unlock()
 
 	if !wasBaseline {
-		log.Printf("network collector: baseline established with %d connections", parsed)
+		for key, conn := range snapshot {
+			n.directions[key] = n.perimeter.ConnectionDirection(conn)
+		}
+		log.Printf("network collector: baseline established with %d connections", len(snapshot))
 		return
 	}
 
-	// Opened connections (in snapshot but not in previous)
+	// Enrich a generation in one descriptor walk, retaining context for closure.
 	for key, conn := range snapshot {
-		if _, existed := prevKnown[key]; !existed {
-			// Resolve PID only for opened connections (costly inode scan).
-			proc := ResolveSocketInode(n.procRoot, conn.Inode)
-			n.emitEvent("network.connection_opened", conn, proc)
+		previous, existed := prevKnown[key]
+		if candidate := n.perimeter.ConnectionDirection(conn); candidate != "unknown" || n.directions[key] == "" {
+			n.directions[key] = candidate
+		}
+		if n.owners[key] == nil && collected.readOK[conn.Protocol] {
+			n.owners[key] = collected.ResolveInode(conn.Inode)
+		}
+		if !existed {
+			n.emitEvent("network.connection_opened", conn, n.owners[key], n.directions[key], collected.ObservedAt)
+		} else if previous.State != conn.State {
+			n.emitEvent("network.connection_state_changed", conn, n.owners[key], n.directions[key], collected.ObservedAt)
 		}
 	}
 
 	// Closed connections (in previous but not in snapshot)
 	for key, conn := range prevKnown {
 		if _, exists := snapshot[key]; !exists {
-			n.emitEvent("network.connection_closed", conn, nil)
+			n.emitEvent("network.connection_closed", conn, n.owners[key], n.directions[key], collected.ObservedAt)
+			delete(n.owners, key)
+			delete(n.directions, key)
 		}
 	}
 }
 
 // emitEvent publishes a network connection event into the pipeline.
-// proc is optional — only populated for opened connections.
-func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc *ProcessInfo) {
+// proc is optional and may contain the socket's last observed owner.
+func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc *ProcessInfo, direction string, observedAt time.Time) {
 	tr := transport(conn.Protocol)
 	netType := networkType(conn.Protocol)
 
@@ -272,7 +351,7 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 	networkMap := map[string]interface{}{
 		"transport":    tr,
 		"type":         netType,
-		"direction":    direction(conn),
+		"direction":    direction,
 		"community_id": cid,
 		"state":        conn.State,
 		"inode":        conn.Inode,
@@ -284,18 +363,21 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 		"network":     networkMap,
 	}
 
-	// Enrich with process info when available (opened events only).
+	// Include the socket's retained process context when available.
 	if proc != nil {
 		payload["process"] = map[string]interface{}{
 			"pid":        proc.PID,
 			"name":       proc.Name,
 			"executable": proc.Executable,
 		}
+		if proc.EntityID != "" {
+			payload["process"].(map[string]interface{})["entity_id"] = proc.EntityID
+		}
 	}
 
 	event := events.Event{
 		ID:        fmt.Sprintf("net-%s-%d", eventType, time.Now().UnixNano()),
-		Timestamp: time.Now().UTC(),
+		Timestamp: observedAt,
 		Type:      eventType,
 		Category:  "network",
 		Kind:      "event",
@@ -310,34 +392,10 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 	n.pipeline.Emit(event)
 }
 
-// direction infers the ECS network.direction from the connection state and addresses.
-// Values: "inbound", "outbound", "listening", "internal"
+// direction uses the default perimeter for callers without configured context.
 func direction(conn ConnectionInfo) string {
-	if conn.State == "LISTEN" {
-		return "listening"
-	}
-	if conn.RemoteAddr == "0.0.0.0" || conn.RemoteAddr == "::" {
-		return "listening"
-	}
-	// If both endpoints are loopback or same host, treat as internal.
-	if isLoopback(conn.LocalAddr) && isLoopback(conn.RemoteAddr) {
-		return "internal"
-	}
-	// Heuristic: if local port is a well-known server port and remote port is
-	// ephemeral (>1023), this is likely an inbound connection.
-	if conn.LocalPort > 0 && conn.LocalPort <= 1023 && conn.RemotePort > 1023 {
-		return "inbound"
-	}
-	return "outbound"
-}
-
-// isLoopback returns true for 127.x.x.x or ::1 addresses.
-func isLoopback(addr string) bool {
-	ip := net.ParseIP(addr)
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback()
+	perimeter, _ := NewPerimeter(nil)
+	return perimeter.ConnectionDirection(conn)
 }
 
 // transport extracts the ECS network.transport value ("tcp" or "udp") from the

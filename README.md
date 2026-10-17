@@ -18,7 +18,7 @@ Replace `<TOKEN>` with the token from **Coordinator → Enroll new XDR Agent**. 
 
 ## Operate and remove
 
-For direct event delivery to OpenSearch 3.7+, configure a restricted username/password and trusted CA using [these steps](docs/api-endpoints.md#direct-opensearch-ingestion). Health and enrollment continue through Coordinator.
+Manage shared scan intervals, shipment timing, and internal networks through **Coordinator → Policies → Edit**; enrolled agents [save and apply policy settings automatically](docs/api-endpoints.md#managed-configuration). For direct event delivery to OpenSearch 3.7+, configure a restricted username/password and trusted CA using [these steps](docs/api-endpoints.md#direct-opensearch-ingestion). Health and enrollment continue through Coordinator.
 
 ```bash
 sudo systemctl status xdr-agent.service

@@ -84,13 +84,14 @@ type ProcessInfo struct {
 // ProcessCollector monitors process creation and termination by periodically
 // scanning /proc and diffing the PID set. It implements capability.Capability.
 type ProcessCollector struct {
-	sourceMu sync.RWMutex
-	workers  sync.WaitGroup
-	pipeline *events.Pipeline
-	agentID  string
-	hostname string
-	interval time.Duration
-	procRoot string // path to /proc; defaults to /proc
+	sourceMu        sync.RWMutex
+	workers         sync.WaitGroup
+	pipeline        *events.Pipeline
+	agentID         string
+	hostname        string
+	interval        time.Duration
+	intervalChanged chan struct{}
+	procRoot        string // path to /proc; defaults to /proc
 
 	mu       sync.Mutex
 	health   capability.HealthStatus
@@ -120,18 +121,19 @@ func NewProcessCollector(pipeline *events.Pipeline, agentID, hostname string, in
 		interval = defaultProcInterval
 	}
 	return &ProcessCollector{
-		pipeline:     pipeline,
-		agentID:      agentID,
-		hostname:     hostname,
-		interval:     interval,
-		procRoot:     defaultProcRoot,
-		health:       capability.HealthStopped,
-		known:        make(map[int]ProcessInfo),
-		tree:         NewProcessTree(),
-		uids:         newUIDCache(),
-		gids:         newGIDCache(),
-		prevCPU:      make(map[int][2]uint64),
-		latestCPUPct: make(map[int]float64),
+		pipeline:        pipeline,
+		agentID:         agentID,
+		hostname:        hostname,
+		interval:        interval,
+		intervalChanged: make(chan struct{}, 1),
+		procRoot:        defaultProcRoot,
+		health:          capability.HealthStopped,
+		known:           make(map[int]ProcessInfo),
+		tree:            NewProcessTree(),
+		uids:            newUIDCache(),
+		gids:            newGIDCache(),
+		prevCPU:         make(map[int][2]uint64),
+		latestCPUPct:    make(map[int]float64),
 	}
 }
 
@@ -141,6 +143,26 @@ func (p *ProcessCollector) SetProcRoot(path string) {
 	p.sourceMu.Lock()
 	defer p.sourceMu.Unlock()
 	p.procRoot = path
+}
+
+// SetInterval changes the running scan schedule without losing process history.
+func (p *ProcessCollector) SetInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.interval = interval
+	p.mu.Unlock()
+	select {
+	case p.intervalChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (p *ProcessCollector) scanInterval() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.interval
 }
 
 // ── capability.Capability interface ──────────────────────────────────────────
@@ -191,13 +213,15 @@ func (p *ProcessCollector) Health() capability.HealthStatus {
 func (p *ProcessCollector) loop(ctx context.Context) {
 	p.scan()
 
-	ticker := time.NewTicker(p.interval)
+	ticker := time.NewTicker(p.scanInterval())
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-p.intervalChanged:
+			ticker.Reset(p.scanInterval())
 		case <-ticker.C:
 			p.scan()
 		}
@@ -226,6 +250,31 @@ func (p *ProcessCollector) scan() {
 		snapshot[pid] = info
 	}
 
+	p.mu.Lock()
+	prevKnown := p.known
+	wasBaseline := p.baseline
+	p.mu.Unlock()
+
+	// Finish departed instances before replacing their PID in the lineage tree.
+	// A PID can be reused between scans without ever disappearing from /proc.
+	var departed []int
+	for pid, info := range prevKnown {
+		if current, exists := snapshot[pid]; exists && sameProcessInstance(current, info) {
+			continue
+		}
+		p.mu.Lock()
+		cpuPct := p.latestCPUPct[pid]
+		delete(p.latestCPUPct, pid)
+		p.mu.Unlock()
+		if !info.KernelThread {
+			p.emitEvent("process.end", info, cpuPct)
+		}
+		departed = append(departed, pid)
+	}
+	for _, pid := range departed {
+		p.tree.Remove(pid)
+	}
+
 	// Always keep the tree up to date so parent lookups are available at emit time.
 	for _, info := range snapshot {
 		p.tree.Update(info)
@@ -240,8 +289,6 @@ func (p *ProcessCollector) scan() {
 	}
 
 	p.mu.Lock()
-	prevKnown := p.known
-	wasBaseline := p.baseline
 	p.known = snapshot
 	p.baseline = true
 	p.health = capability.HealthRunning
@@ -253,7 +300,7 @@ func (p *ProcessCollector) scan() {
 	// (enrichNewProcess). Without this step the enriched values are lost after
 	// the first scan cycle and process.end events emit empty strings.
 	for pid, info := range snapshot {
-		if prev, ok := prevKnown[pid]; ok && !info.KernelThread && !prev.KernelThread {
+		if prev, ok := prevKnown[pid]; ok && sameProcessInstance(info, prev) && !info.KernelThread {
 			changed := false
 			if info.Username == "" && prev.Username != "" {
 				info.Username = prev.Username
@@ -315,7 +362,7 @@ func (p *ProcessCollector) scan() {
 			if info.KernelThread {
 				continue
 			}
-			if prev, ok := prevCPU[pid]; ok {
+			if prev, ok := prevCPU[pid]; ok && sameProcessInstance(info, prevKnown[pid]) && info.UTime >= prev[0] && info.STime >= prev[1] {
 				utimeDelta := info.UTime - prev[0]
 				stimeDelta := info.STime - prev[1]
 				pct := math.Round(float64(utimeDelta+stimeDelta)/sysDelta*10000) / 100
@@ -347,7 +394,7 @@ func (p *ProcessCollector) scan() {
 		if info.KernelThread {
 			continue
 		}
-		if prev, existed := prevKnown[pid]; !existed || prev.KernelThread {
+		if prev, existed := prevKnown[pid]; !existed || !sameProcessInstance(info, prev) {
 			enrichNewProcess(&info, p.uids, p.gids)
 			p.emitEvent("process.start", info, 0)
 			// Write the enriched info (Username and GroupName) back into
@@ -359,21 +406,10 @@ func (p *ProcessCollector) scan() {
 			p.mu.Unlock()
 		}
 	}
+}
 
-	// Terminated processes (in previous but not in snapshot).
-	// Include the last known cpu.pct so the final event is fully enriched.
-	for pid, info := range prevKnown {
-		if _, exists := snapshot[pid]; !exists {
-			if !info.KernelThread {
-				p.mu.Lock()
-				cpuPct := p.latestCPUPct[pid]
-				delete(p.latestCPUPct, pid)
-				p.mu.Unlock()
-				p.emitEvent("process.end", info, cpuPct)
-			}
-			p.tree.Remove(pid)
-		}
-	}
+func sameProcessInstance(a, b ProcessInfo) bool {
+	return a.PID == b.PID && a.StartTime == b.StartTime && a.KernelThread == b.KernelThread
 }
 
 // emitEvent publishes a process lifecycle event into the pipeline.
@@ -567,7 +603,7 @@ func ReadProcessInfo(procRoot string, pid int) (ProcessInfo, error) {
 	parseStatusFile(filepath.Join(pidDir, "status"), &info)
 
 	// Read /proc/[pid]/cmdline — NUL-separated arguments
-	info.CmdLine = readCmdline(filepath.Join(pidDir, "cmdline"))
+	info.CmdLine, info.Args = readCommandLine(filepath.Join(pidDir, "cmdline"))
 
 	// Read /proc/[pid]/exe — symlink to the executable
 	if target, err := os.Readlink(filepath.Join(pidDir, "exe")); err == nil {
@@ -731,13 +767,21 @@ func readSysTotalCPU(procRoot string) uint64 {
 	return total
 }
 
-// readCmdline reads /proc/[pid]/cmdline, trims trailing NUL bytes, and
-// replaces NUL argument separators with spaces.
-func readCmdline(path string) string {
+// readCommandLine derives both command_line and args from one cmdline read.
+func readCommandLine(path string) (string, []string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	data = bytes.TrimRight(data, "\x00")
-	return string(bytes.ReplaceAll(data, []byte{0}, []byte{' '}))
+	if len(data) == 0 {
+		return "", nil
+	}
+	var args []string
+	for _, arg := range strings.Split(string(data), "\x00") {
+		if arg != "" {
+			args = append(args, arg)
+		}
+	}
+	return string(bytes.ReplaceAll(data, []byte{0}, []byte{' '})), args
 }

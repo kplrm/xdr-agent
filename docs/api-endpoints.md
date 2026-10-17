@@ -5,8 +5,8 @@ The Linux agent has **no inbound HTTP server**. This is the authoritative ingest
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | /api/v1/agents/enroll | Register persistent identity using an enrollment token |
-| POST | /api/v1/agents/heartbeat | Report health and installed protections; receive upgrades |
-| GET | /api/v1/agents/commands | Poll upgrades with `agent_id` and `agent_version` query parameters |
+| POST | /api/v1/agents/heartbeat | Report health, protections, and configuration status; receive upgrades and settings |
+| GET | /api/v1/agents/commands | Poll upgrades and settings with `agent_id` and `agent_version` query parameters |
 | POST | /api/v1/agents/telemetry | Deliver process, file, connection, and DNS events |
 | POST | /api/v1/agents/security | Deliver YARA alerts and prevention outcomes |
 | POST | /api/v1/agents/logs | Deliver runtime logs |
@@ -15,11 +15,34 @@ Every Coordinator request sends `Authorization: Bearer <enrollment_token>` and `
 
 Enrollment sends `agent_id`, `machine_id`, `hostname`, `architecture`, `os_type`, `ip_addresses`, `policy_id`, `tags`, and `agent_version`; the response contains `enrollment_id` and `message`.
 
-Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus `protection`: `rule_source`, `rule_version`, `rules_sha256`, `rule_count`, `platform`, `mode`, and `health` (component-to-status map). Heartbeat and command responses contain `message` and optional `pending_commands`, currently `upgrade:<version>`.
+Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus `protection`: `rule_source`, `rule_version`, `rules_sha256`, `rule_count`, `platform`, `mode`, and `health` (component-to-status map). Heartbeat and command responses contain `message`, optional `pending_commands` (`upgrade:<version>`), and optional `managed_config` below. Heartbeats report optional `config_revision` (last successfully applied revision) and `config_error` (latest application error, at most 1,024 bytes).
 
 Health is independent of version checks. Execution blocking is `not_applicable` in detection mode. YARA scan failures report degraded health and successful scans restore it when the scan queue is no longer full; execution-blocking failures remain separate.
 
 Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. [Telemetry](telemetry.md) defines the event envelope and payload fields. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
+
+## Managed configuration
+
+Edit **Coordinator → Policies → Edit** to manage settings for every enrolled agent assigned to that policy, including `default-endpoint`. Coordinator returns the assigned policy through authenticated heartbeats and command polls; the agent normally receives changes within the 5-second command-poll interval. No inbound endpoint is needed.
+
+```json
+"managed_config": {
+  "schema_version": 1,
+  "revision": "opaque-policy-revision",
+  "settings": {
+    "internal_networks": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"],
+    "process_scan_interval_seconds": 1,
+    "network_scan_interval_seconds": 1,
+    "telemetry_ship_interval_seconds": 5
+  }
+}
+```
+
+These four settings are the managed allowlist. Intervals are whole seconds from 1 to 86,400; the CIDR list permits at most 256 entries, including an explicit empty list. Settings are a complete snapshot of policy overrides. Omitting a never-managed field preserves its local value; removing a previously managed field resets it to the packaged default. An empty `settings` object clears previous overrides. An absent `managed_config` leaves local configuration unchanged. Only configuration edits change the policy revision; renaming a policy does not.
+
+The agent validates the complete update before atomically merging it into its active config file (normally `/etc/xdr-agent/config.json`, mode `0600`). Identity, enrollment token, destinations, OpenSearch credentials, and unrelated local keys are preserved. It updates collection/shipping timers and perimeter classification in place, retaining queues and collection baselines. Repeated revisions do not rewrite the file. Invalid or unwritable updates keep the last good configuration and report an error; Coordinator displays Pending, Applied, or Error using the next heartbeat's acknowledgment.
+
+Deploy Coordinator support, then upgrade agents to **0.4.6 or later**. Older agents ignore the additive response; editing a package template does not modify installed files. New managed fields require matching server/agent validation and schema compatibility, plus explicit reset/migration handling for removed fields. Protection settings and credentials remain local. Existing groups are unmanaged until settings are saved; moving a previously managed agent to an unmanaged group clears its prior overrides.
 
 ## Direct OpenSearch ingestion
 

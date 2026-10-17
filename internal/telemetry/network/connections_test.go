@@ -277,10 +277,10 @@ verify:
 		t.Fatal("expected at least one connection_closed event")
 	}
 
-	// Check the opened event has outbound direction
+	// An established socket first seen after the handshake has no known initiator.
 	net0 := openEvents[0].Payload["network"].(map[string]interface{})
-	if net0["direction"] != "outbound" {
-		t.Errorf("opened event direction = %q, want %q", net0["direction"], "outbound")
+	if net0["direction"] != "unknown" {
+		t.Errorf("opened event direction = %q, want %q", net0["direction"], "unknown")
 	}
 	if net0["state"] != "ESTABLISHED" {
 		t.Errorf("opened event state = %q, want %q", net0["state"], "ESTABLISHED")
@@ -333,10 +333,11 @@ func TestDirection(t *testing.T) {
 		conn ConnectionInfo
 		want string
 	}{
-		{ConnectionInfo{State: "LISTEN"}, "listening"},
-		{ConnectionInfo{State: "ESTABLISHED", RemoteAddr: "0.0.0.0"}, "listening"},
-		{ConnectionInfo{State: "ESTABLISHED", RemoteAddr: "::"}, "listening"},
-		{ConnectionInfo{State: "ESTABLISHED", RemoteAddr: "8.8.8.8"}, "outbound"},
+		{ConnectionInfo{State: "LISTEN"}, "unknown"},
+		{ConnectionInfo{LocalAddr: "10.0.0.1", State: "ESTABLISHED", RemoteAddr: "0.0.0.0"}, "unknown"},
+		{ConnectionInfo{LocalAddr: "fd00::1", State: "ESTABLISHED", RemoteAddr: "::"}, "unknown"},
+		{ConnectionInfo{LocalAddr: "10.0.0.1", State: "ESTABLISHED", RemoteAddr: "8.8.8.8"}, "unknown"},
+		{ConnectionInfo{LocalAddr: "10.0.0.1", LocalPort: 8443, State: "SYN_RECV", RemoteAddr: "8.8.8.8", RemotePort: 50000}, "inbound"},
 	}
 
 	for _, tt := range tests {

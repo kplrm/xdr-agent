@@ -27,9 +27,11 @@ Payload paths below are relative to `payload`; braces list sibling fields. Colle
 
 `event.severity` is required by the shared event schema. Process, connection, and DNS telemetry always use `0`; no current path raises their severity. A YARA match emits a separate severity-`3` security alert and leaves the source telemetry unchanged. File telemetry can use 1–3 even without a confirmed threat. Routing to telemetry/security uses event kind/module, not severity; `0` does not certify that an activity is safe.
 
+Collection timing and [batch delivery](architecture.md#event-delivery-and-loss) are independent. Coordinator [policy settings](api-endpoints.md#managed-configuration) update scan/send intervals and internal CIDRs in the active local config without restarting collection. Events retain their observation timestamps and IDs while buffered and retried; duplicate IDs already queued or in flight are ignored. Unchanged process/socket/file snapshots do not generate new events. Distinct occurrences retain distinct IDs even when their payloads match.
+
 ## Processes
 
-[`monitor.go`](../internal/telemetry/process/monitor.go) and [`enrichment.go`](../internal/telemetry/process/enrichment.go) scan numeric `/proc/<PID>/` directories on the [configured interval](architecture.md#runtime-and-configuration). The first scan establishes a silent baseline. Later PID-set differences emit `process.start` / `process.end`, module `telemetry.process`, category `process`, kind `event`, severity `0`.
+[`monitor.go`](../internal/telemetry/process/monitor.go) and [`enrichment.go`](../internal/telemetry/process/enrichment.go) scan numeric `/proc/<PID>/` directories on `process_scan_interval_seconds` (default 1 s), independently of shipping. The first scan establishes a silent baseline. Later PID + start-tick differences emit `process.start` / `process.end` once per observed transition, including PID reuse. Module `telemetry.process`, category `process`, kind `event`, severity `0`.
 
 The table describes collected fields. Sources without a leading / are relative to /proc/<PID>/. Usage explains each field’s purpose in Agent operation or security investigations.
 
@@ -41,7 +43,7 @@ The table describes collected fields. Sources without a leading / are relative t
 | `process.name` | `stat` field 2 (`comm`) | Short task name; may differ from executable/arguments and can be changed | Investigation label |
 | `process.executable` | `exe` symlink | Resolved executable path; interpreted commands usually identify the interpreter | Select executable for YARA; identify related processes |
 | `process.command_line` | `cmdline` | Arguments joined with spaces; original argument boundaries are lost | Readable execution context |
-| `process.args` | Separate `cmdline` read | Array preserving nonempty NUL-separated arguments; unavailable/empty becomes `null` | Structured execution context |
+| `process.args` | Same `cmdline` read as `command_line` | Array preserving nonempty NUL-separated arguments; unavailable/empty becomes `null` | Structured execution context |
 | `process.working_directory` | `cwd` symlink | Process working-directory path; `""` when unresolved | Resolve execution context; target is not traversed |
 | `process.state` | `stat` field 3 | Kernel state, e.g. R running, S sleeping, D uninterruptible wait, Z zombie, T/t stopped/traced, I idle | Snapshot context |
 | `process.start_time` | `stat` field 22 | Clock ticks since boot, not a UTC timestamp | Derive entity ID; verify process before termination |
@@ -79,7 +81,7 @@ Notes:
 
 - Values refresh each scan but are shipped only with lifecycle events. Start events omit CPU percentage; end events carry the last snapshot and last retained percentage ≥0.01%, which may predate the last interval. There is no continuous resource stream or exit code. Event time records discovery/disappearance, not exact execution/exit time.
 
-- Unreadable `stat` skips the PID. Other read failures leave empty strings, `null`, or numeric zeros; a zero UID does not establish root ownership, and zero I/O/FD counts do not establish inactivity. Command line and argument reads can disagree if the process changes/exits between reads. The payload has no per-field collection-success flags. Polling and PID-only comparisons can miss short-lived processes, PID reuse, and exec changes within an existing PID.
+- Unreadable `stat` skips the PID. Other read failures leave empty strings, `null`, or numeric zeros; a zero UID does not establish root ownership, and zero I/O/FD counts do not establish inactivity. The payload has no per-field collection-success flags. Polling can miss short-lived processes and exec changes within an existing process instance.
 
 ## Connections and DNS
 
@@ -87,7 +89,11 @@ Connections and DNS use separate modules because socket changes and DNS messages
 
 Payload paths below are relative to `payload`. **Usage** explains each field's role in attribution, correlation, or investigation; these collectors do not apply behavioral detection rules.
 
-[`connections.go`](../internal/telemetry/network/connections.go) reads only `/proc/net/{tcp,tcp6,udp,udp6}`: local/remote address and port, state, UID, inode. It emits `network.connection_opened` / `network.connection_closed`, module `telemetry.network`, category `network`, severity 0, after a silent first baseline.
+[`snapshot.go`](../internal/telemetry/network/snapshot.go) reads each `/proc/net/{tcp,tcp6,udp,udp6}` table once per collection cycle: local/remote address and port, state, UID, inode. The immutable snapshot is shared by connections and DNS; ownership resolution walks `/proc/<PID>/fd/*` at most once per generation, only when needed. DNS never triggers another table read. `network_scan_interval_seconds` defaults to 1 s and is independent of shipment timing.
+
+[`connections.go`](../internal/telemetry/network/connections.go) emits `network.connection_opened`, `network.connection_state_changed`, and `network.connection_closed`, module `telemetry.network`, category `network`, severity 0, after a silent first baseline. Unchanged snapshots emit nothing; state changes update a socket instance rather than generating a new connection. Known process identity and handshake direction are retained for later state/closure events.
+
+`internal_networks` in `/etc/xdr-agent/config.json` defaults to RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and IPv6 ULA (`fc00::/7`, RFC 4193). A configured list replaces these defaults; `[]` clears them. Loopback is always internal. Direction is `internal` when both endpoints are inside, `external` when both are outside, `outbound` for inside-to-outside, and `inbound` for outside-to-inside. Unspecified/invalid endpoints are `unknown`. Crossing connection direction requires observed `SYN_SENT`/`SYN_RECV` evidence; otherwise it is `unknown`. Ports do not establish direction. DNS direction follows packet sender/recipient, so responses can reverse it. `network.state` uses the kernel-state mapping below.
 
 Field numbers count whitespace-separated data columns from 1, including `sl`; combined values such as `IP:port` count as one field.
 
@@ -104,12 +110,13 @@ Field numbers count whitespace-separated data columns from 1, including `sl`; co
 | `network.state` | Field 4 (`st`) | Mapped TCP state name or raw hex; mapping also applies to UDP | Describe socket state; UDP `ESTABLISHED` does not imply a TCP handshake |
 | `network.inode` | Field 10 (`inode`) | Kernel socket inode; 0 when unavailable | Locate ownership through `/proc/<PID>/fd/*` links |
 | `network.community_id` | Derived from fields 2/3 and filename (protocol) | Direction-independent Community ID v1 flow hash | Correlate observations across collectors |
-| `network.direction` | Derived from fields 2/3/4 (endpoints and state) | listening, internal, inbound, outbound; internal means both endpoints are loopback | Orient traffic; not proof of connection initiator |
-| `process.pid` | Field 10 matched to `/proc/<PID>/fd/*`; PID from directory name | Optional owning PID; opened events only | Attribute the socket to a process |
+| `network.direction` | Fields 2/3/4 and configured `internal_networks` | Perimeter classification: internal, external, inbound, outbound, unknown | Orient traffic using endpoint membership and retained handshake evidence |
+| `process.pid` | Field 10 matched to `/proc/<PID>/fd/*`; PID from directory name | Optional first observed socket holder; retained for closure | Attribute the socket to a process |
 | `process.name` | Owning PID's `comm` | Short process name; empty if unreadable | Readable process label |
 | `process.executable` | Owning PID's `exe` symlink | Executable path; empty if unresolved | Identify the owning program |
+| `process.entity_id` | Agent ID + owning PID + `stat` field 22 | Full SHA-256, using the same process-instance identity as process events | Correlate network and process events without relying on reusable PIDs |
 
-The snapshot key includes protocol, endpoints, and state; a TCP state transition can emit a closed/opened pair. Polling can miss connections; attribution can race with socket closure. The entire `process` object is omitted when ownership is unresolved and on closed events. Direction is approximate; services on ports above 1023 can be labelled outbound. Network tables reflect the Agent's network namespace; it does not walk `/proc/<PID>/net` or container namespaces. All other `/proc/net` entries are unused.
+Socket instances use protocol, endpoints, and inode; an unambiguous transition to inode 0 retains the tracked instance. Polling can miss connections; ownership can race with socket closure and shared descriptors can have multiple holders. Process start ticks are checked around the ownership walk. The entire `process` object is omitted when ownership is unresolved; closure context is last observed, not a fresh lookup. Failed table reads do not establish socket closure. Network tables reflect the Agent's network namespace; it does not walk `/proc/<PID>/net` or container namespaces. All other `/proc/net` entries are unused.
 
 [`dns.go`](../internal/telemetry/network/dns.go) captures Ethernet IPv4/IPv6 UDP traffic to/from port 53 on all interfaces through `AF_PACKET` (`CAP_NET_RAW` required). It emits `dns.query` / `dns.answer`, module `telemetry.dns`, category `network`, severity 0.
 
@@ -142,11 +149,15 @@ DNS sources are packet fields, not `/proc/net` columns, except for process attri
 | `network.transport` | IPv4 header byte 9 / IPv6 byte 6; must be 17 (UDP) | `udp` | Identify the captured transport |
 | `network.type` | Derived from parsed `source.ip` format | `ipv4` or `ipv6` | Identify packet address family |
 | `network.community_id` | Derived from transport and packet endpoints | Direction-independent Community ID v1 flow hash | Correlate query/response flows and connection observations |
-| `process.pid` | `/proc/net/udp{,6}` fields 2/10 matched to `/proc/<PID>/fd/*`, or matched query context | Optional querying-process PID | Attribute the DNS activity |
+| `network.direction` | Packet endpoints and configured `internal_networks` | Perimeter classification: internal, external, inbound, outbound, unknown | Classify each observed message relative to the perimeter |
+| `process.pid` | Shared `/proc/net/udp{,6}` fields 2/3/10 matched to `/proc/<PID>/fd/*`, or matched query context | Optional querying-process PID | Attribute the DNS activity |
 | `process.name` | Querying PID's `comm` | Short process name; empty if unreadable | Readable querying-process label |
 | `process.executable` | Querying PID's `exe` symlink | Executable path; empty if unresolved | Identify the querying program |
+| `process.entity_id` | Agent ID + querying PID + `stat` field 22, or matched query context | Full SHA-256 process-instance identity | Correlate DNS and process events |
 
-No TCP DNS, DoH/DoT, raw packet payload, authority/additional records, or full packet capture is shipped. Process attribution uses `/proc/net/udp{,6}` and PID socket links/`comm`/`exe`, with ownership snapshots cached for 2 s. Response events can inherit the matched query's process context. The entire `process` object is omitted when attribution is unavailable.
+No TCP DNS, DoH/DoT, raw packet payload, authority/additional records, or full packet capture is shipped. Process attribution uses the shared UDP snapshot and PID socket links/`comm`/`exe`/`stat`; new or short-lived sockets may remain unattributed, and ambiguous socket ownership is omitted. Responses can inherit query context matched by client/resolver endpoints, transaction ID, and question for up to 5 s. The entire `process` object is omitted when attribution is unavailable.
+
+Loopback's outgoing capture copy is skipped; its received copy is retained for both queries and responses. Genuine repeated datagrams, A/AAAA transactions, and query/response events remain distinct. Identical packets seen on different interfaces are retained when the capture metadata cannot establish that they are copies; Community ID is never a deduplication key. Observation timestamps precede process enrichment, regardless of the shipment interval.
 
 ## File changes and access
 
@@ -154,7 +165,7 @@ No TCP DNS, DoH/DoT, raw packet payload, authority/additional records, or full p
 
 Direct files: `/etc/{passwd,shadow,group,gshadow,security/opasswd,sudoers,crontab,ld.so.conf,ld.so.preload,profile,environment,default/grub,hosts,hostname,resolv.conf,nsswitch.conf,hosts.allow,hosts.deny,fstab,bash.bashrc,apt/sources.list}`, `/root/{.bashrc,.profile,.bash_login}`, `/boot/grub/grub.cfg`. Nonrecursive directories (immediate files only): `/usr/lib/systemd/system`, `/lib/systemd/system`, `/boot/grub`, `/lib/{x86_64-linux-gnu,aarch64-linux-gnu}/security`, `/usr/share/keyrings`. Missing paths are skipped; this is not a whole-filesystem baseline.
 
-[`fim.go`](../internal/telemetry/file/fim.go) uses inotify plus hourly rescans against a persistent BoltDB baseline. Initial baseline emits no events; warm restarts retain existing records. New subdirectories of recursive watches are added. Renames are delete/create events; inotify overflow schedules a rescan. Individually watched files can lose their watch after replacement; rescans still compare their paths.
+[`fim.go`](../internal/telemetry/file/fim.go) uses inotify plus hourly rescans against one serialized, persistent BoltDB baseline. Unchanged observations and repeated delete notifications emit nothing; changes and deletion/recreation remain distinct. Initial baseline emits no events; warm restarts retain existing records. New subdirectories of recursive watches are added. Renames are delete/create events; inotify overflow schedules a rescan. Individually watched files can lose their watch after replacement; rescans still compare their paths.
 
 | Payload field(s) | Meaning / local use |
 | --- | --- |
@@ -173,9 +184,9 @@ Direct files: `/etc/{passwd,shadow,group,gshadow,security/opasswd,sudoers,cronta
 
 Events are `file.created`, `file.modified`, `file.attrs_changed`, `file.deleted`, module `telemetry.file`, category `file`, kind `event`. Hash, entropy, and header fields require a readable regular file ≤256 MiB; empty/zero optional values may be omitted.
 
-Hash and permission/ownership changes drive rescan events. Creates are severity 2; attribute changes are 1 (inotify) or 2 (rescan). Modifications/deletions are 2, or 3 on critical paths. Entropy >7.5 raises severity to at least 3 and adds `high-entropy` / `potentially-packed` tags; it is not itself a YARA match. Deleted events can contain last-known metadata. Symlinks are recorded without hashing their target; files above the size limit have no content hash.
+Content and stored metadata changes drive events. Creates are severity 2; attribute changes are 1. Modifications/deletions are 2, or 3 on critical paths. Entropy >7.5 raises severity to at least 3 and adds `high-entropy` / `potentially-packed` tags; it is not itself a YARA match. Deleted events can contain last-known metadata. Symlinks are recorded without hashing their target; files above the size limit have no content hash.
 
-[`access.go`](../internal/telemetry/file/access.go) watches `/etc/shadow`, `/etc/gshadow`, `/etc/security/opasswd` for open/read, and `/root/.ssh`, `/etc/ssh` for immediate-child opens. Emits `file.access`, module `telemetry.file`, category `file`, severity 3. `file.{path,name,directory}` identify the accessed file; `file.event.action=access` and `event.action=file-accessed` label the action inside the payload. ATT&CK mapping is Credential Access / T1003.008 (password files) or T1552.004 (SSH paths), based on path rather than a confirmed attack. Legitimate reads, including the Agent's own, can trigger events; inotify provides no accessing PID/user. Watches are installed once, not recursively; missing/replaced paths need restart to reinstall. At most one event/path/2 s and 200 events/s are emitted. Health is separately reported as `telemetry.file.access`; running health does not guarantee every optional watch succeeded.
+[`access.go`](../internal/telemetry/file/access.go) watches `/etc/shadow`, `/etc/gshadow`, `/etc/security/opasswd` for open/read, and `/root/.ssh`, `/etc/ssh` for immediate-child opens. Emits `file.access`, module `telemetry.file`, category `file`, severity 3. `file.{path,name,directory}` identify the accessed file; `file.event.action=access` and `event.action=file-accessed` label the action inside the payload. ATT&CK mapping is Credential Access / T1003.008 (password files) or T1552.004 (SSH paths), based on path rather than a confirmed attack. Legitimate reads, including the Agent's own, can trigger events; inotify provides no accessing PID/user. Watches are installed once, not recursively; missing/replaced paths need restart to reinstall. Repeated open/read occurrences remain distinct, with an overload cap of 200 events/s. Health is separately reported as `telemetry.file.access`; running health does not guarantee every optional watch succeeded.
 
 ## Protection and runtime logs
 

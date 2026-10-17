@@ -62,7 +62,6 @@ type FileAccessCollector struct {
 	inotifyMu  sync.Mutex
 	wdToPath   map[int32]string
 	emitMu     sync.Mutex
-	lastEmit   map[string]time.Time
 	windowFrom time.Time
 	windowSent int
 	windowDrop int
@@ -88,7 +87,6 @@ func NewFileAccessCollector(
 		watchPaths: watchPaths,
 		inotifyFd:  -1,
 		wdToPath:   make(map[int32]string),
-		lastEmit:   make(map[string]time.Time),
 		health:     capability.HealthStopped,
 	}
 }
@@ -206,11 +204,10 @@ func (a *FileAccessCollector) setupInotify() error {
 const accessBufSize = 65536
 
 const (
-	fileAccessPerPathMinInterval = 2 * time.Second
-	fileAccessBurstWindow        = 1 * time.Second
-	fileAccessBurstMaxEvents     = 200
-	fileAccessIdleMinBackoff     = 50 * time.Millisecond
-	fileAccessIdleMaxBackoff     = 500 * time.Millisecond
+	fileAccessBurstWindow    = 1 * time.Second
+	fileAccessBurstMaxEvents = 200
+	fileAccessIdleMinBackoff = 50 * time.Millisecond
+	fileAccessIdleMaxBackoff = 500 * time.Millisecond
 )
 
 func (a *FileAccessCollector) loop(ctx context.Context) {
@@ -292,6 +289,9 @@ func (a *FileAccessCollector) handleAccessEvent(wd int32, mask uint32, name stri
 	if !ok {
 		return
 	}
+	if mask&(syscall.IN_OPEN|syscall.IN_ACCESS) == 0 {
+		return
+	}
 
 	// Ignore access events for the directory itself (triggered when the
 	// directory is listed, not when a file inside is accessed).
@@ -315,7 +315,7 @@ func (a *FileAccessCollector) handleAccessEvent(wd int32, mask uint32, name stri
 //   - SSH paths (/root/.ssh, /etc/ssh) → T1552.004 (Unsecured Credentials: Private Keys)
 func (a *FileAccessCollector) emitAccessEvent(path string) {
 	now := time.Now().UTC()
-	if !a.shouldEmit(path, now) {
+	if !a.shouldEmit(now) {
 		return
 	}
 
@@ -357,9 +357,8 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 	a.pipeline.Emit(ev)
 }
 
-// shouldEmit bounds startup storms while preserving actionable telemetry.
-// It applies both a per-path debounce and a global per-second cap.
-func (a *FileAccessCollector) shouldEmit(path string, now time.Time) bool {
+// shouldEmit bounds overload without treating repeated accesses as duplicates.
+func (a *FileAccessCollector) shouldEmit(now time.Time) bool {
 	a.emitMu.Lock()
 	defer a.emitMu.Unlock()
 
@@ -370,20 +369,6 @@ func (a *FileAccessCollector) shouldEmit(path string, now time.Time) bool {
 		a.windowFrom = now
 		a.windowSent = 0
 		a.windowDrop = 0
-
-		if len(a.lastEmit) > 4096 {
-			cutoff := now.Add(-(2 * fileAccessPerPathMinInterval))
-			for p, ts := range a.lastEmit {
-				if ts.Before(cutoff) {
-					delete(a.lastEmit, p)
-				}
-			}
-		}
-	}
-
-	if last, ok := a.lastEmit[path]; ok && now.Sub(last) < fileAccessPerPathMinInterval {
-		a.windowDrop++
-		return false
 	}
 
 	if a.windowSent >= fileAccessBurstMaxEvents {
@@ -392,6 +377,5 @@ func (a *FileAccessCollector) shouldEmit(path string, now time.Time) bool {
 	}
 
 	a.windowSent++
-	a.lastEmit[path] = now
 	return true
 }

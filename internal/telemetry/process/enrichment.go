@@ -115,29 +115,6 @@ func readCWD(pidDir string) string {
 	return target
 }
 
-// ── Command-line args ─────────────────────────────────────────────────────────
-
-// parseCmdlineArgs reads /proc/[pid]/cmdline and splits on NUL bytes.
-// ECS: process.args  (array of strings)
-func parseCmdlineArgs(pidDir string) []string {
-	data, err := os.ReadFile(filepath.Join(pidDir, "cmdline"))
-	if err != nil || len(data) == 0 {
-		return nil
-	}
-	// Trim trailing NUL bytes.
-	for len(data) > 0 && data[len(data)-1] == 0 {
-		data = data[:len(data)-1]
-	}
-	raw := strings.Split(string(data), "\x00")
-	out := raw[:0]
-	for _, s := range raw {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}
-
 // ── Open file descriptors ─────────────────────────────────────────────────────
 
 // countFDs counts the entries in /proc/[pid]/fd.
@@ -241,6 +218,11 @@ func isHex(s string) bool {
 
 // buildEntityID identifies a process instance within an Agent using the full SHA-256 digest.
 func buildEntityID(agentID string, pid int, startTime uint64) string {
+	return EntityID(agentID, pid, startTime)
+}
+
+// EntityID identifies a process instance for correlation across telemetry collectors.
+func EntityID(agentID string, pid int, startTime uint64) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s-%d-%d", agentID, pid, startTime)))
 	return hex.EncodeToString(h[:])
 }
@@ -253,7 +235,6 @@ func buildEntityID(agentID string, pid int, startTime uint64) string {
 func enrichProcessInfo(procRoot string, info *ProcessInfo) {
 	pidDir := filepath.Join(procRoot, strconv.Itoa(info.PID))
 	info.CWD = readCWD(pidDir)
-	info.Args = parseCmdlineArgs(pidDir)
 	info.FDCount = countFDs(pidDir)
 	info.IOReadBytes, info.IOWriteBytes = readIO(pidDir)
 	info.ContainerID = detectContainerID(pidDir)

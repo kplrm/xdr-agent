@@ -57,8 +57,10 @@ type Shipper struct {
 	username string
 	password string
 
-	mu     sync.Mutex
-	buffer []events.Event
+	mu              sync.Mutex
+	buffer          []events.Event
+	pending         map[string]struct{}
+	intervalChanged chan struct{}
 
 	dropFrom    time.Time
 	dropCount   int
@@ -91,7 +93,9 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipTLS},
 			},
 		},
-		buffer: make([]events.Event, 0, cfg.BatchSize),
+		buffer:          make([]events.Event, 0, cfg.BatchSize),
+		pending:         make(map[string]struct{}),
+		intervalChanged: make(chan struct{}, 1),
 	}
 }
 
@@ -102,6 +106,10 @@ func (s *Shipper) Enqueue(event events.Event) {
 		event.ID = events.NewID()
 	}
 	s.mu.Lock()
+	if _, exists := s.pending[event.ID]; exists {
+		s.mu.Unlock()
+		return
+	}
 	if len(s.buffer) >= s.cfg.MaxQueueEvents {
 		msg := s.recordDropLocked(event.Type, time.Now())
 		s.mu.Unlock()
@@ -111,6 +119,7 @@ func (s *Shipper) Enqueue(event events.Event) {
 		return
 	}
 	s.buffer = append(s.buffer, event)
+	s.pending[event.ID] = struct{}{}
 	s.mu.Unlock()
 
 }
@@ -145,15 +154,37 @@ func (s *Shipper) recordDropLocked(eventType string, now time.Time) string {
 	)
 }
 
-// Run packs events on a fixed interval. Drain producers and call Flush after
+// SetInterval changes delivery timing while retaining queued/in-flight events.
+func (s *Shipper) SetInterval(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.cfg.Interval = interval
+	s.mu.Unlock()
+	select {
+	case s.intervalChanged <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Shipper) shipInterval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Interval
+}
+
+// Run packs events on a configurable interval. Drain producers and call Flush after
 // Run exits to ship the final batch during shutdown.
 func (s *Shipper) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.cfg.Interval)
+	ticker := time.NewTicker(s.shipInterval())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.intervalChanged:
+			ticker.Reset(s.shipInterval())
 		case <-ticker.C:
 			if err := s.Flush(ctx); err != nil && ctx.Err() == nil {
 				log.Printf("shipper: %v", err)
@@ -179,6 +210,9 @@ func (s *Shipper) Flush(ctx context.Context) error {
 			pending := append(batch[i:], s.buffer...)
 			dropped := len(pending) - s.cfg.MaxQueueEvents
 			if dropped > 0 {
+				for _, event := range pending[s.cfg.MaxQueueEvents:] {
+					delete(s.pending, event.ID)
+				}
 				pending = pending[:s.cfg.MaxQueueEvents]
 			}
 			s.buffer = pending
@@ -188,6 +222,11 @@ func (s *Shipper) Flush(ctx context.Context) error {
 			}
 			return err
 		}
+		s.mu.Lock()
+		for _, event := range batch[i:end] {
+			delete(s.pending, event.ID)
+		}
+		s.mu.Unlock()
 	}
 	return nil
 }

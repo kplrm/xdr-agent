@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ type Config struct {
 	MaxCPUCores int `json:"max_cpu_cores"`
 	// ExecutionWatchPaths bounds the directories covered by execution prevention.
 	ExecutionWatchPaths      []string         `json:"execution_watch_paths,omitempty"`
+	InternalNetworks         []string         `json:"internal_networks"`
 	ControlPlaneURL          string           `json:"control_plane_url"`
 	EnrollmentPath           string           `json:"enrollment_path"`
 	HeartbeatPath            string           `json:"heartbeat_path"`
@@ -35,6 +37,8 @@ type Config struct {
 	TelemetryURL                 string `json:"telemetry_url,omitempty"`
 	TelemetryPath                string `json:"telemetry_path,omitempty"`
 	TelemetryIntervalSeconds     int    `json:"telemetry_interval_seconds,omitempty"`
+	ProcessScanIntervalSeconds   int    `json:"process_scan_interval_seconds,omitempty"`
+	NetworkScanIntervalSeconds   int    `json:"network_scan_interval_seconds,omitempty"`
 	TelemetryShipIntervalSeconds int    `json:"telemetry_ship_interval_seconds,omitempty"`
 	SecurityURL                  string `json:"security_url,omitempty"`
 	SecurityPath                 string `json:"security_path,omitempty"`
@@ -47,6 +51,11 @@ type Config struct {
 
 	DetectionPrevention DetectionPreventionConfig `json:"detection_prevention,omitempty"`
 	Logging             LoggingConfig             `json:"logging,omitempty"`
+
+	// Managed keys and revision track Coordinator ownership across restarts.
+	ManagedConfigRevision string   `json:"managed_config_revision,omitempty"`
+	ManagedConfigKeys     []string `json:"managed_config_keys,omitempty"`
+	ManagedConfigError    string   `json:"-"`
 }
 
 // OpenSearchConfig enables direct event delivery when URL is set. Enrollment,
@@ -108,6 +117,7 @@ func defaults() Config {
 	return Config{
 		MaxCPUCores:              1,
 		ExecutionWatchPaths:      []string{"/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin", "/opt", "/tmp", "/var/tmp", "/home"},
+		InternalNetworks:         DefaultInternalNetworks(),
 		EnrollmentPath:           "/api/v1/agents/enroll",
 		HeartbeatPath:            "/api/v1/agents/heartbeat",
 		CommandsPath:             "/api/v1/agents/commands",
@@ -133,6 +143,7 @@ func LoadRaw(path string) (Config, error) {
 	if err := json.Unmarshal(content, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.InternalNetworks = cfg.EffectiveInternalNetworks()
 	return cfg, nil
 }
 
@@ -148,10 +159,19 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(content, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	cfg.InternalNetworks = cfg.EffectiveInternalNetworks()
 
 	// Validate required fields and set defaults
 	if cfg.MaxCPUCores < 0 {
 		return cfg, fmt.Errorf("max_cpu_cores must be >= 0")
+	}
+	for _, cidr := range cfg.InternalNetworks {
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return cfg, fmt.Errorf("invalid internal_networks CIDR %q: %w", cidr, err)
+		}
+	}
+	if cfg.ProcessScanIntervalSeconds < 0 || cfg.NetworkScanIntervalSeconds < 0 {
+		return cfg, fmt.Errorf("process_scan_interval_seconds and network_scan_interval_seconds must be >= 0")
 	}
 	if cfg.ControlPlaneURL == "" {
 		return cfg, fmt.Errorf("control_plane_url is required")
@@ -216,11 +236,16 @@ func setLoggingDefaults(cfg *Config) {
 
 // Save writes the config back to the given path as indented JSON.
 func Save(path string, cfg Config) error {
+	cfg.InternalNetworks = cfg.EffectiveInternalNetworks()
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 	data = append(data, '\n')
+	return saveJSON(path, data)
+}
+
+func saveJSON(path string, data []byte) error {
 	// Enrollment tokens must never inherit the sample config's read permissions.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".xdr-agent-config-*")
 	if err != nil {
@@ -230,6 +255,10 @@ func Save(path string, cfg Config) error {
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write config %s: %w", path, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync config %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close config %s: %w", path, err)
@@ -282,12 +311,42 @@ func (c Config) TelemetryEndpointPath() string {
 	return "/api/v1/agents/telemetry"
 }
 
-// TelemetryInterval bounds /proc polling even when an older config requests faster scans.
-func (c Config) TelemetryInterval() time.Duration {
-	if c.TelemetryIntervalSeconds >= 5 {
-		return time.Duration(c.TelemetryIntervalSeconds) * time.Second
+// DefaultInternalNetworks returns RFC 1918 IPv4 and RFC 4193 IPv6 private ranges.
+func DefaultInternalNetworks() []string {
+	return []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+}
+
+// EffectiveInternalNetworks preserves an explicit empty list while defaulting omitted values.
+func (c Config) EffectiveInternalNetworks() []string {
+	if c.InternalNetworks == nil {
+		return DefaultInternalNetworks()
 	}
-	return 5 * time.Second
+	return c.InternalNetworks
+}
+
+func scanInterval(configured, legacy int) time.Duration {
+	if configured > 0 {
+		return time.Duration(configured) * time.Second
+	}
+	if legacy > 0 {
+		return time.Duration(legacy) * time.Second
+	}
+	return time.Second
+}
+
+// ProcessScanInterval controls process observation independently of batch delivery.
+func (c Config) ProcessScanInterval() time.Duration {
+	return scanInterval(c.ProcessScanIntervalSeconds, c.TelemetryIntervalSeconds)
+}
+
+// NetworkScanInterval controls shared socket observation independently of batch delivery.
+func (c Config) NetworkScanInterval() time.Duration {
+	return scanInterval(c.NetworkScanIntervalSeconds, c.TelemetryIntervalSeconds)
+}
+
+// TelemetryInterval is the legacy alias for the process collection interval.
+func (c Config) TelemetryInterval() time.Duration {
+	return c.ProcessScanInterval()
 }
 
 // TelemetryShipInterval controls periodic batch delivery.

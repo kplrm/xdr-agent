@@ -31,7 +31,7 @@ Run the smallest relevant test scope when iterating, but do not open a change wi
 - Follow the current runtime architecture in `docs/architecture.md`.
 - Keep capability boundaries clear instead of adding cross-cutting logic in ad hoc places.
 - Prefer minimal, justified dependencies. External libraries are acceptable when they solve a real endpoint-security need better than custom code.
-- Keep protection configuration local and content tied to agent releases; Coordinator policies are grouping labels.
+- Keep protection configuration local and content tied to agent releases; Coordinator policies manage only the allowlisted settings in the Agent HTTP contract.
 - Update docs and contract tests when routes, field ownership, or scope change.
 - Keep runtime changes within process/file/network collection and release-bundled YARA protection. Additional protection domains require a separate scope decision.
 - Use the shared event envelope and lifecycle in `internal/service/run.go`; keep constructor dependencies explicit.

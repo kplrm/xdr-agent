@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"xdr-agent/internal/telemetry/process"
 )
 
 // ProcessInfo holds process metadata resolved from a socket inode.
@@ -21,6 +23,7 @@ type ProcessInfo struct {
 	PID        int    `json:"pid"`
 	Name       string `json:"name"`
 	Executable string `json:"executable"`
+	EntityID   string `json:"entity_id,omitempty"`
 }
 
 // ResolveSocketInode walks /proc/<pid>/fd/ entries to find which process owns
@@ -91,6 +94,84 @@ func readProcessInfo(procRoot string, pid int) *ProcessInfo {
 	}
 
 	return info
+}
+
+// buildSocketOwnerSnapshot batches attribution for every consumer of a socket
+// generation. Shared descriptors use the first visible holder, as before.
+func buildSocketOwnerSnapshot(procRoot, agentID string) map[uint64]*ProcessInfo {
+	owners := make(map[uint64]*ProcessInfo)
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return owners
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		before, stable := processStartTicks(procRoot, pid)
+		if !stable {
+			continue
+		}
+		fds, err := os.ReadDir(filepath.Join(procRoot, entry.Name(), "fd"))
+		if err != nil {
+			continue
+		}
+		var inodes []uint64
+		for _, fd := range fds {
+			link, err := os.Readlink(filepath.Join(procRoot, entry.Name(), "fd", fd.Name()))
+			if err != nil {
+				continue
+			}
+			inode, ok := parseSocketInodeLink(link)
+			if !ok || owners[inode] != nil {
+				continue
+			}
+			inodes = append(inodes, inode)
+		}
+		if len(inodes) == 0 {
+			continue
+		}
+		info := readProcessInfo(procRoot, pid)
+		after, stable := processStartTicks(procRoot, pid)
+		if !stable || before != after {
+			continue
+		}
+		info.EntityID = process.EntityID(agentID, pid, after)
+		for _, inode := range inodes {
+			owners[inode] = info
+		}
+	}
+	return owners
+}
+
+func processStartTicks(procRoot string, pid int) (uint64, bool) {
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, false
+	}
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) <= 19 {
+		return 0, false
+	}
+	ticks, err := strconv.ParseUint(fields[19], 10, 64)
+	return ticks, err == nil
+}
+
+func parseSocketInodeLink(link string) (uint64, bool) {
+	if !strings.HasPrefix(link, "socket:[") || !strings.HasSuffix(link, "]") {
+		return 0, false
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")
+	inode, err := strconv.ParseUint(raw, 10, 64)
+	return inode, err == nil && inode != 0
 }
 
 // usernameForUID resolves a UID to a login name by reading /etc/passwd.

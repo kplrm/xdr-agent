@@ -26,33 +26,38 @@ type ProtectionInventory struct {
 }
 
 type HeartbeatRequest struct {
-	AgentID      string               `json:"agent_id"`
-	MachineID    string               `json:"machine_id"`
-	Hostname     string               `json:"hostname"`
-	PolicyID     string               `json:"policy_id"`
-	Tags         []string             `json:"tags"`
-	AgentVersion string               `json:"agent_version"`
-	Protection   *ProtectionInventory `json:"protection,omitempty"`
+	AgentID        string               `json:"agent_id"`
+	MachineID      string               `json:"machine_id"`
+	Hostname       string               `json:"hostname"`
+	PolicyID       string               `json:"policy_id"`
+	Tags           []string             `json:"tags"`
+	AgentVersion   string               `json:"agent_version"`
+	Protection     *ProtectionInventory `json:"protection,omitempty"`
+	ConfigRevision string               `json:"config_revision,omitempty"`
+	ConfigError    string               `json:"config_error,omitempty"`
 }
 
 // HeartbeatResponse holds the fields returned by the control plane on a
 // successful heartbeat. PendingCommands lists any operations the agent must
 // perform (e.g. "upgrade:0.3.2").
 type HeartbeatResponse struct {
-	Message         string   `json:"message"`
-	PendingCommands []string `json:"pending_commands"`
+	Message         string                `json:"message"`
+	PendingCommands []string              `json:"pending_commands"`
+	ManagedConfig   *config.ManagedConfig `json:"managed_config,omitempty"`
 }
 
 // Heartbeat sends a heartbeat to the control plane and returns the server's
 // response (including any pending commands) and an error.
 func Heartbeat(ctx context.Context, cfg config.Config, state identity.State, version string, protection ...ProtectionInventory) (HeartbeatResponse, error) {
 	payload := HeartbeatRequest{
-		AgentID:      state.AgentID,
-		MachineID:    state.MachineID,
-		Hostname:     state.Hostname,
-		PolicyID:     cfg.PolicyID,
-		Tags:         cfg.Tags,
-		AgentVersion: version,
+		AgentID:        state.AgentID,
+		MachineID:      state.MachineID,
+		Hostname:       state.Hostname,
+		PolicyID:       cfg.PolicyID,
+		Tags:           cfg.Tags,
+		AgentVersion:   version,
+		ConfigRevision: cfg.ManagedConfigRevision,
+		ConfigError:    cfg.ManagedConfigError,
 	}
 
 	if len(protection) > 0 {

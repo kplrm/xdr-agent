@@ -39,9 +39,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -71,18 +68,20 @@ const (
 
 	// dnsMaxAnswers caps the number of RRs we parse in a single response (DoS guard).
 	dnsMaxAnswers = 64
-
-	// dnsResolverCacheTTL bounds how often procfs socket ownership snapshots are rebuilt.
-	dnsResolverCacheTTL = 2 * time.Second
 )
 
 // ── internal types ────────────────────────────────────────────────────────────
 
-// dnsPendingKey uniquely identifies a DNS transaction (txID + 5-tuple).
+// dnsPendingKey separates transactions that reuse a client socket or DNS ID.
 type dnsPendingKey struct {
 	txID    uint16
 	srcIP   string
 	srcPort uint16
+	dstIP   string
+	dstPort uint16
+	qname   string
+	qtype   uint16
+	qclass  uint16
 }
 
 // dnsPendingEntry stores context for an in-flight DNS query waiting for its response.
@@ -95,12 +94,6 @@ type dnsPendingEntry struct {
 	dstIP   string
 	srcPort uint16
 	dstPort uint16
-}
-
-type dnsResolverSnapshot struct {
-	expiresAt time.Time
-	bySocket  map[string]uint64
-	byInode   map[uint64]*ProcessInfo
 }
 
 // dnsQuestion holds parsed question section fields.
@@ -143,11 +136,12 @@ type parsedDNS struct {
 // for connection state, whereas DNSCollector sniffs packets from the NIC.
 // Both live in the same network package and share helper functions.
 type DNSCollector struct {
-	workers  sync.WaitGroup
-	pipeline *events.Pipeline
-	agentID  string
-	hostname string
-	procRoot string
+	workers   sync.WaitGroup
+	pipeline  *events.Pipeline
+	agentID   string
+	hostname  string
+	sockets   *SocketSnapshotProvider
+	perimeter *Perimeter
 
 	mu     sync.Mutex
 	health capability.HealthStatus
@@ -156,29 +150,32 @@ type DNSCollector struct {
 
 	pendingMu sync.Mutex
 	pending   map[dnsPendingKey]*dnsPendingEntry
-
-	resolverMu   sync.Mutex
-	resolverSnap dnsResolverSnapshot
 }
 
 // NewDNSCollector creates a new DNS traffic collector.
 func NewDNSCollector(pipeline *events.Pipeline, agentID, hostname string) *DNSCollector {
+	perimeter, _ := NewPerimeter(nil) // Built-in CIDRs are valid.
 	return &DNSCollector{
-		pipeline: pipeline,
-		agentID:  agentID,
-		hostname: hostname,
-		procRoot: defaultNetProcRoot,
-		sockfd:   -1,
-		pending:  make(map[dnsPendingKey]*dnsPendingEntry),
-		resolverSnap: dnsResolverSnapshot{
-			bySocket: make(map[string]uint64),
-			byInode:  make(map[uint64]*ProcessInfo),
-		},
+		pipeline:  pipeline,
+		agentID:   agentID,
+		hostname:  hostname,
+		perimeter: perimeter,
+		sockfd:    -1,
+		pending:   make(map[dnsPendingKey]*dnsPendingEntry),
 	}
 }
 
-// SetProcRoot overrides the /proc path (for testing).
-func (d *DNSCollector) SetProcRoot(root string) { d.procRoot = root }
+// SetSocketSnapshotProvider shares the connection collector's procfs observations.
+// DNS never refreshes the provider or reads network tables on a packet arrival.
+func (d *DNSCollector) SetSocketSnapshotProvider(provider *SocketSnapshotProvider) {
+	d.sockets = provider
+}
+
+func (d *DNSCollector) SetPerimeter(perimeter *Perimeter) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.perimeter = perimeter
+}
 
 // ── capability.Capability interface ──────────────────────────────────────────
 
@@ -262,7 +259,7 @@ func (d *DNSCollector) captureLoop(ctx context.Context, fd int) {
 		default:
 		}
 
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		n, from, err := syscall.Recvfrom(fd, buf, 0)
 		if err != nil {
 			if err == syscall.EAGAIN || err == syscall.EINTR || err == syscall.EWOULDBLOCK {
 				continue // timeout → check ctx
@@ -270,7 +267,8 @@ func (d *DNSCollector) captureLoop(ctx context.Context, fd int) {
 			return // socket closed by Stop()
 		}
 		if n > 0 {
-			d.handleFrame(buf[:n])
+			addr, _ := from.(*syscall.SockaddrLinklayer)
+			d.handleCapturedFrame(buf[:n], addr)
 		}
 	}
 }
@@ -298,8 +296,21 @@ func (d *DNSCollector) pendingCleaner(ctx context.Context) {
 
 // ── frame/packet parsing ─────────────────────────────────────────────────────
 
+// handleCapturedFrame retains the received loopback copy of each datagram.
+// AF_PACKET also delivers a PACKET_OUTGOING copy on loopback; emitting both
+// would duplicate every local query/response. Outgoing packets on other devices
+// and observations on different interfaces remain distinct: matching content
+// alone cannot distinguish capture copies from real retransmissions.
+func (d *DNSCollector) handleCapturedFrame(frame []byte, addr *syscall.SockaddrLinklayer) {
+	if addr != nil && addr.Hatype == syscall.ARPHRD_LOOPBACK && addr.Pkttype == syscall.PACKET_OUTGOING {
+		return
+	}
+	d.handleFrame(frame)
+}
+
 // handleFrame parses a raw Ethernet frame and dispatches DNS packets.
 func (d *DNSCollector) handleFrame(frame []byte) {
+	observedAt := time.Now().UTC()
 	if len(frame) < 14 {
 		return
 	}
@@ -388,127 +399,23 @@ func (d *DNSCollector) handleFrame(frame []byte) {
 	// Incoming responses have srcPort == 53 (the resolver).
 	var proc *ProcessInfo
 	if srcPort != dnsPort {
-		proc = d.resolveUDPSocket(srcIP, int(srcPort))
+		proc = d.resolveUDPSocket(srcIP, int(srcPort), dstIP, int(dstPort))
 	}
 
-	d.emitDNSEvent(msg, srcIP, dstIP, srcPort, dstPort, proc)
+	d.emitDNSEventAt(msg, srcIP, dstIP, srcPort, dstPort, proc, observedAt)
 }
 
-// resolveUDPSocket tries to find the process that owns the UDP socket at localIP:localPort.
-// It scans /proc/net/udp[6] to find the socket inode and then walks /proc/<pid>/fd.
-// Returns nil if no match is found (the socket may have already closed).
-func (d *DNSCollector) resolveUDPSocket(localIP string, localPort int) *ProcessInfo {
-	snap := d.getResolverSnapshot(time.Now())
+// resolveUDPSocket uses the most recent shared socket snapshot. A newly created
+// socket may remain unattributed until the next collection cycle.
+func (d *DNSCollector) resolveUDPSocket(localIP string, localPort int, remoteIP string, remotePort int) *ProcessInfo {
+	if d.sockets == nil {
+		return nil
+	}
+	snap := d.sockets.Current()
 	if snap == nil {
 		return nil
 	}
-
-	key := dnsSocketKey(localIP, localPort)
-	inode := snap.bySocket[key]
-	if inode == 0 {
-		if strings.Contains(localIP, ":") {
-			inode = snap.bySocket[dnsSocketKey("::", localPort)]
-		} else {
-			inode = snap.bySocket[dnsSocketKey("0.0.0.0", localPort)]
-		}
-	}
-	if inode == 0 {
-		return nil
-	}
-	return snap.byInode[inode]
-}
-
-func (d *DNSCollector) getResolverSnapshot(now time.Time) *dnsResolverSnapshot {
-	d.resolverMu.Lock()
-	defer d.resolverMu.Unlock()
-
-	if !d.resolverSnap.expiresAt.IsZero() && now.Before(d.resolverSnap.expiresAt) {
-		snap := d.resolverSnap
-		return &snap
-	}
-
-	socketToInode := make(map[string]uint64)
-	for _, proto := range []string{"udp", "udp6"} {
-		path := filepath.Join(d.procRoot, "net", proto)
-		conns, err := ParseProcNet(path, proto)
-		if err != nil {
-			continue
-		}
-		for _, c := range conns {
-			if c.LocalPort <= 0 || c.Inode == 0 {
-				continue
-			}
-			socketToInode[dnsSocketKey(c.LocalAddr, c.LocalPort)] = c.Inode
-		}
-	}
-
-	owners := buildSocketOwnerSnapshot(d.procRoot)
-
-	d.resolverSnap = dnsResolverSnapshot{
-		expiresAt: now.Add(dnsResolverCacheTTL),
-		bySocket:  socketToInode,
-		byInode:   owners,
-	}
-
-	snap := d.resolverSnap
-	return &snap
-}
-
-func dnsSocketKey(ip string, port int) string {
-	return ip + ":" + strconv.Itoa(port)
-}
-
-func buildSocketOwnerSnapshot(procRoot string) map[uint64]*ProcessInfo {
-	owners := make(map[uint64]*ProcessInfo)
-
-	entries, err := os.ReadDir(procRoot)
-	if err != nil {
-		return owners
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-
-		fdDir := filepath.Join(procRoot, entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-
-		for _, fd := range fds {
-			link, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil {
-				continue
-			}
-			inode, ok := parseSocketInodeLink(link)
-			if !ok {
-				continue
-			}
-			if _, exists := owners[inode]; !exists {
-				owners[inode] = readProcessInfo(procRoot, pid)
-			}
-		}
-	}
-
-	return owners
-}
-
-func parseSocketInodeLink(link string) (uint64, bool) {
-	if !strings.HasPrefix(link, "socket:[") || !strings.HasSuffix(link, "]") {
-		return 0, false
-	}
-	raw := strings.TrimSuffix(strings.TrimPrefix(link, "socket:["), "]")
-	inode, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil || inode == 0 {
-		return 0, false
-	}
-	return inode, true
+	return snap.ResolveUDPFlow(localIP, localPort, remoteIP, remotePort)
 }
 
 // ── DNS event emission ────────────────────────────────────────────────────────
@@ -519,11 +426,19 @@ func (d *DNSCollector) emitDNSEvent(
 	srcPort, dstPort uint16,
 	proc *ProcessInfo,
 ) {
+	d.emitDNSEventAt(msg, srcIP, dstIP, srcPort, dstPort, proc, time.Now().UTC())
+}
+
+func (d *DNSCollector) emitDNSEventAt(
+	msg *parsedDNS,
+	srcIP, dstIP string,
+	srcPort, dstPort uint16,
+	proc *ProcessInfo,
+	ts time.Time,
+) {
 	q := msg.Questions[0]
 	qname := q.Name
 	qtype := qtypeString(q.Type)
-
-	ts := time.Now().UTC()
 
 	dnsType := "query"
 	eventType := "dns.query"
@@ -586,6 +501,9 @@ func (d *DNSCollector) emitDNSEvent(
 	}
 
 	cid := CommunityID(srcIP, dstIP, int(srcPort), int(dstPort), netTransport)
+	d.mu.Lock()
+	perimeter := d.perimeter
+	d.mu.Unlock()
 
 	payload := map[string]interface{}{
 		"dns": dnsMap,
@@ -601,6 +519,7 @@ func (d *DNSCollector) emitDNSEvent(
 			"transport":    netTransport,
 			"type":         netIPType,
 			"community_id": cid,
+			"direction":    perimeter.Direction(srcIP, dstIP),
 		},
 	}
 
@@ -610,11 +529,14 @@ func (d *DNSCollector) emitDNSEvent(
 			"name":       proc.Name,
 			"executable": proc.Executable,
 		}
+		if proc.EntityID != "" {
+			payload["process"].(map[string]interface{})["entity_id"] = proc.EntityID
+		}
 	}
 
 	// For queries: store in pending map to correlate with later responses.
 	if !msg.IsResponse {
-		key := dnsPendingKey{txID: msg.ID, srcIP: srcIP, srcPort: srcPort}
+		key := dnsTransactionKey(msg, srcIP, dstIP, srcPort, dstPort)
 		d.pendingMu.Lock()
 		d.pending[key] = &dnsPendingEntry{
 			ts:      ts,
@@ -633,15 +555,20 @@ func (d *DNSCollector) emitDNSEvent(
 	// The response comes from the resolver (srcPort==53); look up the matching query
 	// where query srcIP == response dstIP and query srcPort == response dstPort.
 	if msg.IsResponse && proc == nil {
-		key := dnsPendingKey{txID: msg.ID, srcIP: dstIP, srcPort: dstPort}
+		key := dnsTransactionKey(msg, dstIP, srcIP, dstPort, srcPort)
 		d.pendingMu.Lock()
 		if pending, ok := d.pending[key]; ok {
-			proc = pending.proc
+			if ts.Sub(pending.ts) <= dnsPendingTTL {
+				proc = pending.proc
+			}
 			if proc != nil {
 				payload["process"] = map[string]interface{}{
 					"pid":        proc.PID,
 					"name":       proc.Name,
 					"executable": proc.Executable,
+				}
+				if proc.EntityID != "" {
+					payload["process"].(map[string]interface{})["entity_id"] = proc.EntityID
 				}
 			}
 			delete(d.pending, key)
@@ -664,6 +591,15 @@ func (d *DNSCollector) emitDNSEvent(
 	}
 
 	d.pipeline.Emit(event)
+}
+
+func dnsTransactionKey(msg *parsedDNS, clientIP, resolverIP string, clientPort, resolverPort uint16) dnsPendingKey {
+	q := msg.Questions[0]
+	return dnsPendingKey{
+		txID: msg.ID, srcIP: clientIP, srcPort: clientPort,
+		dstIP: resolverIP, dstPort: resolverPort,
+		qname: strings.ToLower(q.Name), qtype: q.Type, qclass: q.Class,
+	}
 }
 
 // ── DNS wire format parser ────────────────────────────────────────────────────

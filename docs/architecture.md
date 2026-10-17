@@ -1,16 +1,17 @@
 # Agent architecture
 
-The Linux agent collects process, file, connection, and DNS events and scans files with release-bundled YARA Forge Core rules. [Telemetry](telemetry.md) defines monitored sources and emitted fields; [HTTP contract](api-endpoints.md) defines external requests. Coordinator policies group agents; protection configuration stays local.
+The Linux agent collects process, file, connection, and DNS events and scans files with release-bundled YARA Forge Core rules. [Telemetry](telemetry.md) defines monitored sources and emitted fields; [HTTP contract](api-endpoints.md) defines external requests. Coordinator policies group agents and manage supported telemetry settings; protection configuration stays local.
 
 ## Runtime and configuration
 
 [`internal/service/run.go`](../internal/service/run.go) loads config and persistent identity, starts event dispatch, initializes YARA, starts five collectors, then enrolls or retries enrollment. Collection and protection continue during Coordinator outages; periodic shipping starts after enrollment. Scanner initialization failure stops startup; individual collector or execution-blocking failures report separate health.
 
-The installed service reads `/etc/xdr-agent/config.json`. Enrollment copies the supplied config there; reinstalls preserve it. Restart after edits. [`config.default.json`](../config/config.default.json) lists packaged settings.
+The installed service reads `/etc/xdr-agent/config.json`. Enrollment copies the supplied config there; reinstalls preserve it. Coordinator [managed configuration](api-endpoints.md#managed-configuration) is validated, persisted, and applied without restarting collectors or losing queued events. Other local edits require restart. [`config.default.json`](../config/config.default.json) lists packaged settings.
 
 | Setting | Default / effect |
 | --- | --- |
-| `telemetry_interval_seconds` | Process/network polling: minimum and default 5 s |
+| `process_scan_interval_seconds`, `network_scan_interval_seconds` | Independent process/shared-socket polling: 1 s each by default; omitted values use a positive legacy `telemetry_interval_seconds`, then 1 s |
+| `internal_networks` | Perimeter CIDRs: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`; loopback is always internal |
 | `heartbeat_interval_seconds`, `enroll_interval_seconds` | Health and enrollment retries: 30 s each |
 | `command_poll_interval_seconds` | Upgrade polling: 5 s |
 | `telemetry_ship_interval_seconds`, `security_ship_interval_seconds`, `logging.ship.ship_interval_seconds` | Separate batches: 30 s each |
@@ -37,6 +38,6 @@ After a process YARA match, prevention uses a pidfd and rechecks start ticks plu
 
 Collectors/protection → 4,096-event memory pipeline → subscribers → telemetry/security shippers. Runtime logs use a separate 1,024-event writer queue. Alerts and `detection.*`/`prevention.*` modules go to security; collector events go to telemetry; diagnostics go to logs.
 
-Each shipper holds up to 5,000 queued events and sends up to 500 per request on its interval, using gzip. Failures retain the unsent batch ahead of newer events. Transport/server errors and HTTP 429 receive up to three retries after 2/4/8 s within a flush; other client errors stop that attempt but remain queued for the next flush. OpenSearch item errors also retain the batch. Full queues drop new events; pipeline/shipper drops are logged, log-writer drops are silent. All event buffering is in memory: crashes, prolonged outages, and overload can lose data.
+Each shipper holds up to 5,000 queued events and sends up to 500 per request on its interval, using gzip. Duplicate event IDs already queued or in flight are ignored; distinct occurrences retain separate IDs. Failures retain the unsent batch ahead of newer events. Transport/server errors and HTTP 429 receive up to three retries after 2/4/8 s within a flush; other client errors stop that attempt but remain queued for the next flush. OpenSearch item errors also retain the batch. Full queues drop new events; pipeline/shipper drops are logged, log-writer drops are silent. All event buffering is in memory: crashes, prolonged outages, and overload can lose data.
 
 Shutdown stops collectors and protection, drains accepted pipeline/log events, stops periodic shippers, then attempts a final shipment within one shared timeout. It does not persist unsent events. Destination, authentication, and duplicate handling are defined once in the [HTTP contract](api-endpoints.md).

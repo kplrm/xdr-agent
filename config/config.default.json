@@ -1,5 +1,11 @@
 {
   "max_cpu_cores": 1,
+  "internal_networks": [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "fc00::/7"
+  ],
   "execution_watch_paths": [
     "/usr/bin",
     "/usr/sbin",
@@ -34,7 +40,8 @@
   "insecure_skip_tls_verify": false,
   "telemetry_url": "",
   "telemetry_path": "/api/v1/agents/telemetry",
-  "telemetry_interval_seconds": 5,
+  "process_scan_interval_seconds": 1,
+  "network_scan_interval_seconds": 1,
   "telemetry_ship_interval_seconds": 30,
   "security_url": "",
   "security_path": "/api/v1/agents/security",

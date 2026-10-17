@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,17 @@ func TestReadProcessInfo_CmdLine(t *testing.T) {
 	}
 	if info.CmdLine != "/usr/sbin/sshd -D" {
 		t.Errorf("CmdLine = %q, want %q", info.CmdLine, "/usr/sbin/sshd -D")
+	}
+}
+
+func TestReadCommandLineReturnsArgumentsAndDisplayString(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cmdline")
+	if err := os.WriteFile(path, []byte("/usr/sbin/sshd\x00-D\x00"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	line, args := readCommandLine(path)
+	if line != "/usr/sbin/sshd -D" || len(args) != 2 || args[0] != "/usr/sbin/sshd" || args[1] != "-D" {
+		t.Fatalf("readCommandLine = %q, %q", line, args)
 	}
 }
 
@@ -257,6 +269,43 @@ func TestProcessCollector_Name(t *testing.T) {
 	pc := NewProcessCollector(nil, "", "", 0)
 	if pc.Name() != "telemetry.process" {
 		t.Errorf("Name() = %q, want %q", pc.Name(), "telemetry.process")
+	}
+}
+
+func TestProcessIntervalUpdatePreservesBaseline(t *testing.T) {
+	root := t.TempDir()
+	writeProcessStat(t, root, 42, 0, "existing", 0)
+	pipeline := events.NewPipeline(16)
+	collector := NewProcessCollector(pipeline, "agent", "host", time.Hour)
+	collector.SetProcRoot(root)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := collector.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer collector.Stop()
+	waitUntil := func(check func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			collector.mu.Lock()
+			ok := check()
+			collector.mu.Unlock()
+			if ok {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("process collection did not advance after interval update")
+	}
+	waitUntil(func() bool { return collector.baseline })
+	writeProcessStat(t, root, 43, 42, "new", 0)
+	collector.SetInterval(20 * time.Millisecond)
+	waitUntil(func() bool { _, exists := collector.known[43]; return exists })
+	collector.Stop()
+	got := queuedEvents(pipeline)
+	if len(got) != 1 || got[0].Type != "process.start" || got[0].Payload["process"].(map[string]interface{})["pid"] != 43 {
+		t.Fatalf("interval change must preserve baseline and emit new occurrence once: %+v", got)
 	}
 }
 
@@ -424,6 +473,51 @@ func TestKernelThreadExecBecomesUserProcess(t *testing.T) {
 	received := queuedEvents(pipeline)
 	if len(received) != 1 || received[0].Type != "process.start" {
 		t.Fatalf("kernel-to-user transition did not produce a process start: %+v", received)
+	}
+}
+
+func TestPIDReuseEmitsEndAndStartWithoutInheritingPreviousInstance(t *testing.T) {
+	root := t.TempDir()
+	writeProcessStat(t, root, 42, 0, "old", 0)
+	pipeline := events.NewPipeline(16)
+	collector := NewProcessCollector(pipeline, "agent", "host", 0)
+	collector.SetProcRoot(root)
+	collector.scan()
+	old := collector.known[42]
+	old.Username = "previous-instance"
+	collector.known[42] = old
+	collector.latestCPUPct[42] = 12.5
+	collector.prevCPU[42] = [2]uint64{500, 500}
+	collector.prevSysTotal = 100
+	if err := os.WriteFile(filepath.Join(root, "stat"), []byte("cpu 200 0 0 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The same PID now has a different start tick; it never disappeared from a scan.
+	writeProcessStat(t, root, 42, 0, "new", 0)
+	statPath := filepath.Join(root, "42", "stat")
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.TrimSuffix(string(data), "142\n") + "999\n")
+	if err := os.WriteFile(statPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	collector.scan()
+	collector.scan() // An unchanged snapshot must not generate another event.
+	received := queuedEvents(pipeline)
+	if len(received) != 2 || received[0].Type != "process.end" || received[1].Type != "process.start" {
+		t.Fatalf("PID reuse lifecycle = %+v", received)
+	}
+	ended := received[0].Payload["process"].(map[string]interface{})
+	started := received[1].Payload["process"].(map[string]interface{})
+	assertEqual(t, "ended instance", ended["entity_id"].(string), EntityID("agent", 42, 142))
+	assertEqual(t, "started instance", started["entity_id"].(string), EntityID("agent", 42, 999))
+	if _, ok := started["cpu"]; ok || collector.known[42].Username == "previous-instance" {
+		t.Fatal("reused PID inherited prior CPU or user enrichment")
+	}
+	if collector.tree.Size() != 1 {
+		t.Fatal("reused process missing from lineage tree")
 	}
 }
 

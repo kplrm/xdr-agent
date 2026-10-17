@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -42,9 +43,6 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		log.Printf("CPU limit: all available logical CPUs")
 	} else {
 		log.Printf("CPU limit: %d logical CPU(s)", limitedCPUs)
-	}
-	if cfg.TelemetryIntervalSeconds > 0 && cfg.TelemetryIntervalSeconds < 5 {
-		log.Printf("telemetry scan interval raised from %d to 5 seconds", cfg.TelemetryIntervalSeconds)
 	}
 	if enrollmentToken != "" {
 		cfg.EnrollmentToken = strings.TrimSpace(enrollmentToken)
@@ -148,12 +146,24 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	manager := prevention.NewManager(cfg, pipeline)
 	pipeline.Subscribe(manager.Handle)
 
+	perimeter, err := network.NewPerimeter(cfg.EffectiveInternalNetworks())
+	if err != nil {
+		return err
+	}
+	sockets := network.NewSocketSnapshotProvider("/proc", state.AgentID)
+	connections := network.NewNetworkCollector(pipeline, state.AgentID, state.Hostname, cfg.NetworkScanInterval())
+	connections.SetSocketSnapshotProvider(sockets)
+	connections.SetPerimeter(perimeter)
+	dns := network.NewDNSCollector(pipeline, state.AgentID, state.Hostname)
+	dns.SetSocketSnapshotProvider(sockets)
+	dns.SetPerimeter(perimeter)
+	processes := process.NewProcessCollector(pipeline, state.AgentID, state.Hostname, cfg.ProcessScanInterval())
 	collectors := []capability.Capability{
-		process.NewProcessCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval()),
+		processes,
 		file.NewFIMCollector(pipeline, state.AgentID, state.Hostname, nil, 0, filepath.Join(filepath.Dir(cfg.StatePath), "fim_baseline.db")),
 		file.NewFileAccessCollector(pipeline, state.AgentID, state.Hostname, nil),
-		network.NewNetworkCollector(pipeline, state.AgentID, state.Hostname, cfg.TelemetryInterval()),
-		network.NewDNSCollector(pipeline, state.AgentID, state.Hostname),
+		connections,
+		dns,
 	}
 	started := make([]capability.Capability, 0, len(collectors))
 	failed := map[string]string{}
@@ -193,7 +203,32 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 			RuleCount: len(engine.Inventory()), Platform: "linux", Mode: string(cfg.DetectionPrevention.Mode), Health: health,
 		}
 	}
-	return runFleet(ctx, cfg, &state, inventory, onEnrolled)
+	applyManaged := func(current config.Config, managed config.ManagedConfig) (config.Config, error) {
+		next, changed, err := config.ApplyManaged(configPath, current, managed)
+		if err != nil || !changed {
+			return next, err
+		}
+		if !reflect.DeepEqual(current.EffectiveInternalNetworks(), next.EffectiveInternalNetworks()) {
+			perimeter, _ := network.NewPerimeter(next.EffectiveInternalNetworks()) // Validated before saving.
+			connections.SetPerimeter(perimeter)
+			dns.SetPerimeter(perimeter)
+		}
+		if current.ProcessScanInterval() != next.ProcessScanInterval() {
+			processes.SetInterval(next.ProcessScanInterval())
+		}
+		if current.NetworkScanInterval() != next.NetworkScanInterval() {
+			connections.SetInterval(next.NetworkScanInterval())
+		}
+		if current.TelemetryShipInterval() != next.TelemetryShipInterval() {
+			telemetry.SetInterval(next.TelemetryShipInterval())
+		}
+		// Security delivery inherits the telemetry interval when not set locally.
+		if current.SecurityShipInterval() != next.SecurityShipInterval() {
+			security.SetInterval(next.SecurityShipInterval())
+		}
+		return next, nil
+	}
+	return runFleet(ctx, cfg, &state, inventory, onEnrolled, applyManaged)
 }
 
 func enrollAgent(ctx context.Context, cfg config.Config, state *identity.State) error {
@@ -206,7 +241,7 @@ func enrollAgent(ctx context.Context, cfg config.Config, state *identity.State) 
 }
 
 // runFleet owns all mutable enrollment state; telemetry runs independently.
-func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inventory func() enroll.ProtectionInventory, onEnrolled func()) error {
+func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inventory func() enroll.ProtectionInventory, onEnrolled func(), applyManaged ...func(config.Config, config.ManagedConfig) (config.Config, error)) error {
 	enrollment := time.NewTicker(cfg.EnrollInterval())
 	heartbeat := time.NewTicker(cfg.HeartbeatInterval())
 	commands := time.NewTicker(cfg.CommandPollInterval())
@@ -217,6 +252,24 @@ func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inv
 	var upgrades sync.WaitGroup
 	defer upgrades.Wait()
 	handleCommands := func(response enroll.HeartbeatResponse) {
+		if response.ManagedConfig != nil && len(applyManaged) > 0 {
+			next, err := applyManaged[0](cfg, *response.ManagedConfig)
+			if err != nil {
+				message := err.Error()
+				if len(message) > 1024 {
+					message = message[:1024]
+				}
+				if cfg.ManagedConfigError != message {
+					log.Printf("managed configuration rejected: %s", message)
+				}
+				cfg.ManagedConfigError = message
+			} else {
+				if cfg.ManagedConfigRevision != next.ManagedConfigRevision {
+					log.Printf("managed configuration applied: revision=%s", next.ManagedConfigRevision)
+				}
+				cfg = next
+			}
+		}
 		for _, command := range response.PendingCommands {
 			if !strings.HasPrefix(command, "upgrade:") {
 				continue

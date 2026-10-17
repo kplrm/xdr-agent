@@ -104,7 +104,8 @@ type FIMCollector struct {
 	rescanInterval time.Duration
 
 	// BoltDB baseline store — opened in Init, closed in Stop.
-	db *bolt.DB
+	db       *bolt.DB
+	recordMu sync.Mutex // Serialize filesystem observation, baseline comparison and event emission.
 
 	// inotify state — only accessed while holding inotifyMu.
 	inotifyMu     sync.Mutex
@@ -532,17 +533,13 @@ func (f *FIMCollector) runBaselineScan(ctx context.Context) {
 			return
 		}
 		pathCount := 0
-		f.walkPath(ctx, wp.Path, wp.Recursive, func(rec *fileRecord) {
-			if _, err := f.loadRecord(rec.Path); err != nil {
-				if storeErr := f.storeRecord(rec); storeErr != nil {
-					log.Printf("fim: baseline store error for %s: %v", rec.Path, storeErr)
-				} else {
+		f.walkPath(ctx, wp.Path, wp.Recursive, func(path string) {
+			if created, err := f.recordFile(path, true); err == nil {
+				if created {
 					count++
-					pathCount++
+				} else {
+					skipped++
 				}
-			} else {
-				// Already in DB from a previous run — warm restart.
-				skipped++
 				pathCount++
 			}
 			paceFileScan(ctx, &processed)
@@ -589,38 +586,15 @@ func (f *FIMCollector) runRescan(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		f.walkPath(ctx, wp.Path, wp.Recursive, func(rec *fileRecord) {
+		f.walkPath(ctx, wp.Path, wp.Recursive, func(path string) {
 			defer paceFileScan(ctx, &processed)
-			seenOnDisk[rec.Path] = struct{}{}
-
-			old, err := f.loadRecord(rec.Path)
-			if err != nil {
-				// New file not previously known — emit created.
-				_ = f.storeRecord(rec)
-				f.emitFIMEvent("file.created", "created", events.SeverityMedium, rec, nil)
-				return
-			}
-
-			// Detect content change for regular files.
-			if rec.FileType == "file" && rec.SHA256 != "" && rec.SHA256 != old.SHA256 {
-				_ = f.storeRecord(rec)
-				sev := events.SeverityHigh
-				if !isCriticalPath(rec.Path) {
-					sev = events.SeverityMedium
-				}
-				f.emitFIMEvent("file.modified", "modified", sev, rec, old)
-				return
-			}
-
-			// Detect metadata changes.
-			if rec.Mode != old.Mode || rec.UID != old.UID || rec.GID != old.GID {
-				_ = f.storeRecord(rec)
-				f.emitFIMEvent("file.attrs_changed", "attributes_modified", events.SeverityMedium, rec, old)
-			}
+			seenOnDisk[path] = struct{}{}
+			_, _ = f.recordFile(path, false)
 		})
 	}
 
-	// Detect deleted files.
+	// Collect first: deleting inside a Bolt read transaction can deadlock writers.
+	var missing []string
 	_ = f.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(fimBucket))
 		if b == nil {
@@ -629,21 +603,27 @@ func (f *FIMCollector) runRescan(ctx context.Context) {
 		return b.ForEach(func(k, v []byte) error {
 			path := string(k)
 			if _, seen := seenOnDisk[path]; !seen {
-				var rec fileRecord
-				if jsonErr := json.Unmarshal(v, &rec); jsonErr == nil {
-					f.onFileDeleted(path)
-				}
+				missing = append(missing, path)
 			}
 			return nil
 		})
 	})
+	for _, path := range missing {
+		// A file can appear after its directory was scanned. Only confirmed
+		// absence is a deletion; permission errors must retain the baseline.
+		f.recordMu.Lock()
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			f.deleteFileRecord(path)
+		}
+		f.recordMu.Unlock()
+	}
 
 	log.Printf("fim: periodic rescan complete")
 }
 
 // walkPath recursively (if requested) walks root and calls fn for every
 // regular file and symlink found.
-func (f *FIMCollector) walkPath(ctx context.Context, root string, recursive bool, fn func(*fileRecord)) {
+func (f *FIMCollector) walkPath(ctx context.Context, root string, recursive bool, fn func(string)) {
 	info, err := os.Lstat(root)
 	if err != nil {
 		// Log permission errors so they are visible; pure not-found is noise.
@@ -654,10 +634,7 @@ func (f *FIMCollector) walkPath(ctx context.Context, root string, recursive bool
 	}
 
 	if !info.IsDir() {
-		rec, recErr := f.buildFileRecord(root)
-		if recErr == nil {
-			fn(rec)
-		}
+		fn(root)
 		return
 	}
 
@@ -686,63 +663,79 @@ func (f *FIMCollector) walkPath(ctx context.Context, root string, recursive bool
 			continue
 		}
 
-		rec, recErr := f.buildFileRecord(childPath)
-		if recErr == nil {
-			fn(rec)
-		}
+		fn(childPath)
 	}
 }
 
 // ── File event handlers ───────────────────────────────────────────────────────
 
 func (f *FIMCollector) onFileCreated(path string) {
-	rec, err := f.buildFileRecord(path)
-	if err != nil {
-		return
-	}
-	_ = f.storeRecord(rec)
-	f.emitFIMEvent("file.created", "created", events.SeverityMedium, rec, nil)
+	_, _ = f.recordFile(path, false)
 }
 
 func (f *FIMCollector) onFileModified(path string) {
-	rec, err := f.buildFileRecord(path)
-	if err != nil {
-		return
-	}
-	old, _ := f.loadRecord(path)
-	_ = f.storeRecord(rec)
-
-	sev := events.SeverityMedium
-	if isCriticalPath(path) {
-		sev = events.SeverityHigh
-	}
-	f.emitFIMEvent("file.modified", "modified", sev, rec, old)
+	_, _ = f.recordFile(path, false)
 }
 
 func (f *FIMCollector) onFileAttrsChanged(path string) {
+	_, _ = f.recordFile(path, false)
+}
+
+// recordFile gives inotify and rescans one baseline, so observing the same
+// state twice does not publish two events. Build under the same lock to avoid
+// applying an older scan result after a newer inotify observation.
+func (f *FIMCollector) recordFile(path string, baselineOnly bool) (bool, error) {
+	f.recordMu.Lock()
+	defer f.recordMu.Unlock()
 	rec, err := f.buildFileRecord(path)
 	if err != nil {
-		return
+		return false, err
 	}
 	old, _ := f.loadRecord(path)
-	_ = f.storeRecord(rec)
-	f.emitFIMEvent("file.attrs_changed", "attributes_modified", events.SeverityLow, rec, old)
+	if old != nil && (baselineOnly || *old == *rec) {
+		return false, nil
+	}
+	if err := f.storeRecord(rec); err != nil {
+		return false, err
+	}
+	if baselineOnly {
+		return old == nil, nil
+	}
+	if old == nil {
+		f.emitFIMEvent("file.created", "created", events.SeverityMedium, rec, nil)
+	} else if rec.SHA256 != old.SHA256 || rec.Size != old.Size || rec.FileType != old.FileType {
+		sev := events.SeverityMedium
+		if isCriticalPath(path) {
+			sev = events.SeverityHigh
+		}
+		f.emitFIMEvent("file.modified", "modified", sev, rec, old)
+	} else {
+		f.emitFIMEvent("file.attrs_changed", "attributes_modified", events.SeverityLow, rec, old)
+	}
+	return old == nil, nil
 }
 
 func (f *FIMCollector) onFileDeleted(path string) {
-	old, _ := f.loadRecord(path)
-	_ = f.deleteRecord(path)
+	f.recordMu.Lock()
+	defer f.recordMu.Unlock()
+	f.deleteFileRecord(path)
+}
 
-	rec := &fileRecord{Path: path, FileType: "file"}
-	if old != nil {
-		rec = old
+// deleteFileRecord requires recordMu. Repeated notifications share the deletion.
+func (f *FIMCollector) deleteFileRecord(path string) {
+	old, _ := f.loadRecord(path)
+	if old == nil {
+		return
+	}
+	if err := f.deleteRecord(path); err != nil {
+		return
 	}
 
 	sev := events.SeverityMedium
 	if isCriticalPath(path) {
 		sev = events.SeverityHigh
 	}
-	f.emitFIMEvent("file.deleted", "deleted", sev, rec, nil)
+	f.emitFIMEvent("file.deleted", "deleted", sev, old, nil)
 }
 
 // ── ECS-compatible event emission ─────────────────────────────────────────────
