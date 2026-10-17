@@ -2,6 +2,9 @@ package process
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -302,6 +305,147 @@ func TestProcessCollector_DegradedOnBadPath(t *testing.T) {
 		t.Errorf("health = %v, want HealthDegraded", pc.Health())
 	}
 	_ = pc.Stop()
+}
+
+func TestProcessEntityIDsUseAgentIdentity(t *testing.T) {
+	const processID = "0875e38fab7155a1a57e77d53c73dcdfae2ab48989e9933d721981717666d372"
+	const parentID = "1d93c001a6edbf2eb09b6fde4ea9408c276e5cb5eae1aa81de7deb1a7e6250c6"
+	for _, test := range []struct {
+		agentID, hostname string
+		wantID            string
+	}{
+		{"test-agent-001", "host-a", processID},
+		{"test-agent-001", "host-b", processID},
+		{"different-agent", "host-a", ""},
+	} {
+		pipeline := events.NewPipeline(8)
+		collector := NewProcessCollector(pipeline, test.agentID, test.hostname, 0)
+		parent := ProcessInfo{PID: 1, StartTime: 100}
+		info := ProcessInfo{PID: 42, PPID: 1, SessionID: 1, StartTime: 500}
+		collector.tree.Update(parent)
+		collector.tree.Update(info)
+		collector.emitEvent("process.start", info, 0)
+		event := queuedEvents(pipeline)[0]
+		process := event.Payload["process"].(map[string]interface{})
+		if test.wantID == "" {
+			if got := process["entity_id"].(string); len(got) != 64 || got == processID {
+				t.Fatalf("Agent ID did not scope full entity ID: %q", got)
+			}
+			continue
+		}
+		assertEqual(t, "process entity ID", process["entity_id"].(string), processID)
+		assertEqual(t, "parent entity ID", process["parent"].(map[string]interface{})["entity_id"].(string), parentID)
+		assertEqual(t, "ancestor entity ID", process["ancestors"].([]map[string]interface{})[0]["entity_id"].(string), parentID)
+		assertEqual(t, "session leader entity ID", process["group_leader"].(map[string]interface{})["entity_id"].(string), parentID)
+		body, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var encoded map[string]interface{}
+		if err := json.Unmarshal(body, &encoded); err != nil {
+			t.Fatal(err)
+		}
+		if severity, ok := encoded["event.severity"]; !ok || severity != float64(0) {
+			t.Fatalf("informational severity was not retained: %s", body)
+		}
+	}
+	if buildEntityID("test-agent-001", 43, 500) == processID || buildEntityID("test-agent-001", 42, 501) == processID {
+		t.Fatal("process identity ignored PID or start ticks")
+	}
+}
+
+func TestKernelThreadsKeepLineageWithoutEnrichmentOrEvents(t *testing.T) {
+	root := t.TempDir()
+	writeProcessStat(t, root, 2, 0, "kthreadd", pfKernelThread)
+	pidDir := filepath.Join(root, "2")
+	for name, value := range map[string]string{
+		"status":  "Uid:\t123 123 123 123\nThreads:\t9\nVmRSS:\t42 kB\n",
+		"cmdline": "/should/not/be/read\x00",
+		"io":      "read_bytes: 42\nwrite_bytes: 42\n",
+		"cgroup":  "0::/docker/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+	} {
+		if err := os.WriteFile(filepath.Join(pidDir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("/should/not/be/resolved", filepath.Join(pidDir, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := events.NewPipeline(16)
+	collector := NewProcessCollector(pipeline, "agent", "host", 0)
+	collector.SetProcRoot(root)
+	collector.scan()
+	info := collector.known[2]
+	if !info.KernelThread || info.Name != "kthreadd" || info.UID != 0 || info.Threads != 0 || info.CmdLine != "" || info.Executable != "" ||
+		info.Args != nil || info.IOReadBytes != 0 || info.ContainerID != "" {
+		t.Fatalf("kernel task was not kept stat-only: %+v", info)
+	}
+	if len(collector.uids.names) != 0 || len(collector.prevCPU) != 0 {
+		t.Fatal("kernel task received user or CPU enrichment")
+	}
+	// A flagged task need not have a kernel-looking name. Conversely a user
+	// process named kworker with no executable must still be reported.
+	writeProcessStat(t, root, 3, 2, "worker", pfKernelThread)
+	writeProcessStat(t, root, 42, 2, "kworker/fake", 0)
+	collector.scan()
+	if err := os.RemoveAll(filepath.Join(root, "3")); err != nil {
+		t.Fatal(err)
+	}
+	collector.scan()
+	if collector.tree.Size() != 2 {
+		t.Fatal("exited kernel task was retained in the tree")
+	}
+	if err := os.RemoveAll(filepath.Join(root, "42")); err != nil {
+		t.Fatal(err)
+	}
+	collector.scan()
+	received := queuedEvents(pipeline)
+	if len(received) != 2 || received[0].Type != "process.start" || received[1].Type != "process.end" {
+		t.Fatalf("unexpected lifecycle events: %+v", received)
+	}
+	for _, event := range received {
+		process := event.Payload["process"].(map[string]interface{})
+		assertIntEqual(t, "user process PID", process["pid"].(int), 42)
+		parent := process["parent"].(map[string]interface{})
+		assertEqual(t, "kernel parent name", parent["name"].(string), "kthreadd")
+		assertEqual(t, "kernel parent entity ID", parent["entity_id"].(string), buildEntityID("agent", 2, 102))
+	}
+}
+
+func TestKernelThreadExecBecomesUserProcess(t *testing.T) {
+	root := t.TempDir()
+	writeProcessStat(t, root, 42, 2, "worker", pfKernelThread)
+	pipeline := events.NewPipeline(8)
+	collector := NewProcessCollector(pipeline, "agent", "host", 0)
+	collector.SetProcRoot(root)
+	collector.scan()
+	writeProcessStat(t, root, 42, 2, "sh", 0)
+	collector.scan()
+	received := queuedEvents(pipeline)
+	if len(received) != 1 || received[0].Type != "process.start" {
+		t.Fatalf("kernel-to-user transition did not produce a process start: %+v", received)
+	}
+}
+
+func writeProcessStat(t *testing.T, root string, pid, ppid int, name string, flags uint64) {
+	t.Helper()
+	dir := filepath.Join(root, fmt.Sprint(pid))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stat := fmt.Sprintf("%d (%s) S %d 0 0 0 -1 %d 0 0 0 0 0 0 0 0 20 0 1 0 %d\n", pid, name, ppid, flags, 100+pid)
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func queuedEvents(pipeline *events.Pipeline) []events.Event {
+	var received []events.Event
+	pipeline.Subscribe(func(event events.Event) { received = append(received, event) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pipeline.Run(ctx)
+	return received
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ import (
 const (
 	defaultProcRoot     = "/proc"
 	defaultProcInterval = 10 * time.Second
+	pfKernelThread      = 0x00200000 // PF_KTHREAD in Linux task flags (stat field 9).
 )
 
 // ProcessInfo holds metadata about a running process read from /proc/[pid].
@@ -45,6 +46,8 @@ type ProcessInfo struct {
 	State      string   `json:"state"`          // process.state (R/S/D/Z/T)
 	StartTime  uint64   `json:"start_time"`     // process.start (clock ticks since boot)
 	EntityID   string   `json:"entity_id"`      // process.entity_id (computed at emit)
+
+	KernelThread bool `json:"-"` // Retained only for local lineage, never emitted as a lifecycle event.
 
 	// ── Session / terminal ───────────────────────────────────────────────────
 	SessionID int `json:"session_id"` // process.session_leader.pid approx
@@ -214,8 +217,11 @@ func (p *ProcessCollector) scan() {
 		return
 	}
 
-	// Run fast enrichment for every visible process (CWD, args, FDs, IO, container).
+	// Kernel threads keep stat-only metadata for lineage; enrich user processes.
 	for pid, info := range snapshot {
+		if info.KernelThread {
+			continue
+		}
 		enrichProcessInfo(p.procRoot, &info)
 		snapshot[pid] = info
 	}
@@ -247,7 +253,7 @@ func (p *ProcessCollector) scan() {
 	// (enrichNewProcess). Without this step the enriched values are lost after
 	// the first scan cycle and process.end events emit empty strings.
 	for pid, info := range snapshot {
-		if prev, ok := prevKnown[pid]; ok {
+		if prev, ok := prevKnown[pid]; ok && !info.KernelThread && !prev.KernelThread {
 			changed := false
 			if info.Username == "" && prev.Username != "" {
 				info.Username = prev.Username
@@ -269,6 +275,9 @@ func (p *ProcessCollector) scan() {
 		// Enrich username/groupname for all baseline processes so their eventual
 		// process.end events carry complete user/group data.
 		for pid, info := range snapshot {
+			if info.KernelThread {
+				continue
+			}
 			info.Username = p.uids.lookup(info.UID)
 			info.GroupName = p.gids.lookup(info.GID)
 			snapshot[pid] = info
@@ -280,7 +289,9 @@ func (p *ProcessCollector) scan() {
 		// Seed CPU tracking state so the next scan has a delta to compare against.
 		seedCPU := make(map[int][2]uint64, len(snapshot))
 		for pid, info := range snapshot {
-			seedCPU[pid] = [2]uint64{info.UTime, info.STime}
+			if !info.KernelThread {
+				seedCPU[pid] = [2]uint64{info.UTime, info.STime}
+			}
 		}
 		p.mu.Lock()
 		p.prevCPU = seedCPU
@@ -301,6 +312,9 @@ func (p *ProcessCollector) scan() {
 	if prevSysTotal > 0 && sysTotal > prevSysTotal {
 		sysDelta := float64(sysTotal - prevSysTotal)
 		for pid, info := range snapshot {
+			if info.KernelThread {
+				continue
+			}
 			if prev, ok := prevCPU[pid]; ok {
 				utimeDelta := info.UTime - prev[0]
 				stimeDelta := info.STime - prev[1]
@@ -319,7 +333,9 @@ func (p *ProcessCollector) scan() {
 	}
 	newPrevCPU := make(map[int][2]uint64, len(snapshot))
 	for pid, info := range snapshot {
-		newPrevCPU[pid] = [2]uint64{info.UTime, info.STime}
+		if !info.KernelThread {
+			newPrevCPU[pid] = [2]uint64{info.UTime, info.STime}
+		}
 	}
 	p.prevCPU = newPrevCPU
 	p.prevSysTotal = sysTotal
@@ -328,7 +344,10 @@ func (p *ProcessCollector) scan() {
 	// New processes (in snapshot but not in previous).
 	// New processes have no prior CPU sample, so cpuPct = 0 (field omitted).
 	for pid, info := range snapshot {
-		if _, existed := prevKnown[pid]; !existed {
+		if info.KernelThread {
+			continue
+		}
+		if prev, existed := prevKnown[pid]; !existed || prev.KernelThread {
 			enrichNewProcess(&info, p.uids, p.gids)
 			p.emitEvent("process.start", info, 0)
 			// Write the enriched info (Username and GroupName) back into
@@ -345,11 +364,13 @@ func (p *ProcessCollector) scan() {
 	// Include the last known cpu.pct so the final event is fully enriched.
 	for pid, info := range prevKnown {
 		if _, exists := snapshot[pid]; !exists {
-			p.mu.Lock()
-			cpuPct := p.latestCPUPct[pid]
-			delete(p.latestCPUPct, pid)
-			p.mu.Unlock()
-			p.emitEvent("process.end", info, cpuPct)
+			if !info.KernelThread {
+				p.mu.Lock()
+				cpuPct := p.latestCPUPct[pid]
+				delete(p.latestCPUPct, pid)
+				p.mu.Unlock()
+				p.emitEvent("process.end", info, cpuPct)
+			}
 			p.tree.Remove(pid)
 		}
 	}
@@ -360,12 +381,12 @@ func (p *ProcessCollector) scan() {
 // the field is omitted from the payload when cpuPct <= 0).
 func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct float64) {
 	// ── Entity ID (stable process instance identifier) ───────────────────────
-	entityID := buildEntityID(p.hostname, info.PID, info.StartTime)
+	entityID := buildEntityID(p.agentID, info.PID, info.StartTime)
 
 	// ── Process lineage from tree ────────────────────────────────────────────
 	parentPayload := map[string]interface{}{}
 	if parent, ok := p.tree.GetParent(info.PID); ok {
-		parentEntityID := buildEntityID(p.hostname, parent.PID, parent.StartTime)
+		parentEntityID := buildEntityID(p.agentID, parent.PID, parent.StartTime)
 		parentPayload = map[string]interface{}{
 			"pid":          parent.PID,
 			"ppid":         parent.PPID,
@@ -381,7 +402,7 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 	rawAncestors := p.tree.Ancestors(info.PID)
 	ancestorsPayload := make([]map[string]interface{}, 0, len(rawAncestors))
 	for _, anc := range rawAncestors {
-		ancEntityID := buildEntityID(p.hostname, anc.PID, anc.StartTime)
+		ancEntityID := buildEntityID(p.agentID, anc.PID, anc.StartTime)
 		ancestorsPayload = append(ancestorsPayload, map[string]interface{}{
 			"pid":        anc.PID,
 			"ppid":       anc.PPID,
@@ -394,7 +415,7 @@ func (p *ProcessCollector) emitEvent(eventType string, info ProcessInfo, cpuPct 
 	// Group leader (session leader approximation).
 	groupLeaderPayload := map[string]interface{}{}
 	if leader, ok := p.tree.GetGroupLeader(info.PID); ok {
-		leaderEntityID := buildEntityID(p.hostname, leader.PID, leader.StartTime)
+		leaderEntityID := buildEntityID(p.agentID, leader.PID, leader.StartTime)
 		groupLeaderPayload = map[string]interface{}{
 			"pid":       leader.PID,
 			"name":      leader.Name,
@@ -529,7 +550,7 @@ func ScanProcesses(procRoot string) (map[int]ProcessInfo, error) {
 	return result, nil
 }
 
-// ReadProcessInfo reads process metadata from /proc/[pid]/{stat,status,cmdline,exe}.
+// ReadProcessInfo reads stat for all tasks and status/cmdline/exe only for user processes.
 func ReadProcessInfo(procRoot string, pid int) (ProcessInfo, error) {
 	pidDir := filepath.Join(procRoot, strconv.Itoa(pid))
 	info := ProcessInfo{PID: pid}
@@ -537,6 +558,9 @@ func ReadProcessInfo(procRoot string, pid int) (ProcessInfo, error) {
 	// Parse /proc/[pid]/stat — fields: PID (comm) state ppid ... starttime
 	if err := parseStatFile(filepath.Join(pidDir, "stat"), &info); err != nil {
 		return ProcessInfo{}, err
+	}
+	if info.KernelThread {
+		return info, nil
 	}
 
 	// Parse /proc/[pid]/status — Uid, Gid, Threads
@@ -584,6 +608,11 @@ func parseStatFile(path string, info *ProcessInfo) error {
 	}
 
 	info.State = rest[0]
+	flags, err := strconv.ParseUint(rest[6], 10, 32)
+	if err != nil {
+		return fmt.Errorf("parse stat flags: %w", err)
+	}
+	info.KernelThread = flags&pfKernelThread != 0
 
 	if ppid, err := strconv.Atoi(rest[1]); err == nil {
 		info.PPID = ppid

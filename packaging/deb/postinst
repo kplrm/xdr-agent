@@ -9,6 +9,17 @@ if [ ! -f /etc/xdr-agent/config.json ] && [ -f /etc/xdr-agent/config.default.jso
   chmod 0644 /etc/xdr-agent/config.json
 fi
 
+# Create credentials once; upgrades keep the operator's password.
+if [ ! -f /etc/xdr-agent/opensearch.env ]; then
+  install -m 0600 /dev/null /etc/xdr-agent/opensearch.env
+  cat > /etc/xdr-agent/opensearch.env <<'EOF'
+# Password for opensearch.username in /etc/xdr-agent/config.json.
+XDR_OPENSEARCH_PASSWORD=''
+EOF
+fi
+chown root:root /etc/xdr-agent/opensearch.env
+chmod 0600 /etc/xdr-agent/opensearch.env
+
 if [ -x /usr/bin/xdr-agent ]; then
   mkdir -p /usr/share/bash-completion/completions || true
   /usr/bin/xdr-agent completion bash >/usr/share/bash-completion/completions/xdr-agent || true

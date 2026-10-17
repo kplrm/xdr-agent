@@ -14,7 +14,7 @@ package process
 //   process.io.read_bytes        → /proc/[pid]/io (read_bytes)
 //   process.io.write_bytes       → /proc/[pid]/io (write_bytes)
 //   container.id                 → /proc/[pid]/cgroup (Docker/containerd/k8s)
-//   process.entity_id            → SHA-256(hostname+pid+starttime)[:16]
+//   process.entity_id            → SHA-256(agent ID + PID + start ticks)
 //   process.user.name            → /etc/passwd lookup for process.user.id
 //   process.group.name           → /etc/group  lookup for process.group.id
 
@@ -198,33 +198,26 @@ func detectContainerID(pidDir string) string {
 	for sc.Scan() {
 		line := sc.Text()
 
-		// Docker: ...:/docker/<64-hex>
+		// Docker cgroupfs: ...:/docker/<id>[/child]
 		if idx := strings.LastIndex(line, "/docker/"); idx >= 0 {
-			id := strings.TrimSpace(line[idx+len("/docker/"):])
-			if len(id) >= 12 {
-				return id[:12]
+			id := strings.SplitN(strings.TrimSpace(line[idx+len("/docker/"):]), "/", 2)[0]
+			if len(id) >= 12 && isHex(id) {
+				return id
 			}
 		}
 
-		// containerd / k8s: ...:/kubepods/.../cri-containerd-<id>.scope
-		if strings.Contains(line, "kubepods") || strings.Contains(line, "containerd") {
+		// Runtime systemd scopes and containerd/Kubernetes cgroupfs paths.
+		if strings.Contains(line, "kubepods") || strings.Contains(line, "containerd") ||
+			strings.Contains(line, "docker-") || strings.Contains(line, "libpod-") {
 			parts := strings.Split(line, "/")
 			for i := len(parts) - 1; i >= 0; i-- {
-				seg := parts[i]
+				seg := strings.TrimSuffix(parts[i], ".scope")
 				seg = strings.TrimPrefix(seg, "cri-containerd-")
-				seg = strings.TrimSuffix(seg, ".scope")
+				seg = strings.TrimPrefix(seg, "docker-")
+				seg = strings.TrimPrefix(seg, "libpod-")
 				if len(seg) >= 12 && isHex(seg) {
-					return seg[:12]
+					return seg
 				}
-			}
-		}
-
-		// Podman: /libpod-<id>
-		if idx := strings.LastIndex(line, "/libpod-"); idx >= 0 {
-			id := strings.TrimSpace(line[idx+len("/libpod-"):])
-			id = strings.TrimSuffix(id, ".scope")
-			if len(id) >= 12 {
-				return id[:12]
 			}
 		}
 	}
@@ -246,19 +239,17 @@ func isHex(s string) bool {
 
 // ── Entity ID ─────────────────────────────────────────────────────────────────
 
-// buildEntityID creates a stable, host-scoped identifier for a process instance.
-// Uses SHA-256(hostname + pid + starttime) truncated to 16 hex chars, matching
-// Elastic's agent convention for ECS process.entity_id.
-func buildEntityID(hostname string, pid int, startTime uint64) string {
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s-%d-%d", hostname, pid, startTime)))
-	return hex.EncodeToString(h[:])[:16]
+// buildEntityID identifies a process instance within an Agent using the full SHA-256 digest.
+func buildEntityID(agentID string, pid int, startTime uint64) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s-%d-%d", agentID, pid, startTime)))
+	return hex.EncodeToString(h[:])
 }
 
 // ── enrichProcessInfo ─────────────────────────────────────────────────────────
 
 // enrichProcessInfo fills in optional "fast" enrichment fields on a ProcessInfo.
 // Called for every process on every scan interval; must remain cheap.
-// Hostname is omitted here — entity_id is finalised at emit time.
+// Entity IDs are finalised at emit time.
 func enrichProcessInfo(procRoot string, info *ProcessInfo) {
 	pidDir := filepath.Join(procRoot, strconv.Itoa(info.PID))
 	info.CWD = readCWD(pidDir)

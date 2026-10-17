@@ -137,6 +137,14 @@ jobs:
             sh -ec '
               apt-get update -qq
               apt-get install -y /pkg/smoke-test-pkg.deb
+              test "$(stat -c %a /etc/xdr-agent/opensearch.env)" = 600
+              test "$(stat -c %u:%g /etc/xdr-agent/opensearch.env)" = 0:0
+              # Reinstall must preserve credentials and enforce their permissions.
+              echo "XDR_OPENSEARCH_PASSWORD=installer-test" > /etc/xdr-agent/opensearch.env
+              chmod 644 /etc/xdr-agent/opensearch.env
+              apt-get install --reinstall -y /pkg/smoke-test-pkg.deb
+              grep -qx "XDR_OPENSEARCH_PASSWORD=installer-test" /etc/xdr-agent/opensearch.env
+              test "$(stat -c %a /etc/xdr-agent/opensearch.env)" = 600
               test "$(/usr/bin/xdr-agent version)" = "$EXPECTED_VERSION"
               /usr/bin/xdr-agent check-rules
             '

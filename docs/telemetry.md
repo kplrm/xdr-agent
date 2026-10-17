@@ -31,13 +31,15 @@ Payload paths below are relative to `payload`; braces list sibling fields. Colle
 
 [`monitor.go`](../internal/telemetry/process/monitor.go) and [`enrichment.go`](../internal/telemetry/process/enrichment.go) scan numeric `/proc/<PID>/` directories on the [configured interval](architecture.md#runtime-and-configuration). The first scan establishes a silent baseline. Later PID-set differences emit `process.start` / `process.end`, module `telemetry.process`, category `process`, kind `event`, severity `0`.
 
-Each row describes one emitted value. Sources without a leading `/` are relative to `/proc/<PID>/`. **Local use** identifies current Agent behavior; investigation fields are shipped for analysis and do not drive active behavioral rules.
+Kernel threads are identified by `PF_KTHREAD` in `stat` field 9 (`flags & 0x00200000 != 0` implies `PF_KTHREAD`). These are not sent in any payload field. Kernel threads retain only stat-derived metadata locally for lineage; status, arguments, file descriptors, I/O, and container enrichment are skipped, and no kernel-thread start/end events are emitted. User-space descendants and file/network collection remain eligible for collection.
+
+Rows describe emitted values except the explicitly marked internal classification. Sources without a leading `/` are relative to `/proc/<PID>/`. **Purpose** identifies Agent behavior or investigation context; investigation fields do not drive active behavioral rules.
 
 | Payload field | Source | Meaning / format | Purpose |
 | --- | --- | --- | --- |
 | `process.pid` | Numeric directory name | Process ID; reusable after exit | Snapshot comparison, executable scan, termination target |
 | `process.ppid` | `stat` field 4 | Parent process ID | Build process lineage |
-| `process.entity_id` | Host name + PID + start ticks | First 16 hex characters of SHA-256 of `hostname-pid-starttime`; process-instance correlation key | Link related process records; lacks boot/Agent identity |
+| `process.entity_id` | Agent ID + PID + start ticks | Full 64-character hex SHA-256 of `agent_id-pid-starttime`; process-instance correlation key | Link process, parent, ancestor, and session-leader records within the Agent |
 | `process.name` | `stat` field 2 (`comm`) | Short task name; may differ from executable/arguments and can be changed | Investigation label |
 | `process.executable` | `exe` symlink | Resolved executable path; interpreted commands usually identify the interpreter | Select executable for YARA; identify related processes |
 | `process.command_line` | `cmdline` | Arguments joined with spaces; original argument boundaries are lost | Readable execution context |
@@ -61,13 +63,13 @@ Each row describes one emitted value. Sources without a leading `/` are relative
 | `process.io.read_bytes` | `io`: `read_bytes` | Cumulative storage-read byte counter, not a rate or network traffic | Resource context |
 | `process.io.write_bytes` | `io`: `write_bytes` | Cumulative storage-write byte counter, not a rate | Resource context |
 | `process.cpu.pct` | Deltas of `stat` fields 14/15 and `/proc/stat` | Optional percentage of total host CPU capacity, rounded to 2 decimals | Retain last measured nonzero value for end events |
-| `container.id` | `cgroup` | First 12 characters of a recognized Docker/containerd/Kubernetes/Podman ID; omitted if undetected | Container correlation; not complete container metadata |
+| `container.id` | `cgroup` | Full recognized Docker/containerd/Kubernetes/Podman ID, excluding cgroup path and runtime scope wrappers; omitted if undetected | Container correlation; not complete container metadata |
 
 [`tree.go`](../internal/telemetry/process/tree.go) adds relationship objects. Their child fields have the same meanings as the corresponding process fields above, applied to the related process:
 
 | Payload object | Included child fields | Meaning / limits |
 | --- | --- | --- |
-| `process.parent` | `pid`, `ppid`, `entity_id`, `name`, `executable`, `command_line`, `args` | Direct parent's last known context; its `ppid` is the child's grandparent. `{}` when unresolved |
+| `process.parent` | `pid`, `ppid`, `entity_id`, `name`, `executable`, `command_line`, `args` | Direct parent's last known context; its `ppid` is the child's grandparent. Kernel parents have stat-derived identity only, with empty executable/command line and null arguments. `{}` when unresolved |
 | `process.ancestors[]` | `pid`, `ppid`, `entity_id`, `name`, `executable` | Up to 10 known ancestors ordered from direct parent toward root; `[]` when unavailable |
 | `process.group_leader` | `pid`, `name`, `entity_id` | Current implementation looks up the session leader using `session_id`; it does not collect the actual process-group ID. `{}` when unresolved |
 
@@ -186,4 +188,4 @@ Collection review priorities, **not implemented changes**:
 
 - Keep executable/identity, lineage, user and capability context. `args` preserves argument boundaries while `command_line` aids display; resource snapshots have lower security value and are candidates for optional collection.
 - `file.header_bytes` is the strongest candidate for removal or opt-in: it can expose credentials and is not consumed by the active local YARA engine. Review command-line redaction alongside it.
-- Add collection-success indicators before treating empty/zero values as facts. File setuid/setgid/sticky bits and boot-aware process identity are useful gaps: current `file.mode` excludes those bits, and `entity_id` can repeat across boots or hosts with reused names. More fields alone will not fix missed executions from polling.
+- Add collection-success indicators before treating empty/zero values as facts. File setuid/setgid/sticky bits are a useful gap: `file.mode` excludes those bits. More fields alone will not fix missed executions from polling.
