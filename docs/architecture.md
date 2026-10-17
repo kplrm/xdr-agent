@@ -32,6 +32,8 @@ Process-start and file-change events trigger asynchronous scans; process-end and
 
 In `prevent` mode, fanotify checks executable opens under `/usr/bin`, `/usr/sbin`, `/usr/local/bin`, `/usr/local/sbin`, `/opt`, `/tmp`, `/var/tmp`, and `/home` by default. Existing subdirectories are included only when the complete configured tree fits within 2,048 directory watches. Oversized trees install no blocking watches. Watches refresh every 30 s; new directories have a coverage gap. Two workers handle decisions with a 500 ms deadline including queue time. Overload, timeout, or response failure allows execution, disables blocking until restart, and reports degraded health. Kernel/filesystem support and `CAP_SYS_ADMIN` are required. Interpreted scripts and execution outside watched paths are not universally intercepted.
 
+The execution guard reserves four Go scheduler slots while active so blocked launches and scanner subprocesses cannot starve its permission responder. CPU affinity and cgroup limits still bound actual CPU usage; the prior scheduler setting is restored on guard shutdown.
+
 After a process YARA match, prevention uses a pidfd and rechecks start ticks plus executable device, inode, size, and modification time before `SIGKILL`. Failed identity checks skip termination. Detection mode produces alerts and `alert_only` outcomes. Execution-denial requests and confirmed outcomes are separate events.
 
 ## Event delivery and loss

@@ -15,7 +15,7 @@ Every Coordinator request sends `Authorization: Bearer <enrollment_token>` and `
 
 Enrollment sends `agent_id`, `machine_id`, `hostname`, `architecture`, `os_type`, `ip_addresses`, `policy_id`, `tags`, and `agent_version`; the response contains `enrollment_id` and `message`.
 
-Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus `protection`: `rule_source`, `rule_version`, `rules_sha256`, `rule_count`, `platform`, `mode`, and `health` (component-to-status map). Heartbeat and command responses contain `message`, optional `pending_commands` (`upgrade:<version>`), and optional `managed_config` below. Heartbeats report optional `config_revision` (last successfully applied revision) and `config_error` (latest application error, at most 1,024 bytes).
+Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus `protection`: `rule_source`, `rule_version`, `rules_sha256`, `rule_count`, `platform`, `mode`, and `health` (component-to-status map). Heartbeat and command responses contain `message`, optional `pending_commands` (`upgrade:<version>`), optional `upgrade_id` (unique attempt identity), and optional `managed_config` below. Heartbeats report optional `config_revision` / `config_error`, plus `upgrade_id`, `upgrade_error` (at most 1,024 bytes), `upgrade_retryable` (boolean), and `upgrade_retry_at` (earliest allowed retry, Unix seconds).
 
 Health is independent of version checks. Execution blocking is `not_applicable` in detection mode. YARA scan failures report degraded health and successful scans restore it when the scan queue is no longer full; execution-blocking failures remain separate.
 
@@ -80,7 +80,13 @@ The security stream can remain empty when no YARA alerts or prevention outcomes 
 
 Paths, base URLs, and intervals can be overridden locally. [Architecture](architecture.md) defines timing defaults, queue limits, retries, and shutdown. TLS validation is enabled by default.
 
-## External upgrade artifact
+## Agent upgrades
+
+Coordinator offers only a published stable GitHub release with uploaded, nonempty AMD64 and ARM64 Debian assets. Shared release lookups cache successes, failures, and in-flight requests for five minutes; GitHub rate-limit headers can extend this cooldown. Repository `VERSION` selects build output, not upgrade availability. Newer installed versions are never downgraded.
+
+Each operator request has a persistent job ID and at most **three command deliveries**, spaced by one minute then five minutes, plus up to 15 seconds of jitter. Frequent heartbeats/command polls do not consume extra attempts or cause extra downloads. After the limit, an unconfirmed upgrade becomes Failed; **Retry upgrade** creates a new job and resets the counter while preserving any outstanding cooldown. Unavailable or superseded targets are stopped. Older agents also receive this server-side limit.
+
+Agents persist each attempt ID before downloading and ignore duplicate deliveries across restarts. Download/launch failures are reported through heartbeat; HTTP 4xx errors other than 408 stop automatic retries immediately, including missing packages, authorization failures, and rate limiting. GitHub `Retry-After` and `X-RateLimit-Reset` headers delay even operator retries. Network/5xx failures may use the remaining attempts. Coordinator displays Queued, Upgrading, Retrying, or Failed with the last error and next permitted attempt time. Success requires the reported installed version, rather than the installer merely being launched. Deploy Coordinator support before Agent **0.4.9+**; existing queued unavailable targets are stopped during polling.
 
 `GET https://github.com/kplrm/xdr-agent/releases/download/v{version}/{package}` downloads a distribution/architecture package. Native package dependencies must already be available for self-upgrade.
 

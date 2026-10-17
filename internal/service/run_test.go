@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,6 +43,59 @@ func TestRunPersistsMissingDefaultsToSelectedConfig(t *testing.T) {
 	}
 	if len(saved.InternalNetworks) != 4 || saved.ProcessScanIntervalSeconds != 5 || saved.NetworkScanIntervalSeconds != 5 || saved.TelemetryShipIntervalSeconds != 30 || saved.ControlPlaneURL != server.URL {
 		t.Fatal("startup did not persist effective defaults to the selected file")
+	}
+}
+
+func TestUpgradeAttemptIDsDeduplicateAcrossPollsAndRestartsAndReportErrors(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var beats, attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := "job:2"
+		if r.URL.Path == "/heartbeat" {
+			var request enroll.HeartbeatRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+			}
+			switch beats.Add(1) {
+			case 1:
+				id = "job:1"
+			case 2:
+				id = "job:1" // Duplicate delivery must not restart the failed download.
+				if request.UpgradeID != id || request.UpgradeError != "temporary download failure" || request.UpgradeRetryable == nil || !*request.UpgradeRetryable {
+					t.Error("upgrade failure was not acknowledged")
+				}
+			default:
+				cancel()
+			}
+		}
+		fmt.Fprintf(w, `{"pending_commands":["upgrade:2.0.0"],"upgrade_id":%q}`, id)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Config{ControlPlaneURL: server.URL, HeartbeatPath: "/heartbeat", CommandsPath: "/commands", RequestTimeoutSeconds: 1, EnrollIntervalSeconds: 30, HeartbeatIntervalSeconds: 30, CommandPollIntervalSeconds: 1, StatePath: path}
+	state := identity.State{AgentID: "agent", Enrolled: true}
+	perform := func(context.Context, string) error { attempts.Add(1); return errors.New("temporary download failure") }
+	runFleetWithUpgrade(ctx, cfg, &state, func() enroll.ProtectionInventory { return enroll.ProtectionInventory{} }, func() {}, perform)
+	if attempts.Load() != 2 {
+		t.Fatalf("performed %d upgrades, want one per attempt ID", attempts.Load())
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restarted identity.State
+	if err := json.Unmarshal(content, &restarted); err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	// The fixture cancels the original context; bound this restart independently.
+	ctx2, stop := context.WithTimeout(ctx2, 500*time.Millisecond)
+	defer stop()
+	runFleetWithUpgrade(ctx2, cfg, &restarted, func() enroll.ProtectionInventory { return enroll.ProtectionInventory{} }, func() {}, perform)
+	if attempts.Load() != 2 || restarted.UpgradeID != "job:2" || beats.Load() < 4 {
+		t.Fatal("restart repeated a command or did not report persisted state")
 	}
 }
 

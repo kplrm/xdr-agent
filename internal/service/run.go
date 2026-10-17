@@ -249,6 +249,10 @@ func enrollAgent(ctx context.Context, cfg config.Config, state *identity.State) 
 
 // runFleet owns all mutable enrollment state; telemetry runs independently.
 func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inventory func() enroll.ProtectionInventory, onEnrolled func(), applyManaged ...func(config.Config, config.ManagedConfig) (config.Config, error)) error {
+	return runFleetWithUpgrade(ctx, cfg, state, inventory, onEnrolled, upgrade.Perform, applyManaged...)
+}
+
+func runFleetWithUpgrade(ctx context.Context, cfg config.Config, state *identity.State, inventory func() enroll.ProtectionInventory, onEnrolled func(), perform func(context.Context, string) error, applyManaged ...func(config.Config, config.ManagedConfig) (config.Config, error)) error {
 	enrollment := time.NewTicker(cfg.EnrollInterval())
 	heartbeat := time.NewTicker(cfg.HeartbeatInterval())
 	commands := time.NewTicker(cfg.CommandPollInterval())
@@ -256,6 +260,11 @@ func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inv
 	defer heartbeat.Stop()
 	defer commands.Stop()
 	upgrading := make(chan struct{}, 1)
+	type upgradeResult struct {
+		id  string
+		err error
+	}
+	upgradeResults := make(chan upgradeResult, 1)
 	var upgrades sync.WaitGroup
 	defer upgrades.Wait()
 	handleCommands := func(response enroll.HeartbeatResponse) {
@@ -285,16 +294,34 @@ func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inv
 			if version == "" || version == buildinfo.Version {
 				continue
 			}
+			commandID := response.UpgradeID
+			if commandID == "" {
+				commandID = "legacy:" + version
+			}
+			if state.UpgradeID == commandID {
+				continue
+			}
 			select {
 			case upgrading <- struct{}{}:
+				previous := *state
+				state.UpgradeID, state.UpgradeError, state.UpgradeRetryable = commandID, "", nil
+				state.UpgradeRetryAt = 0
+				if err := identity.Save(cfg.StatePath, *state); err != nil {
+					*state = previous
+					<-upgrading
+					log.Printf("upgrade not started: save attempt identity: %v", err)
+					continue
+				}
 				upgrades.Add(1)
-				go func(target string) {
+				go func(target, id string) {
 					defer upgrades.Done()
 					defer func() { <-upgrading }()
-					if err := upgrade.Perform(ctx, target); err != nil {
-						log.Printf("upgrade failed: %v", err)
+					result := upgradeResult{id: id, err: perform(ctx, target)}
+					select {
+					case upgradeResults <- result:
+					case <-ctx.Done():
 					}
-				}(version)
+				}(version, commandID)
 			default:
 			}
 		}
@@ -325,6 +352,22 @@ func runFleet(ctx context.Context, cfg config.Config, state *identity.State, inv
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case result := <-upgradeResults:
+			if result.id != state.UpgradeID || result.err == nil {
+				continue
+			}
+			state.UpgradeError = result.err.Error()
+			if len(state.UpgradeError) > 1024 {
+				state.UpgradeError = state.UpgradeError[:1024]
+			}
+			retryable := upgrade.Retryable(result.err)
+			state.UpgradeRetryable = &retryable
+			state.UpgradeRetryAt = upgrade.RetryAt(result.err)
+			if err := identity.Save(cfg.StatePath, *state); err != nil {
+				log.Printf("save upgrade failure: %v", err)
+			}
+			log.Printf("upgrade failed: %v", result.err)
+			sendHeartbeat()
 		case <-enrollment.C:
 			if !state.Enrolled {
 				tryEnrollment()

@@ -41,3 +41,25 @@ func TestManagedConfigUsesExistingHeartbeatAndCommandResponses(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyUpgradeAttemptsKeepOldHeartbeatSchema(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		for _, key := range []string{"upgrade_id", "upgrade_error", "upgrade_retryable", "upgrade_retry_at"} {
+			if _, exists := request[key]; exists {
+				t.Errorf("legacy Coordinator received unsupported field %s", key)
+			}
+		}
+		w.Write([]byte(`{"message":"ok"}`))
+	}))
+	defer server.Close()
+	cfg := config.Config{ControlPlaneURL: server.URL, HeartbeatPath: "/heartbeat", RequestTimeoutSeconds: 1}
+	retryable := false
+	_, err := Heartbeat(context.Background(), cfg, identity.State{AgentID: "agent", UpgradeID: "legacy:2.0.0", UpgradeError: "failed", UpgradeRetryable: &retryable, UpgradeRetryAt: 123}, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+}

@@ -7,6 +7,7 @@ package upgrade
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,9 +17,32 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
+
+type downloadError struct {
+	status  int
+	url     string
+	retryAt int64
+}
+
+func (e *downloadError) Error() string { return fmt.Sprintf("download %s: HTTP %d", e.url, e.status) }
+
+// Missing/forbidden artifacts and rate limits require an explicit operator retry.
+func Retryable(err error) bool {
+	var failure *downloadError
+	return !errors.As(err, &failure) || failure.status < 400 || failure.status >= 500 || failure.status == 408
+}
+
+func RetryAt(err error) int64 {
+	var failure *downloadError
+	if errors.As(err, &failure) {
+		return failure.retryAt
+	}
+	return 0
+}
 
 const (
 	githubReleaseBase = "https://github.com/kplrm/xdr-agent/releases/download"
@@ -77,7 +101,22 @@ func download(ctx context.Context, url, dir, suffix string) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
+		var retryAt time.Time
+		if seconds, err := time.ParseDuration(resp.Header.Get("Retry-After") + "s"); err == nil {
+			retryAt = time.Now().Add(seconds)
+		} else if parsed, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil {
+			retryAt = parsed
+		}
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			if seconds, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && seconds > retryAt.Unix() {
+				retryAt = time.Unix(seconds, 0)
+			}
+		}
+		var until int64
+		if retryAt.After(time.Now()) {
+			until = retryAt.Unix()
+		}
+		return "", &downloadError{status: resp.StatusCode, url: url, retryAt: until}
 	}
 
 	tmp, err := os.CreateTemp(dir, "xdr-agent-upgrade-*"+suffix)

@@ -26,15 +26,19 @@ type ProtectionInventory struct {
 }
 
 type HeartbeatRequest struct {
-	AgentID        string               `json:"agent_id"`
-	MachineID      string               `json:"machine_id"`
-	Hostname       string               `json:"hostname"`
-	PolicyID       string               `json:"policy_id"`
-	Tags           []string             `json:"tags"`
-	AgentVersion   string               `json:"agent_version"`
-	Protection     *ProtectionInventory `json:"protection,omitempty"`
-	ConfigRevision string               `json:"config_revision,omitempty"`
-	ConfigError    string               `json:"config_error,omitempty"`
+	AgentID          string               `json:"agent_id"`
+	MachineID        string               `json:"machine_id"`
+	Hostname         string               `json:"hostname"`
+	PolicyID         string               `json:"policy_id"`
+	Tags             []string             `json:"tags"`
+	AgentVersion     string               `json:"agent_version"`
+	Protection       *ProtectionInventory `json:"protection,omitempty"`
+	ConfigRevision   string               `json:"config_revision,omitempty"`
+	ConfigError      string               `json:"config_error,omitempty"`
+	UpgradeID        string               `json:"upgrade_id,omitempty"`
+	UpgradeError     string               `json:"upgrade_error,omitempty"`
+	UpgradeRetryable *bool                `json:"upgrade_retryable,omitempty"`
+	UpgradeRetryAt   int64                `json:"upgrade_retry_at,omitempty"`
 }
 
 // HeartbeatResponse holds the fields returned by the control plane on a
@@ -44,20 +48,29 @@ type HeartbeatResponse struct {
 	Message         string                `json:"message"`
 	PendingCommands []string              `json:"pending_commands"`
 	ManagedConfig   *config.ManagedConfig `json:"managed_config,omitempty"`
+	UpgradeID       string                `json:"upgrade_id,omitempty"`
 }
 
 // Heartbeat sends a heartbeat to the control plane and returns the server's
 // response (including any pending commands) and an error.
 func Heartbeat(ctx context.Context, cfg config.Config, state identity.State, version string, protection ...ProtectionInventory) (HeartbeatResponse, error) {
 	payload := HeartbeatRequest{
-		AgentID:        state.AgentID,
-		MachineID:      state.MachineID,
-		Hostname:       state.Hostname,
-		PolicyID:       cfg.PolicyID,
-		Tags:           cfg.Tags,
-		AgentVersion:   version,
-		ConfigRevision: cfg.ManagedConfigRevision,
-		ConfigError:    cfg.ManagedConfigError,
+		AgentID:          state.AgentID,
+		MachineID:        state.MachineID,
+		Hostname:         state.Hostname,
+		PolicyID:         cfg.PolicyID,
+		Tags:             cfg.Tags,
+		AgentVersion:     version,
+		ConfigRevision:   cfg.ManagedConfigRevision,
+		ConfigError:      cfg.ManagedConfigError,
+		UpgradeID:        state.UpgradeID,
+		UpgradeError:     state.UpgradeError,
+		UpgradeRetryable: state.UpgradeRetryable,
+		UpgradeRetryAt:   state.UpgradeRetryAt,
+	}
+	// Older Coordinators reject unknown heartbeat fields and send no attempt ID.
+	if strings.HasPrefix(payload.UpgradeID, "legacy:") {
+		payload.UpgradeID, payload.UpgradeError, payload.UpgradeRetryable, payload.UpgradeRetryAt = "", "", nil, 0
 	}
 
 	if len(protection) > 0 {

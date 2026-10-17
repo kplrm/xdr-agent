@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -26,6 +27,10 @@ type State struct {
 	LastEnrollErr       string   `json:"last_enroll_error,omitempty"`
 	LoadedRuleCount     int      `json:"loaded_rule_count,omitempty"`
 	LastYaraInventoryAt string   `json:"last_yara_inventory_at,omitempty"`
+	UpgradeID           string   `json:"upgrade_id,omitempty"`
+	UpgradeError        string   `json:"upgrade_error,omitempty"`
+	UpgradeRetryable    *bool    `json:"upgrade_retryable,omitempty"`
+	UpgradeRetryAt      int64    `json:"upgrade_retry_at,omitempty"`
 }
 
 func Ensure(path string) (State, error) {
@@ -149,10 +154,24 @@ func save(path string, state State) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
-	if err := os.WriteFile(path, content, 0o640); err != nil {
+	file, err := os.CreateTemp(filepath.Dir(path), ".xdr-state-*")
+	if err != nil {
+		return fmt.Errorf("create state %s: %w", path, err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if _, err := file.Write(content); err != nil {
 		return fmt.Errorf("write state %s: %w", path, err)
 	}
-
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync state %s: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close state %s: %w", path, err)
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		return fmt.Errorf("replace state %s: %w", path, err)
+	}
 	return nil
 }
 

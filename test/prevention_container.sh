@@ -23,5 +23,5 @@ timeout --signal=TERM --kill-after=5s 30s docker run --rm --name "$container" \
   --network none --read-only --tmpfs /tmp:rw,exec,size=64m,mode=1777 \
   --cpus=1 --memory=256m --pids-limit=64 \
   --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
-  -e XDR_REQUIRE_FANOTIFY=1 -e XDR_EXEC_FIXTURE=/fixture \
-  "$(cat "$staging/image.id")" -test.run '^TestExecGuardPrivileged' -test.v
+  -e GOMAXPROCS=1 -e XDR_REQUIRE_FANOTIFY=1 -e XDR_EXEC_FIXTURE=/fixture \
+  "$(cat "$staging/image.id")" -test.run '^TestExecGuardPrivileged' -test.v -test.timeout 20s

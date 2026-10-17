@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ type ExecGuard struct {
 	ready          chan struct{}
 	done           chan struct{}
 	watchDone      chan struct{}
+	previousProcs  int
 }
 
 type execRequest struct {
@@ -185,6 +187,12 @@ func (g *ExecGuard) Start(ctx context.Context) error {
 		return fmt.Errorf("blocking disabled before marks are installed: %w", err)
 	}
 	ctx, g.cancel = context.WithCancel(ctx)
+	// Go's vfork path can retain a scheduler slot while a launch waits on us.
+	// Keep capacity for scanner launches and the permission responder. CPU
+	// affinity/cgroup limits still bound actual CPU use.
+	if runtime.GOMAXPROCS(0) < executionScanWorkers+2 {
+		g.previousProcs = runtime.GOMAXPROCS(executionScanWorkers + 2)
+	}
 	go g.run(ctx)
 	<-g.ready
 	if err := g.markDirectories(); err != nil {
@@ -201,6 +209,10 @@ func (g *ExecGuard) Close() {
 		g.cancel()
 		<-g.done
 		<-g.watchDone
+		if g.previousProcs > 0 {
+			runtime.GOMAXPROCS(g.previousProcs)
+			g.previousProcs = 0
+		}
 	} else {
 		_ = unix.Close(g.fd)
 	}

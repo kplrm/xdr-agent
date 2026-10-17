@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,12 @@ import (
 
 // Run with XDR_REQUIRE_FANOTIFY=1 inside a disposable privileged container.
 func TestExecGuardPrivilegedAllowAndDeny(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() {
+		if runtime.GOMAXPROCS(0) != previousProcs {
+			t.Error("guard shutdown did not restore the scheduler setting")
+		}
+	})
 	root := t.TempDir()
 	executable := copyExecutionFixture(t, root)
 	var deny atomic.Bool
@@ -36,6 +43,9 @@ func TestExecGuardPrivilegedAllowAndDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer guard.Close()
+	if runtime.GOMAXPROCS(0) < executionScanWorkers+2 {
+		t.Fatal("permission responder has no reserved scheduler capacity")
+	}
 
 	run := func() error {
 		deadline, stop := context.WithTimeout(ctx, 2*time.Second)
