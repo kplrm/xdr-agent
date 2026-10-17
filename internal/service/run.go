@@ -35,6 +35,11 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 	if err != nil {
 		return err
 	}
+	if _, err := config.PersistTelemetryDefaults(configPath, cfg); err != nil {
+		log.Printf("configuration defaults not saved; using effective settings: %v", err)
+	}
+	log.Printf("configuration loaded: path=%s process_scan=%s network_scan=%s telemetry_ship=%s internal_networks=%v",
+		configPath, cfg.ProcessScanInterval(), cfg.NetworkScanInterval(), cfg.TelemetryShipInterval(), cfg.EffectiveInternalNetworks())
 	limitedCPUs, err := linux.LimitCPUs(cfg.MaxCPUCores)
 	if err != nil {
 		return fmt.Errorf("apply max_cpu_cores: %w", err)

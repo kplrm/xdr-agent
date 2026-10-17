@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -109,6 +110,85 @@ func TestInternalNetworksDefaultsOverridesAndValidation(t *testing.T) {
 	}
 	if got := (Config{}).EffectiveInternalNetworks(); !reflect.DeepEqual(got, DefaultInternalNetworks()) {
 		t.Fatalf("zero config networks = %v", got)
+	}
+}
+
+func TestPersistTelemetryDefaultsPreservesInstalledConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name, fields           string
+		process, network, ship int
+		changed                bool
+	}{
+		{"legacy", `,"telemetry_interval_seconds":5,"telemetry_ship_interval_seconds":30`, 5, 5, 30, true},
+		{"omitted", "", 1, 1, 30, true},
+		{"partial", `,"internal_networks":["203.0.113.0/24"],"process_scan_interval_seconds":2`, 2, 1, 30, true},
+		{"explicit", `,"internal_networks":[],"process_scan_interval_seconds":2,"network_scan_interval_seconds":3,"telemetry_ship_interval_seconds":7`, 2, 3, 7, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			content := []byte(`{"control_plane_url":"https://coordinator.invalid","state_path":"` + filepath.Join(dir, "state.json") + `","enrollment_token":"test-token","opensearch":{"username":"custom-writer","password_env":"KEEP_SECRET"},"future_local_setting":{"keep":[true,0,""]},"managed_config_revision":"policy:1"` + test.fields + `}`)
+			if err := os.WriteFile(path, content, 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed, err := PersistTelemetryDefaults(path, cfg)
+			if err != nil || changed != test.changed {
+				t.Fatalf("changed=%t, error=%v", changed, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var before, after map[string]interface{}
+			json.Unmarshal(content, &before)
+			if err := json.Unmarshal(data, &after); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range before {
+				if !reflect.DeepEqual(after[key], value) {
+					t.Errorf("existing field %s changed", key)
+				}
+			}
+			for key, want := range map[string]int{"process_scan_interval_seconds": test.process, "network_scan_interval_seconds": test.network, "telemetry_ship_interval_seconds": test.ship} {
+				if after[key] != float64(want) {
+					t.Errorf("persisted %s=%v, want %d", key, after[key], want)
+				}
+			}
+			reloaded, err := Load(path)
+			if err != nil || !reflect.DeepEqual(reloaded.InternalNetworks, cfg.InternalNetworks) || after["internal_networks"] == nil {
+				t.Fatalf("effective networks changed or missing: %v", err)
+			}
+			info, _ := os.Stat(path)
+			if changed, err := PersistTelemetryDefaults(path, reloaded); err != nil || changed {
+				t.Fatalf("repeated startup rewrites config: changed=%t, error=%v", changed, err)
+			}
+			repeated, _ := os.Stat(path)
+			if !os.SameFile(info, repeated) || repeated.Mode().Perm() != 0600 {
+				t.Fatal("repeated startup replaced the file or exposed credentials")
+			}
+			if !test.changed && string(data) != string(content) {
+				t.Fatal("fully configured file was rewritten")
+			}
+		})
+	}
+}
+
+func TestPersistTelemetryDefaultsRejectsInvalidFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for _, content := range []string{`null`, `[]`, `{`} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if changed, err := PersistTelemetryDefaults(path, defaults()); err == nil || changed {
+			t.Fatalf("invalid file accepted: %s", content)
+		}
+		if data, _ := os.ReadFile(path); string(data) != content {
+			t.Fatal("invalid file was overwritten")
+		}
 	}
 }
 

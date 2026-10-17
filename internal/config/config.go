@@ -245,6 +245,42 @@ func Save(path string, cfg Config) error {
 	return saveJSON(path, data)
 }
 
+// PersistTelemetryDefaults makes effective defaults visible in the active file.
+// Existing values (including empty lists), unknown fields and credentials survive.
+func PersistTelemetryDefaults(path string, cfg Config) (bool, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(content, &document); err != nil || document == nil {
+		return false, fmt.Errorf("config %s must be a JSON object", path)
+	}
+	changed := false
+	for key, value := range map[string]interface{}{
+		"internal_networks":               cfg.EffectiveInternalNetworks(),
+		"process_scan_interval_seconds":   int(cfg.ProcessScanInterval() / time.Second),
+		"network_scan_interval_seconds":   int(cfg.NetworkScanInterval() / time.Second),
+		"telemetry_ship_interval_seconds": int(cfg.TelemetryShipInterval() / time.Second),
+	} {
+		if _, exists := document[key]; !exists {
+			document[key], _ = json.Marshal(value)
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	data, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("marshal config: %w", err)
+	}
+	if err := saveJSON(path, append(data, '\n')); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func saveJSON(path string, data []byte) error {
 	// Enrollment tokens must never inherit the sample config's read permissions.
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".xdr-agent-config-*")

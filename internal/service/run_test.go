@@ -16,6 +16,35 @@ import (
 	"xdr-agent/internal/identity"
 )
 
+func TestRunPersistsMissingDefaultsToSelectedConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"enrollment_id":"agent"}`))
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom-config.json")
+	content := `{"max_cpu_cores":0,"control_plane_url":"` + server.URL + `","state_path":"` + filepath.Join(dir, "state.json") + `","telemetry_interval_seconds":5}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := Run(ctx, path, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved config.Config
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.InternalNetworks) != 4 || saved.ProcessScanIntervalSeconds != 5 || saved.NetworkScanIntervalSeconds != 5 || saved.TelemetryShipIntervalSeconds != 30 || saved.ControlPlaneURL != server.URL {
+		t.Fatal("startup did not persist effective defaults to the selected file")
+	}
+}
+
 func TestFleetRetriesEnrollmentAndReportsPeriodicHealth(t *testing.T) {
 	var enrollments, beats atomic.Int32
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
