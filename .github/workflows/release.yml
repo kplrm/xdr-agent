@@ -1,9 +1,10 @@
 name: Release
 
-# Triggered every time a commit lands on main (i.e., after a PR is merged and approved).
+# Run on main pushes or manually from GitHub Actions.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Serialize releases so two pushes cannot publish the same VERSION concurrently.
 concurrency:

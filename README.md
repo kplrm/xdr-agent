@@ -1,6 +1,6 @@
 # xdr-agent
 
-Debian/Ubuntu endpoint for process, file, and network telemetry with release-bundled YARA Forge Core rules. Detection is the default: matches generate alerts without stopping execution. Check the mode in the config passed to `enroll`; enrollment copies that file into the installed service config, including an existing `prevent` setting. Set `detection_prevention.mode` to `prevent` to enable execution denial and termination of matched processes. The installed rules change with agent releases. `VERSION` selects the latest release; GitHub builds and publishes its AMD64 and ARM64 Debian packages when that version is pushed to `main`.
+Debian/Ubuntu endpoint for process, file, and network telemetry with release-bundled YARA Forge Core rules. Detection is the default: matches generate alerts without stopping execution. Check the mode in the config passed to `enroll`; enrollment copies that file into the installed service config, including an existing `prevent` setting. Set `detection_prevention.mode` to `prevent` to enable execution denial and termination of matched processes. The installed rules change with agent releases. `VERSION` sets the release version; GitHub builds and publishes its AMD64 and ARM64 Debian packages on pushes to `main` or through **Actions → Release → Run workflow**. Select the branch containing the intended `VERSION`; existing release tags are skipped.
 
 ## Build, test, and install locally (Debian/Ubuntu, amd64)
 
