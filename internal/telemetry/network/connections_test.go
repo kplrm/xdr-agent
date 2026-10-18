@@ -256,9 +256,9 @@ func TestNetworkCollector_EmitsEvents(t *testing.T) {
 		select {
 		case evt := <-received:
 			switch evt.Type {
-			case "network.connection_opened":
+			case "network.socket_observed":
 				openEvents = append(openEvents, evt)
-			case "network.connection_closed":
+			case "network.socket_disappeared":
 				closeEvents = append(closeEvents, evt)
 			}
 			if len(openEvents) >= 1 && len(closeEvents) >= 1 {

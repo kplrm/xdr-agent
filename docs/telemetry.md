@@ -10,7 +10,7 @@ All fields are at the document root; braces list sibling fields. Collector detai
 
 | Field | Meaning |
 | --- | --- |
-| `id` | Event identifier, retained on delivery retries |
+| `_id` | OpenSearch metadata: `agent.id` + `:` + the Agent's internal event ID, retained on delivery retries; absent from the document body |
 | `@timestamp` | UTC time the Agent observed/emitted the event; not necessarily the kernel action time |
 | `event.type` | Observed action, such as `process.start` or `file.modified` |
 | `event.category` | Domain, such as process, file, network, threat, prevention, or agent |
@@ -90,7 +90,7 @@ Fields below are at the document root. **Usage** explains each field's role in a
 
 [`snapshot.go`](../internal/telemetry/network/snapshot.go) reads each `/proc/net/{tcp,tcp6,udp,udp6}` table once per collection cycle: local/remote address and port, state, UID, inode. The immutable snapshot is shared by connections and DNS; ownership resolution walks `/proc/<PID>/fd/*` at most once per generation, only when needed. DNS never triggers another table read. `network_scan_interval_seconds` defaults to 1 s and is independent of shipment timing.
 
-[`connections.go`](../internal/telemetry/network/connections.go) uses module `telemetry.network`, category `network`. After a silent first baseline, `network.connection_opened` means a socket first appears in a subsequent snapshot; `network.connection_state_changed` means its observed state changes; `network.connection_closed` means it disappears from a successfully read table. These are polling observations, not exact handshake/close timestamps: a socket can first appear in `TIME_WAIT`, and closure events retain its last observed `network.state`. Unchanged snapshots emit nothing. Known process identity and handshake direction are retained for later state/closure events.
+[`connections.go`](../internal/telemetry/network/connections.go) uses module `telemetry.network`, category `network`. After a silent first baseline, `network.socket_observed` means a socket first appears in a subsequent snapshot; `network.socket_state_changed` means its observed state changes; `network.socket_disappeared` means it disappears from a successfully read table. These are polling observations, not exact handshake/close timestamps: a socket can first appear in `TIME_WAIT`, and disappearance events retain its last observed `network.state`. Unchanged snapshots emit nothing. Known process identity and handshake direction are retained for later state/disappearance events.
 
 `internal_networks` in `/etc/xdr-agent/config.json` defaults to RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and IPv6 ULA (`fc00::/7`, RFC 4193). A configured list replaces these CIDRs; `[]` clears them. Loopback and exact IPs assigned to host interfaces are always inside, including public IPv4/IPv6 addresses; their surrounding subnets are not automatically included. A shared in-memory address cache reads the local kernel at startup, follows IPv4/IPv6 address-change notifications, and resyncs every minute (also the fallback when notifications are unavailable). No internet requests or config-file rewrites are needed. Discovery uses the Agent's network namespace and cannot discover a router's NAT public IP unless assigned locally or configured explicitly.
 
@@ -214,7 +214,7 @@ Protection detail names below are literal dotted keys, except `action`, `detail`
 | `file.size`, `file.mtime_ns` | Matched file size in bytes and modification time as Unix nanoseconds; used with device/inode to verify identity before termination |
 | `process.*` | Copied source-process fields with the meanings above; execution events may carry only `process.pid` |
 | `execution.deny_requested` | Boolean: the match requested denial; does not confirm successful enforcement |
-| `source.event.id` | Malware alert: originating telemetry ID, empty for execution-triggered scans. Manager outcome: originating alert ID |
+| `source.event.id` | Full originating document `_id`: telemetry for malware alerts, alert for manager outcomes; empty for execution-triggered scans |
 | `action` | Manager: alert_only, process_killed, kill_skipped. Execution guard: execution_denied, execution_response_failed |
 | `detail` | Manager's skip/error explanation; empty if there is none |
 

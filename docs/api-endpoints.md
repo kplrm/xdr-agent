@@ -19,7 +19,7 @@ Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus
 
 Health is independent of version checks. Execution blocking is `not_applicable` in detection mode. YARA scan failures report degraded health and successful scans restore it when the scan queue is no longer full; execution-blocking failures remain separate.
 
-Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. [Telemetry](telemetry.md) defines the event envelope and root-level detail fields. Process, connection, and DNS events omit `event.severity`; file, security, and runtime-log events include it. Connection and host DNS endpoints use nested `local.{ip,port}` and `remote.{ip,port}` objects; forwarded DNS uses `dns.client.{ip,port}` and `dns.server.{ip,port}`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
+Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Each event carries `_id=agent_id:internal_event_id` as transport metadata; Coordinator validates the agent prefix and moves `_id` into bulk metadata. Documents contain neither `id` nor `_id` in their body. [Telemetry](telemetry.md) defines the event envelope and root-level detail fields. Process, connection, and DNS events omit `event.severity`; file, security, and runtime-log events include it. Connection and host DNS endpoints use nested `local.{ip,port}` and `remote.{ip,port}` objects; forwarded DNS uses `dns.client.{ip,port}` and `dns.server.{ip,port}`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
 
 ## Managed configuration
 

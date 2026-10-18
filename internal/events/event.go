@@ -40,7 +40,7 @@ func (s Severity) Pointer() *Severity { return &s }
 // Designed to be compatible with the Elastic Common Schema (ECS).
 type Event struct {
 	// Core fields
-	ID        string    `json:"id"`
+	ID        string    `json:"_id,omitempty"` // Internal ID; shipping supplies document metadata.
 	Timestamp time.Time `json:"@timestamp"`
 	Type      string    `json:"event.type"`     // e.g. "process_start", "file_write", "alert"
 	Category  string    `json:"event.category"` // e.g. "process", "file", "network", "malware"
@@ -67,7 +67,7 @@ type Event struct {
 type eventEnvelope Event
 
 var envelopeFields = [...]string{
-	"id", "@timestamp", "event.type", "event.category", "event.kind", "event.severity", "event.module",
+	"id", "_id", "@timestamp", "event.type", "event.category", "event.kind", "event.severity", "event.module",
 	"agent.id", "host.hostname", "threat.tactic.name", "threat.technique.id", "threat.technique.subtechnique.id", "tags",
 }
 
@@ -105,6 +105,14 @@ func (e *Event) UnmarshalJSON(data []byte) error {
 	*e = Event(header)
 	e.Payload = fields
 	return nil
+}
+
+// DocumentID is the identity used by OpenSearch metadata and alert references.
+func (e Event) DocumentID() string {
+	if e.ID == "" {
+		return ""
+	}
+	return e.AgentID + ":" + e.ID
 }
 
 // NewID is assigned before queueing so retries preserve document identity.

@@ -128,7 +128,7 @@ func TestHostAddressChangesReclassifyOnlyAffectedConnections(t *testing.T) {
 		want := "outbound"
 		if event.Payload["local"].(map[string]interface{})["ip"] == public {
 			want = "external"
-			if i >= 4 && event.Type != "network.connection_closed" {
+			if i >= 4 && event.Type != "network.socket_disappeared" {
 				want = "unknown" // No handshake observed with this IP recognized as local.
 			}
 		}
@@ -173,7 +173,7 @@ func TestSocketLifecycleTracksStateAndRetainsOwner(t *testing.T) {
 	sockets = nil
 	collector.scan()
 	got := dnsDrainEvents(pipeline)
-	want := []string{"network.connection_opened", "network.connection_state_changed", "network.connection_state_changed", "network.connection_closed"}
+	want := []string{"network.socket_observed", "network.socket_state_changed", "network.socket_state_changed", "network.socket_disappeared"}
 	if len(got) != len(want) {
 		t.Fatalf("events=%d, want %d: %+v", len(got), len(want), got)
 	}
@@ -224,7 +224,7 @@ func TestSocketReadFailureAndReusedTuple(t *testing.T) {
 	for _, event := range got {
 		counts[event.Type]++
 	}
-	if len(got) != 3 || counts["network.connection_opened"] != 2 || counts["network.connection_closed"] != 1 {
+	if len(got) != 3 || counts["network.socket_observed"] != 2 || counts["network.socket_disappeared"] != 1 {
 		t.Fatalf("events=%+v", counts)
 	}
 }
@@ -266,7 +266,7 @@ func TestSocketHandshakeInodePromotionAndTupleReuse(t *testing.T) {
 			sockets[0].State, sockets[0].Inode = "ESTABLISHED", 456
 			collector.scan()
 			got := dnsDrainEvents(pipeline)
-			want := []string{"network.connection_opened", "network.connection_state_changed", "network.connection_state_changed", "network.connection_opened", "network.connection_closed"}
+			want := []string{"network.socket_observed", "network.socket_state_changed", "network.socket_state_changed", "network.socket_observed", "network.socket_disappeared"}
 			if len(got) != len(want) {
 				t.Fatalf("promotion events=%+v, want %v", got, want)
 			}

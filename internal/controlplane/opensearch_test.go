@@ -66,6 +66,11 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 		if action["create"]["_index"] != TelemetryStream || action["create"]["_id"] != "agent:event" || document["agent.id"] != "agent" {
 			t.Error("incorrect stream, identity or operation")
 		}
+		for _, field := range []string{"id", "_id"} {
+			if _, exists := document[field]; exists {
+				t.Errorf("identity field %q leaked into the document body", field)
+			}
+		}
 		if document["payload"] != nil || document["process"].(map[string]interface{})["pid"] != float64(42) {
 			t.Error("event details were not sent at the root")
 		}
@@ -89,6 +94,9 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 	}
 	if len(s.buffer) != 1 {
 		t.Fatal("failed event not retained")
+	}
+	if s.buffer[0].ID != "event" {
+		t.Fatal("shipping mutated the buffered event identity")
 	}
 	if err := s.Flush(context.Background()); err != nil {
 		t.Fatal(err)

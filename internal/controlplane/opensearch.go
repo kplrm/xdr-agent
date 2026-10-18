@@ -77,6 +77,7 @@ func (s *Shipper) shipOpenSearch(ctx context.Context, batch []events.Event) erro
 			return err
 		}
 		event.AgentID = s.cfg.AgentID
+		event.ID = "" // Identity belongs in bulk metadata, not the document body.
 		if err := encoder.Encode(event); err != nil {
 			return err
 		}

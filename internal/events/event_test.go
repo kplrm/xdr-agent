@@ -28,6 +28,9 @@ func TestEventRootFieldsRoundTrip(t *testing.T) {
 		if _, wrapped := document["payload"]; wrapped {
 			t.Fatalf("event details must be at the root: %s", encoded)
 		}
+		if _, exists := document["id"]; exists || document["_id"] != event.ID {
+			t.Fatalf("event identity must use metadata: %s", encoded)
+		}
 		for field := range details {
 			if _, exists := document[field]; !exists {
 				t.Fatalf("missing root field %q: %s", field, encoded)
@@ -51,6 +54,15 @@ func TestEventRootFieldsRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(document, restored) {
 			t.Fatalf("root fields changed after decoding: %s", roundTrip)
 		}
+	}
+}
+
+func TestDocumentID(t *testing.T) {
+	if got := (Event{AgentID: "agent", ID: "reading"}).DocumentID(); got != "agent:reading" {
+		t.Fatalf("document ID = %q", got)
+	}
+	if got := (Event{AgentID: "agent"}).DocumentID(); got != "" {
+		t.Fatalf("unlinked event has document ID %q", got)
 	}
 }
 

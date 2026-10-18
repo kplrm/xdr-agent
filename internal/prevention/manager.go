@@ -39,7 +39,7 @@ func (m *Manager) Handle(event events.Event) {
 			}
 		}
 	}
-	m.pipeline.Emit(events.Event{Timestamp: time.Now().UTC(), Type: "prevention.action", Category: "prevention", Kind: "event", Severity: event.Severity, Module: "prevention.manager", AgentID: event.AgentID, Hostname: event.Hostname, Payload: map[string]interface{}{"action": action, "detail": detail, "source.event.id": event.ID, "rule.id": event.Payload["rule.id"], "process.pid": event.Payload["process.pid"]}})
+	m.pipeline.Emit(events.Event{Timestamp: time.Now().UTC(), Type: "prevention.action", Category: "prevention", Kind: "event", Severity: event.Severity, Module: "prevention.manager", AgentID: event.AgentID, Hostname: event.Hostname, Payload: map[string]interface{}{"action": action, "detail": detail, "source.event.id": event.DocumentID(), "rule.id": event.Payload["rule.id"], "process.pid": event.Payload["process.pid"]}})
 }
 
 func killMatchedProcess(payload map[string]interface{}) error {

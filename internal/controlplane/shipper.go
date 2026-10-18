@@ -239,7 +239,12 @@ func (s *Shipper) ship(ctx context.Context, batch []events.Event) error {
 	}
 	payload := TelemetryBatch{
 		AgentID: s.cfg.AgentID,
-		Events:  batch,
+		Events:  make([]events.Event, len(batch)),
+	}
+	for i, event := range batch {
+		event.AgentID = s.cfg.AgentID
+		event.ID = event.DocumentID()
+		payload.Events[i] = event
 	}
 
 	jsonBody, err := json.Marshal(payload)

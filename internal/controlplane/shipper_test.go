@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,7 +43,7 @@ func TestShipperBatchesRetriesAndPreservesIDs(t *testing.T) {
 		t.Fatal("expected rejection")
 	}
 	first := <-batches
-	if first.Events[0].ID == "" || first.Events[0].ID == first.Events[1].ID {
+	if !strings.HasPrefix(first.Events[0].ID, "agent:") || first.Events[0].ID == first.Events[1].ID {
 		t.Fatal("missing unique IDs")
 	}
 	if first.Events[0].Payload["process"].(map[string]interface{})["pid"] != float64(42) {
@@ -94,7 +95,7 @@ func TestShipperIntervalUpdateRetainsQueuedEvents(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
-	shipper := NewShipper(ShipperConfig{TelemetryURL: server.URL, Interval: time.Hour})
+	shipper := NewShipper(ShipperConfig{TelemetryURL: server.URL, AgentID: "agent", Interval: time.Hour})
 	shipper.Enqueue(events.Event{ID: "queued-before-policy", Type: "process.start"})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -103,7 +104,7 @@ func TestShipperIntervalUpdateRetainsQueuedEvents(t *testing.T) {
 	shipper.SetInterval(20 * time.Millisecond)
 	select {
 	case batch := <-batches:
-		if len(batch.Events) != 1 || batch.Events[0].ID != "queued-before-policy" {
+		if len(batch.Events) != 1 || batch.Events[0].ID != "agent:queued-before-policy" {
 			t.Fatalf("policy update changed queued events: %+v", batch)
 		}
 	case <-time.After(2 * time.Second):
@@ -138,7 +139,7 @@ func TestShipperDeduplicatesInFlightIDs(t *testing.T) {
 	}))
 	defer server.Close()
 	defer unblock()
-	s := NewShipper(ShipperConfig{TelemetryURL: server.URL, TelemetryPath: "/fixture", BatchSize: 2, RequestTimeout: time.Second})
+	s := NewShipper(ShipperConfig{TelemetryURL: server.URL, TelemetryPath: "/fixture", AgentID: "agent", BatchSize: 2, RequestTimeout: time.Second})
 	first := events.Event{ID: "in-flight", Type: "dns.query"}
 	s.Enqueue(first)
 	flushed := make(chan error, 1)
@@ -160,7 +161,7 @@ func TestShipperDeduplicatesInFlightIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := <-batches
-	if len(next.Events) != 1 || next.Events[0].ID != second.ID {
+	if len(next.Events) != 1 || next.Events[0].ID != "agent:"+second.ID {
 		t.Fatalf("events received during an in-flight request = %+v", next.Events)
 	}
 	if len(s.pending) != 0 {
@@ -183,13 +184,16 @@ func TestShipperFailureAndAutomaticRetryKeepEventIDs(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	s := NewShipper(ShipperConfig{TelemetryURL: server.URL, TelemetryPath: "/fixture", BatchSize: 2})
-	event := events.Event{ID: "stable-reading", Type: "network.connection_opened"}
+	s := NewShipper(ShipperConfig{TelemetryURL: server.URL, TelemetryPath: "/fixture", AgentID: "agent", BatchSize: 2})
+	event := events.Event{ID: "stable-reading", Type: "network.socket_observed"}
 	s.Enqueue(event)
 	if err := s.Flush(context.Background()); err == nil {
 		t.Fatal("expected first delivery to fail")
 	}
 	first := <-batches
+	if s.buffer[0].ID != event.ID {
+		t.Fatal("shipping mutated the retained event identity")
+	}
 	s.Enqueue(event) // A retained failure must still suppress another enqueue.
 	other := event
 	other.ID = "another-reading"
@@ -203,8 +207,8 @@ func TestShipperFailureAndAutomaticRetryKeepEventIDs(t *testing.T) {
 	if len(first.Events) != 1 || len(failed.Events) != 2 || len(retried.Events) != 2 {
 		t.Fatalf("unexpected batches: first=%+v failed=%+v retried=%+v", first, failed, retried)
 	}
-	if first.Events[0].ID != event.ID || failed.Events[0].ID != event.ID || retried.Events[0].ID != event.ID ||
-		failed.Events[1].ID != other.ID || retried.Events[1].ID != other.ID {
+	if first.Events[0].ID != "agent:"+event.ID || failed.Events[0].ID != "agent:"+event.ID || retried.Events[0].ID != "agent:"+event.ID ||
+		failed.Events[1].ID != "agent:"+other.ID || retried.Events[1].ID != "agent:"+other.ID {
 		t.Fatalf("event identities changed across retained/automatic retries: %+v / %+v / %+v", first, failed, retried)
 	}
 	if len(s.buffer) != 0 || len(s.pending) != 0 {

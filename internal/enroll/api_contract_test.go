@@ -68,6 +68,16 @@ func TestAgentAPI(t *testing.T) {
 						if body["agent_id"] != "agent-1" {
 							t.Error("missing owner")
 						}
+						if name == "telemetry" || name == "security" || name == "logs" {
+							event := body["events"].([]interface{})[0].(map[string]interface{})
+							id, ok := event["_id"].(string)
+							if !ok || !strings.HasPrefix(id, "agent-1:") {
+								t.Error("missing document identity metadata")
+							}
+							if _, exists := event["id"]; exists {
+								t.Error("internal event ID leaked into the batch")
+							}
+						}
 						if name == "heartbeat" {
 							p, ok := body["protection"].(map[string]interface{})
 							if !ok || p["rule_count"] != float64(7) {

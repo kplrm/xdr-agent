@@ -317,16 +317,16 @@ func (n *NetworkCollector) scan() {
 			n.owners[key] = collected.ResolveInode(conn.Inode)
 		}
 		if !existed {
-			n.emitEvent("network.connection_opened", conn, n.owners[key], n.directions[key], collected.ObservedAt)
+			n.emitEvent("network.socket_observed", conn, n.owners[key], n.directions[key], collected.ObservedAt)
 		} else if previous.State != conn.State {
-			n.emitEvent("network.connection_state_changed", conn, n.owners[key], n.directions[key], collected.ObservedAt)
+			n.emitEvent("network.socket_state_changed", conn, n.owners[key], n.directions[key], collected.ObservedAt)
 		}
 	}
 
 	// Closed connections (in previous but not in snapshot)
 	for key, conn := range prevKnown {
 		if _, exists := snapshot[key]; !exists {
-			n.emitEvent("network.connection_closed", conn, n.owners[key], n.directions[key], collected.ObservedAt)
+			n.emitEvent("network.socket_disappeared", conn, n.owners[key], n.directions[key], collected.ObservedAt)
 			delete(n.owners, key)
 			delete(n.directions, key)
 		}
