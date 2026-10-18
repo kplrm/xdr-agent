@@ -47,7 +47,7 @@ func (w *Writer) Write(data []byte) (int, error) {
 	}
 	event := events.Event{
 		Timestamp: time.Now().UTC(), Type: "agent.log", Category: "agent", Kind: "event",
-		Module: "agent.logger", Severity: severity, AgentID: w.agentID, Hostname: w.hostname,
+		Module: "agent.logger", Severity: severity.Pointer(), AgentID: w.agentID, Hostname: w.hostname,
 		Payload: map[string]interface{}{"message": message, "log.level": level},
 	}
 	w.mu.Lock()

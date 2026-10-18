@@ -6,12 +6,80 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"syscall"
 	"testing"
 	"time"
 
 	"xdr-agent/internal/events"
 )
+
+func TestDNSHostAndForwardedEndpoints(t *testing.T) {
+	for _, test := range []struct{ name, host, client, server, local string }{
+		{"client IPv4", "198.51.100.7", "198.51.100.7", "203.0.113.53", "198.51.100.7"},
+		{"resolver IPv4", "203.0.113.53", "198.51.100.7", "203.0.113.53", "203.0.113.53"},
+		{"client IPv6", "2001:db8::1", "2001:db8::1", "2001:db8::53", "2001:db8::1"},
+		{"resolver IPv6", "2001:db8::53", "2001:db8::1", "2001:db8::53", "2001:db8::53"},
+		{"loopback", "127.0.0.1", "127.0.0.1", "127.0.0.53", "127.0.0.1"},
+		{"forwarded", "198.51.100.7", "10.244.3.205", "10.96.0.10", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			d, pipeline := dnsTestCollector(t)
+			d.perimeter.local = &hostIPSet{netip.MustParseAddr(test.host): {}}
+			localPort, remotePort, remoteIP := 50000, 53, test.server
+			if test.local == test.server {
+				localPort, remotePort, remoteIP = 53, 50000, test.client
+			}
+			provider := NewSocketSnapshotProvider(t.TempDir(), "agent")
+			provider.read = func(_, proto string) ([]ConnectionInfo, error) {
+				if proto == "udp" || proto == "udp6" {
+					return []ConnectionInfo{{LocalAddr: test.host, LocalPort: localPort, RemoteAddr: remoteIP, RemotePort: remotePort, Inode: 42}}, nil
+				}
+				return nil, nil
+			}
+			walks := 0
+			provider.owners = func(_, _ string) map[uint64]*ProcessInfo {
+				walks++
+				return map[uint64]*ProcessInfo{42: {PID: 123}}
+			}
+			provider.Refresh()
+			d.SetSocketSnapshotProvider(provider)
+			msg := &parsedDNS{ID: 1, Questions: []dnsQuestion{{Name: "example.org", Type: 1, Class: 1}}}
+			d.emitDNSEvent(msg, test.client, test.server, 50000, 53, nil)
+			msg.IsResponse = true
+			d.emitDNSEvent(msg, test.server, test.client, 53, 50000, nil)
+			got := dnsDrainEvents(pipeline)
+			if len(got) != 2 {
+				t.Fatalf("got %d events, want query and response", len(got))
+			}
+			if len(d.pending) != 0 {
+				t.Fatal("matched response retained pending query context")
+			}
+			for _, event := range got {
+				if event.Severity != nil || event.Payload["source"] != nil || event.Payload["destination"] != nil {
+					t.Fatalf("unexpected event fields: %+v", event)
+				}
+				if test.local == "" {
+					dns := event.Payload["dns"].(map[string]interface{})
+					if event.Payload["local"] != nil || event.Payload["remote"] != nil || event.Payload["process"] != nil || walks != 0 {
+						t.Fatalf("forwarded packet acquired host context: %+v", event.Payload)
+					}
+					if dns["client"].(map[string]interface{})["ip"] != test.client || dns["server"].(map[string]interface{})["ip"] != test.server || dns["client"].(map[string]interface{})["port"] != 50000 || dns["server"].(map[string]interface{})["port"] != 53 {
+						t.Fatalf("incorrect DNS roles: %+v", dns)
+					}
+				} else {
+					local, remote := event.Payload["local"].(map[string]interface{}), event.Payload["remote"].(map[string]interface{})
+					if local["ip"] != test.local || local["port"] != localPort || remote["ip"] != remoteIP || remote["port"] != remotePort || event.Payload["process"].(map[string]interface{})["pid"] != 123 || walks != 1 {
+						t.Fatalf("incorrect host endpoints or ownership: %+v", event.Payload)
+					}
+				}
+			}
+			if got[0].Payload["network"].(map[string]interface{})["community_id"] != got[1].Payload["network"].(map[string]interface{})["community_id"] {
+				t.Fatal("query and response lost flow correlation")
+			}
+		})
+	}
+}
 
 func TestDNSLoopbackCaptureCopies(t *testing.T) {
 	for _, response := range []bool{false, true} {
@@ -206,6 +274,7 @@ func dnsTestCollector(t *testing.T) (*DNSCollector, *events.Pipeline) {
 	t.Helper()
 	pipeline := events.NewPipeline(64)
 	d := NewDNSCollector(pipeline, "test-agent", "test-host")
+	d.perimeter.local = &hostIPSet{netip.MustParseAddr("10.0.0.2"): {}}
 	return d, pipeline
 }
 

@@ -36,7 +36,7 @@ func TestShipperBatchesRetriesAndPreservesIDs(t *testing.T) {
 	}))
 	defer server.Close()
 	s := NewShipper(ShipperConfig{TelemetryURL: server.URL, TelemetryPath: "/fixture", AgentID: "agent", BatchSize: 2, MaxQueueEvents: 3, Interval: 50 * time.Millisecond})
-	s.Enqueue(events.Event{Type: "one"})
+	s.Enqueue(events.Event{Type: "one", Payload: map[string]interface{}{"process": map[string]interface{}{"pid": 42}}})
 	s.Enqueue(events.Event{Type: "two"})
 	if err := s.Flush(context.Background()); err == nil {
 		t.Fatal("expected rejection")
@@ -44,6 +44,9 @@ func TestShipperBatchesRetriesAndPreservesIDs(t *testing.T) {
 	first := <-batches
 	if first.Events[0].ID == "" || first.Events[0].ID == first.Events[1].ID {
 		t.Fatal("missing unique IDs")
+	}
+	if first.Events[0].Payload["process"].(map[string]interface{})["pid"] != float64(42) {
+		t.Fatal("batch delivery lost root detail fields")
 	}
 	reject = false
 	if err := s.Flush(context.Background()); err != nil {

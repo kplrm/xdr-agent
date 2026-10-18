@@ -3,7 +3,7 @@
 // DNSCollector captures UDP DNS traffic (port 53) from all network interfaces by
 // sniffing raw Ethernet frames. It emits ECS-compatible events for both DNS queries
 // (QR=0) and DNS responses (QR=1), and attempts best-effort PID resolution by
-// correlating the source socket with /proc/net/udp entries.
+// correlating the local socket with the shared /proc/net/udp snapshot.
 //
 // ECS event fields emitted:
 //   - dns.question.name       — queried domain (FQDN)
@@ -18,8 +18,9 @@
 //   - network.transport       — "udp"
 //   - network.type            — "ipv4" or "ipv6"
 //   - network.community_id    — Community ID v1 for flow correlation
-//   - source.ip / source.port
-//   - destination.ip / destination.port
+//   - local.ip / local.port — host endpoint
+//   - remote.ip / remote.port — peer endpoint
+//   - dns.client.ip/port, dns.server.ip/port — forwarded traffic without a host endpoint
 //   - process.pid / process.name / process.executable (best-effort, may be absent)
 //
 // Limitations:
@@ -395,14 +396,7 @@ func (d *DNSCollector) handleFrame(frame []byte) {
 		return
 	}
 
-	// PID resolution: only attempt for outgoing queries (srcPort != 53).
-	// Incoming responses have srcPort == 53 (the resolver).
-	var proc *ProcessInfo
-	if srcPort != dnsPort {
-		proc = d.resolveUDPSocket(srcIP, int(srcPort), dstIP, int(dstPort))
-	}
-
-	d.emitDNSEventAt(msg, srcIP, dstIP, srcPort, dstPort, proc, observedAt)
+	d.emitDNSEventAt(msg, srcIP, dstIP, srcPort, dstPort, nil, observedAt)
 }
 
 // resolveUDPSocket uses the most recent shared socket snapshot. A newly created
@@ -502,19 +496,11 @@ func (d *DNSCollector) emitDNSEventAt(
 
 	cid := CommunityID(srcIP, dstIP, int(srcPort), int(dstPort), netTransport)
 	d.mu.Lock()
-	perimeter := d.perimeter
+	perimeter := d.perimeter.snapshot()
 	d.mu.Unlock()
 
 	payload := map[string]interface{}{
 		"dns": dnsMap,
-		"source": map[string]interface{}{
-			"ip":   srcIP,
-			"port": int(srcPort),
-		},
-		"destination": map[string]interface{}{
-			"ip":   dstIP,
-			"port": int(dstPort),
-		},
 		"network": map[string]interface{}{
 			"transport":    netTransport,
 			"type":         netIPType,
@@ -523,15 +509,25 @@ func (d *DNSCollector) emitDNSEventAt(
 		},
 	}
 
-	if proc != nil {
-		payload["process"] = map[string]interface{}{
-			"pid":        proc.PID,
-			"name":       proc.Name,
-			"executable": proc.Executable,
+	srcLocal, dstLocal := perimeter.isLocal(net.ParseIP(srcIP)), perimeter.isLocal(net.ParseIP(dstIP))
+	localIP, remoteIP, localPort, remotePort := srcIP, dstIP, srcPort, dstPort
+	if srcLocal || dstLocal {
+		// When both endpoints are local, keep the DNS client on the local side.
+		if dstLocal && (!srcLocal || msg.IsResponse) {
+			localIP, remoteIP, localPort, remotePort = dstIP, srcIP, dstPort, srcPort
 		}
-		if proc.EntityID != "" {
-			payload["process"].(map[string]interface{})["entity_id"] = proc.EntityID
+		payload["local"] = map[string]interface{}{"ip": localIP, "port": int(localPort)}
+		payload["remote"] = map[string]interface{}{"ip": remoteIP, "port": int(remotePort)}
+		if proc == nil {
+			proc = d.resolveUDPSocket(localIP, int(localPort), remoteIP, int(remotePort))
 		}
+	} else {
+		// Forwarded packets have DNS roles, but no proven host endpoint.
+		if msg.IsResponse {
+			localIP, remoteIP, localPort, remotePort = dstIP, srcIP, dstPort, srcPort
+		}
+		dnsMap["client"] = map[string]interface{}{"ip": localIP, "port": int(localPort)}
+		dnsMap["server"] = map[string]interface{}{"ip": remoteIP, "port": int(remotePort)}
 	}
 
 	// For queries: store in pending map to correlate with later responses.
@@ -554,26 +550,27 @@ func (d *DNSCollector) emitDNSEventAt(
 	// For responses: try to enrich with original query context if proc was not resolved.
 	// The response comes from the resolver (srcPort==53); look up the matching query
 	// where query srcIP == response dstIP and query srcPort == response dstPort.
-	if msg.IsResponse && proc == nil {
+	if msg.IsResponse {
 		key := dnsTransactionKey(msg, dstIP, srcIP, dstPort, srcPort)
 		d.pendingMu.Lock()
 		if pending, ok := d.pending[key]; ok {
-			if ts.Sub(pending.ts) <= dnsPendingTTL {
+			if proc == nil && ts.Sub(pending.ts) <= dnsPendingTTL {
 				proc = pending.proc
-			}
-			if proc != nil {
-				payload["process"] = map[string]interface{}{
-					"pid":        proc.PID,
-					"name":       proc.Name,
-					"executable": proc.Executable,
-				}
-				if proc.EntityID != "" {
-					payload["process"].(map[string]interface{})["entity_id"] = proc.EntityID
-				}
 			}
 			delete(d.pending, key)
 		}
 		d.pendingMu.Unlock()
+	}
+
+	if proc != nil && (srcLocal || dstLocal) {
+		payload["process"] = map[string]interface{}{
+			"pid":        proc.PID,
+			"name":       proc.Name,
+			"executable": proc.Executable,
+		}
+		if proc.EntityID != "" {
+			payload["process"].(map[string]interface{})["entity_id"] = proc.EntityID
+		}
 	}
 
 	event := events.Event{
@@ -582,7 +579,6 @@ func (d *DNSCollector) emitDNSEventAt(
 		Type:      eventType,
 		Category:  "network",
 		Kind:      "event",
-		Severity:  events.SeverityInfo,
 		Module:    "telemetry.dns",
 		AgentID:   d.agentID,
 		Hostname:  d.hostname,

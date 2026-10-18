@@ -42,16 +42,22 @@ func (p *Perimeter) snapshot() *Perimeter {
 	return &Perimeter{internal: p.internal, local: p.hosts.current.Load()}
 }
 
-func (p *Perimeter) contains(ip net.IP) bool {
-	// Loopback communication never crosses the network perimeter.
+// isLocal checks exact host addresses; configured internal CIDRs are not host identity.
+func (p *Perimeter) isLocal(ip net.IP) bool {
 	if ip.IsLoopback() {
 		return true
 	}
-	if p.local != nil {
+	if p != nil && p.local != nil {
 		addr, _ := netip.AddrFromSlice(ip)
-		if _, assigned := (*p.local)[addr.Unmap()]; assigned {
-			return true
-		}
+		_, assigned := (*p.local)[addr.Unmap()]
+		return assigned
+	}
+	return false
+}
+
+func (p *Perimeter) contains(ip net.IP) bool {
+	if p.isLocal(ip) {
+		return true
 	}
 	for _, prefix := range p.internal {
 		if prefix.Contains(ip) {

@@ -340,7 +340,7 @@ func (a *FileAccessCollector) emitAccessEvent(path string) {
 		Type:          "file.access",
 		Category:      "file",
 		Kind:          "event",
-		Severity:      events.SeverityHigh,
+		Severity:      events.SeverityHigh.Pointer(),
 		Module:        "telemetry.file",
 		AgentID:       a.agentID,
 		Hostname:      a.hostname,

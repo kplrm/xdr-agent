@@ -56,15 +56,18 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 		defer gz.Close()
 		decoder := json.NewDecoder(gz)
 		var action map[string]map[string]string
-		var document events.Event
+		var document map[string]interface{}
 		if err := decoder.Decode(&action); err != nil {
 			t.Error(err)
 		}
 		if err := decoder.Decode(&document); err != nil {
 			t.Error(err)
 		}
-		if action["create"]["_index"] != TelemetryStream || action["create"]["_id"] != "agent:event" || document.AgentID != "agent" {
+		if action["create"]["_index"] != TelemetryStream || action["create"]["_id"] != "agent:event" || document["agent.id"] != "agent" {
 			t.Error("incorrect stream, identity or operation")
+		}
+		if document["payload"] != nil || document["process"].(map[string]interface{})["pid"] != float64(42) {
+			t.Error("event details were not sent at the root")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if requests.Load() == 1 {
@@ -80,7 +83,7 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 	if s.client.Transport.(*http.Transport).TLSClientConfig.InsecureSkipVerify {
 		t.Fatal("direct TLS verification disabled")
 	}
-	s.Enqueue(events.Event{ID: "event", AgentID: "spoofed", Timestamp: time.Now()})
+	s.Enqueue(events.Event{ID: "event", AgentID: "spoofed", Timestamp: time.Now(), Payload: map[string]interface{}{"process": map[string]interface{}{"pid": 42}}})
 	if err := s.Flush(context.Background()); err == nil || strings.Contains(err.Error(), "private event value") {
 		t.Fatal("bulk item failure was lost or leaked event contents")
 	}

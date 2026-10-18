@@ -394,8 +394,8 @@ func TestProcessEntityIDsUseAgentIdentity(t *testing.T) {
 		if err := json.Unmarshal(body, &encoded); err != nil {
 			t.Fatal(err)
 		}
-		if severity, ok := encoded["event.severity"]; !ok || severity != float64(0) {
-			t.Fatalf("informational severity was not retained: %s", body)
+		if _, ok := encoded["event.severity"]; ok {
+			t.Fatalf("process telemetry must omit severity: %s", body)
 		}
 	}
 	if buildEntityID("test-agent-001", 43, 500) == processID || buildEntityID("test-agent-001", 42, 501) == processID {

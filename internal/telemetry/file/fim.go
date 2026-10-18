@@ -828,7 +828,7 @@ func (f *FIMCollector) emitFIMEvent(
 		Type:      eventType,
 		Category:  "file",
 		Kind:      "event",
-		Severity:  severity,
+		Severity:  severity.Pointer(),
 		Module:    "telemetry.file",
 		AgentID:   f.agentID,
 		Hostname:  f.hostname,

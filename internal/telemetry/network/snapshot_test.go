@@ -126,7 +126,7 @@ func TestHostAddressChangesReclassifyOnlyAffectedConnections(t *testing.T) {
 	}
 	for i, event := range got {
 		want := "outbound"
-		if event.Payload["source"].(map[string]interface{})["ip"] == public {
+		if event.Payload["local"].(map[string]interface{})["ip"] == public {
 			want = "external"
 			if i >= 4 && event.Type != "network.connection_closed" {
 				want = "unknown" // No handshake observed with this IP recognized as local.
@@ -271,6 +271,11 @@ func TestSocketHandshakeInodePromotionAndTupleReuse(t *testing.T) {
 				t.Fatalf("promotion events=%+v, want %v", got, want)
 			}
 			for i, event := range got[:3] {
+				local := event.Payload["local"].(map[string]interface{})
+				remote := event.Payload["remote"].(map[string]interface{})
+				if local["ip"] != "10.0.0.2" || local["port"] != 8443 || remote["ip"] != "8.8.8.8" || remote["port"] != 50000 || event.Severity != nil {
+					t.Fatalf("incorrect host endpoints or severity: %+v", event)
+				}
 				if event.Type != want[i] || event.Payload["network"].(map[string]interface{})["direction"] != test.direction {
 					t.Errorf("event %d lost lifecycle/direction: %+v", i, event)
 				}

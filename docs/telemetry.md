@@ -2,7 +2,7 @@
 
 This describes the running collectors, not every entry Linux exposes. Only the sources below are read.
 
-Payload paths below are relative to `payload`; braces list sibling fields. Collector payloads use nested objects (`"process":{"pid":123}`). Envelope names such as `event.type` are literal dotted JSON keys. Protection payloads also use literal dotted keys (`"process.pid":123`).
+All fields are at the document root; braces list sibling fields. Collector details use nested objects (`"process":{"pid":123}`). Envelope names such as `event.type` and protection details such as `process.pid` are literal dotted JSON keys.
 
 ## Event envelope
 
@@ -16,26 +16,25 @@ Payload paths below are relative to `payload`; braces list sibling fields. Colle
 | `event.category` | Domain, such as process, file, network, threat, prevention, or agent |
 | `event.module` | Producing component, such as `telemetry.process` or `detection.malware` |
 | `event.kind` | Active producers emit `event` or `alert`; schema also permits `metric`/`state` |
-| `event.severity` | Producer-assigned importance: 0 info, 1 low, 2 medium, 3 high, 4 critical; not a process risk score |
+| `event.severity` | Present for file telemetry, security events, and runtime logs: 0 info, 1 low, 2 medium, 3 high, 4 critical |
 | `agent.id` | Persistent identifier of the enrolled Agent |
 | `host.hostname` | Host name associated with the event |
-| `payload` | Producer-specific objects and values described below |
 | `tags` | Optional labels for filtering; process events use `process`, `telemetry` |
 | `threat.tactic.name` | Optional ATT&CK tactic; file-access events use `Credential Access` |
 | `threat.technique.id` | Optional ATT&CK technique/subtechnique identifier assigned by the producer |
 | `threat.technique.subtechnique.id` | Optional separate subtechnique field; no active producer populates it |
 
-`event.severity` is required by the shared event schema. Process, connection, and DNS telemetry always use `0`; no current path raises their severity. A YARA match emits a separate severity-`3` security alert and leaves the source telemetry unchanged. File telemetry can use 1–3 even without a confirmed threat. Routing to telemetry/security uses event kind/module, not severity; `0` does not certify that an activity is safe.
+Process, connection, and DNS telemetry omit `event.severity`. File telemetry uses 1–3; YARA matches produce separate severity-3 security alerts. Routing uses event kind/module, not severity.
 
 Collection timing and [batch delivery](architecture.md#event-delivery-and-loss) are independent. Coordinator [policy settings](api-endpoints.md#managed-configuration) update scan/send intervals and internal CIDRs in the active local config without restarting collection. Events retain their observation timestamps and IDs while buffered and retried; duplicate IDs already queued or in flight are ignored. Unchanged process/socket/file snapshots do not generate new events. Distinct occurrences retain distinct IDs even when their payloads match.
 
 ## Processes
 
-[`monitor.go`](../internal/telemetry/process/monitor.go) and [`enrichment.go`](../internal/telemetry/process/enrichment.go) scan numeric `/proc/<PID>/` directories on `process_scan_interval_seconds` (default 1 s), independently of shipping. The first scan establishes a silent baseline. Later PID + start-tick differences emit `process.start` / `process.end` once per observed transition, including PID reuse. Module `telemetry.process`, category `process`, kind `event`, severity `0`.
+[`monitor.go`](../internal/telemetry/process/monitor.go) and [`enrichment.go`](../internal/telemetry/process/enrichment.go) scan numeric `/proc/<PID>/` directories on `process_scan_interval_seconds` (default 1 s), independently of shipping. The first scan establishes a silent baseline. Later PID + start-tick differences emit `process.start` / `process.end` once per observed transition, including PID reuse. Module `telemetry.process`, category `process`, kind `event`.
 
 The table describes collected fields. Sources without a leading / are relative to /proc/<PID>/. Usage explains each field’s purpose in Agent operation or security investigations.
 
-| Payload field | Source | Meaning / format | Usage |
+| Field | Source | Meaning / format | Usage |
 | --- | --- | --- | --- |
 | `process.pid` | Numeric directory name | Process ID; reusable after exit | Snapshot comparison, executable scan, termination target |
 | `process.ppid` | `stat` field 4 | Parent process ID | Build process lineage |
@@ -67,7 +66,7 @@ The table describes collected fields. Sources without a leading / are relative t
 
 [`tree.go`](../internal/telemetry/process/tree.go) adds relationship objects. Their child fields have the same meanings as the corresponding process fields above, applied to the related process:
 
-| Payload object | Included child fields | Meaning / limits |
+| Object | Included child fields | Meaning / limits |
 | --- | --- | --- |
 | `process.parent` | `pid`, `ppid`, `entity_id`, `name`, `executable`, `command_line`, `args` | Direct parent's last known context; its `ppid` is the child's grandparent. Kernel parents have stat-derived identity only, with empty executable/command line and null arguments. `{}` when unresolved |
 | `process.ancestors[]` | `pid`, `ppid`, `entity_id`, `name`, `executable` | Up to 10 known ancestors ordered from direct parent toward root; `[]` when unavailable |
@@ -75,23 +74,23 @@ The table describes collected fields. Sources without a leading / are relative t
 
 Notes:
 
-- Kernel threads are identified by `PF_KTHREAD` in `stat` field 9. These are not sent in any payload field. Kernel threads retain only stat-derived metadata locally for lineage; status, arguments, file descriptors, I/O, and container enrichment are skipped, and no kernel-thread start/end events are emitted. User-space descendants and file/network collection remain eligible for collection. E.g. field 9 value `69238848` (`0x04208040`) implies `PF_KTHREAD`: `0x04208040 & 0x00200000 = 0x00200000`.
+- Kernel threads are identified by `PF_KTHREAD` in `stat` field 9. These are not sent in any emitted field. Kernel threads retain only stat-derived metadata locally for lineage; status, arguments, file descriptors, I/O, and container enrichment are skipped, and no kernel-thread start/end events are emitted. User-space descendants and file/network collection remain eligible for collection. E.g. field 9 value `69238848` (`0x04208040`) implies `PF_KTHREAD`: `0x04208040 & 0x00200000 = 0x00200000`.
 
 - CPU uses `100 × Δ(utime+stime)/Δsystem ticks`. Only the first aggregate `cpu` line of `/proc/stat` is read, summing all numeric columns; per-CPU lines, `intr`, `btime`, and `ctxt` are unused. Raw CPU ticks are used internally but not emitted. `/proc/uptime` is not read.
 
 - Values refresh each scan but are shipped only with lifecycle events. Start events omit CPU percentage; end events carry the last snapshot and last retained percentage ≥0.01%, which may predate the last interval. There is no continuous resource stream or exit code. Event time records discovery/disappearance, not exact execution/exit time.
 
-- Unreadable `stat` skips the PID. Other read failures leave empty strings, `null`, or numeric zeros; a zero UID does not establish root ownership, and zero I/O/FD counts do not establish inactivity. The payload has no per-field collection-success flags. Polling can miss short-lived processes and exec changes within an existing process instance.
+- Unreadable `stat` skips the PID. Other read failures leave empty strings, `null`, or numeric zeros; a zero UID does not establish root ownership, and zero I/O/FD counts do not establish inactivity. Events have no per-field collection-success flags. Polling can miss short-lived processes and exec changes within an existing process instance.
 
 ## Connections and DNS
 
 Connections and DNS use separate modules because socket changes and DNS messages are different observations. Both use `event.category=network` and the same telemetry stream. `network.community_id` links observations of the same flow; it is not a unique DNS-transaction ID.
 
-Payload paths below are relative to `payload`. **Usage** explains each field's role in attribution, correlation, or investigation; these collectors do not apply behavioral detection rules.
+Fields below are at the document root. **Usage** explains each field's role in attribution, correlation, or investigation; these collectors do not apply behavioral detection rules.
 
 [`snapshot.go`](../internal/telemetry/network/snapshot.go) reads each `/proc/net/{tcp,tcp6,udp,udp6}` table once per collection cycle: local/remote address and port, state, UID, inode. The immutable snapshot is shared by connections and DNS; ownership resolution walks `/proc/<PID>/fd/*` at most once per generation, only when needed. DNS never triggers another table read. `network_scan_interval_seconds` defaults to 1 s and is independent of shipment timing.
 
-[`connections.go`](../internal/telemetry/network/connections.go) emits `network.connection_opened`, `network.connection_state_changed`, and `network.connection_closed`, module `telemetry.network`, category `network`, severity 0, after a silent first baseline. Unchanged snapshots emit nothing; state changes update a socket instance rather than generating a new connection. Known process identity and handshake direction are retained for later state/closure events.
+[`connections.go`](../internal/telemetry/network/connections.go) emits `network.connection_opened`, `network.connection_state_changed`, and `network.connection_closed`, module `telemetry.network`, category `network`, after a silent first baseline. Unchanged snapshots emit nothing; state changes update a socket instance rather than generating a new connection. Known process identity and handshake direction are retained for later state/closure events.
 
 `internal_networks` in `/etc/xdr-agent/config.json` defaults to RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and IPv6 ULA (`fc00::/7`, RFC 4193). A configured list replaces these CIDRs; `[]` clears them. Loopback and exact IPs assigned to host interfaces are always inside, including public IPv4/IPv6 addresses; their surrounding subnets are not automatically included. A shared in-memory address cache reads the local kernel at startup, follows IPv4/IPv6 address-change notifications, and resyncs every minute (also the fallback when notifications are unavailable). No internet requests or config-file rewrites are needed. Discovery uses the Agent's network namespace and cannot discover a router's NAT public IP unless assigned locally or configured explicitly.
 
@@ -99,14 +98,14 @@ Direction is `internal` when both endpoints are inside, `external` when both are
 
 Field numbers count whitespace-separated data columns from 1, including `sl`; combined values such as `IP:port` count as one field.
 
-| Payload field | Source | Meaning / format | Usage |
+| Field | Source | Meaning / format | Usage |
 | --- | --- | --- | --- |
-| `source.ip` | Field 2 (`local_address`), before `:` | Local socket IP, including inbound connections | Identify the local endpoint |
-| `source.port` | Field 2 (`local_address`), after `:` | Local socket port as an integer | Identify the local service/client socket |
-| `source.user.id` | Field 8 (`uid`) | Socket-owning user ID as a string | Attribute socket ownership |
-| `source.user.name` | Field 8 (UID), resolved via system user database or `/etc/passwd` | Resolved user name; numeric UID string if unresolved | Readable ownership label |
-| `destination.ip` | Field 3 (`rem_address`), before `:` | Remote socket IP | Identify the peer |
-| `destination.port` | Field 3 (`rem_address`), after `:` | Remote socket port as an integer | Identify the peer service/client socket |
+| `local.ip` | Field 2 (`local_address`), before `:` | Local socket IP, including inbound connections | Identify the local endpoint |
+| `local.port` | Field 2 (`local_address`), after `:` | Local socket port as an integer | Identify the local service/client socket |
+| `local.user.id` | Field 8 (`uid`) | Socket-owning user ID as a string | Attribute socket ownership |
+| `local.user.name` | Field 8 (UID), resolved via system user database or `/etc/passwd` | Resolved user name; numeric UID string if unresolved | Readable ownership label |
+| `remote.ip` | Field 3 (`rem_address`), before `:` | Remote socket IP | Identify the peer |
+| `remote.port` | Field 3 (`rem_address`), after `:` | Remote socket port as an integer | Identify the peer service/client socket |
 | `network.transport` | Network table filename; no data field | `tcp` or `udp` | Group by transport protocol |
 | `network.type` | Network table filename; no data field | `ipv4` or `ipv6`; determined by the table, not the printed IP string | Identify address family |
 | `network.state` | Field 4 (`st`) | Mapped TCP state name or raw hex; mapping also applies to UDP | Describe socket state; UDP `ESTABLISHED` does not imply a TCP handshake |
@@ -120,11 +119,11 @@ Field numbers count whitespace-separated data columns from 1, including `sl`; co
 
 Socket instances use protocol, endpoints, and inode; an unambiguous transition to inode 0 retains the tracked instance. Polling can miss connections; ownership can race with socket closure and shared descriptors can have multiple holders. Process start ticks are checked around the ownership walk. The entire `process` object is omitted when ownership is unresolved; closure context is last observed, not a fresh lookup. Failed table reads do not establish socket closure. Network tables reflect the Agent's network namespace; it does not walk `/proc/<PID>/net` or container namespaces. All other `/proc/net` entries are unused.
 
-[`dns.go`](../internal/telemetry/network/dns.go) captures Ethernet IPv4/IPv6 UDP traffic to/from port 53 on all interfaces through `AF_PACKET` (`CAP_NET_RAW` required). It emits `dns.query` / `dns.answer`, module `telemetry.dns`, category `network`, severity 0.
+[`dns.go`](../internal/telemetry/network/dns.go) captures Ethernet IPv4/IPv6 UDP traffic to/from port 53 on all interfaces through `AF_PACKET` (`CAP_NET_RAW` required). It emits `dns.query` / `dns.answer`, module `telemetry.dns`, category `network`.
 
-DNS sources are packet fields, not `/proc/net` columns, except for process attribution. Byte offsets below start at 0 within the named header. Question/answer offsets vary with encoded names.
+DNS values come from packet fields, except for host identity and process attribution. `local` is the host endpoint and `remote` its peer, for both queries and replies; when both endpoints are local, `local` identifies the DNS client. Host identity uses exact cached interface IPs and loopback, independently of internal CIDRs. When neither endpoint belongs to the host namespace, `dns.client` and `dns.server` preserve the forwarded endpoints; `local`, `remote`, and `process` are omitted. Byte offsets below start at 0 within the named header. Question/answer offsets vary with encoded names.
 
-| Payload field | Source | Meaning / format | Usage |
+| Field | Source | Meaning / format | Usage |
 | --- | --- | --- | --- |
 | `dns.id` | DNS header bytes 0–1: ID | 16-bit transaction ID; not globally unique | Match queries and responses with endpoint context |
 | `dns.type` | DNS header bytes 2–3: QR flag | `query` or `answer` | Distinguish message role |
@@ -144,18 +143,22 @@ DNS sources are packet fields, not `/proc/net` columns, except for process attri
 | `dns.answers[].ttl` | Answer record: TTL | Cache lifetime in seconds | Understand cache duration |
 | `dns.answers[].data` | Answer record: RDATA | Decoded value or possibly shortened hexadecimal fallback | Inspect returned addresses, aliases, or other data |
 | `dns.resolved_ips` | Derived from A/AAAA answer RDATA | IP-address array; omitted when none | Correlate names with addresses |
-| `source.ip` | IPv4 header bytes 12–15 / IPv6 bytes 8–23 | Packet sender's IP | Identify sender; normally client on queries, resolver on responses |
-| `source.port` | UDP header bytes 0–1: source port | Sender's UDP port as an integer | Identify source socket and transaction context |
-| `destination.ip` | IPv4 header bytes 16–19 / IPv6 bytes 24–39 | Packet recipient's IP | Identify recipient; normally resolver on queries, client on responses |
-| `destination.port` | UDP header bytes 2–3: destination port | Recipient's UDP port as an integer | Identify destination socket and transaction context |
+| `local.ip` | IPv4 bytes 12–15 or 16–19 / IPv6 bytes 8–23 or 24–39; selected by host identity | Host endpoint IP | Identify the local client or resolver |
+| `local.port` | UDP bytes 0–1 or 2–3, matching the host IP | Host UDP port as an integer | Identify the local socket |
+| `remote.ip` | Other packet endpoint: IPv4 bytes 12–15 or 16–19 / IPv6 bytes 8–23 or 24–39 | Peer IP | Identify the remote resolver or client |
+| `remote.port` | UDP bytes 0–1 or 2–3, matching the peer IP | Peer UDP port as an integer | Identify the remote socket |
+| `dns.client.ip` | Query sender / answer recipient: IPv4 bytes 12–15 / 16–19; IPv6 bytes 8–23 / 24–39 | Client IP; only when neither endpoint is on the host | Preserve forwarded query origin |
+| `dns.client.port` | Query UDP bytes 0–1 / answer bytes 2–3 | Client port as an integer; forwarded traffic only | Correlate forwarded transactions |
+| `dns.server.ip` | Query recipient / answer sender: IPv4 bytes 16–19 / 12–15; IPv6 bytes 24–39 / 8–23 | Resolver IP; forwarded traffic only | Identify the forwarded resolver |
+| `dns.server.port` | Query UDP bytes 2–3 / answer bytes 0–1 | Resolver port as an integer; forwarded traffic only | Identify the resolver socket |
 | `network.transport` | IPv4 header byte 9 / IPv6 byte 6; must be 17 (UDP) | `udp` | Identify the captured transport |
-| `network.type` | Derived from parsed `source.ip` format | `ipv4` or `ipv6` | Identify packet address family |
+| `network.type` | Parsed packet IP address format | `ipv4` or `ipv6` | Identify packet address family |
 | `network.community_id` | Derived from transport and packet endpoints | Direction-independent Community ID v1 flow hash | Correlate query/response flows and connection observations |
 | `network.direction` | Packet endpoints, configured `internal_networks`, and kernel interface addresses | Perimeter classification: internal, external, inbound, outbound, unknown | Classify each observed message relative to the perimeter |
-| `process.pid` | Shared `/proc/net/udp{,6}` fields 2/3/10 matched to `/proc/<PID>/fd/*`, or matched query context | Optional querying-process PID | Attribute the DNS activity |
-| `process.name` | Querying PID's `comm` | Short process name; empty if unreadable | Readable querying-process label |
-| `process.executable` | Querying PID's `exe` symlink | Executable path; empty if unresolved | Identify the querying program |
-| `process.entity_id` | Agent ID + querying PID + `stat` field 22, or matched query context | Full SHA-256 process-instance identity | Correlate DNS and process events |
+| `process.pid` | Shared `/proc/net/udp{,6}` fields 2/3/10 matched to `/proc/<PID>/fd/*`, or matched query context | Optional local socket-owning PID | Attribute the DNS activity |
+| `process.name` | Local owning PID's `comm` | Short process name; empty if unreadable | Readable local process label |
+| `process.executable` | Local owning PID's `exe` symlink | Executable path; empty if unresolved | Identify the local client or resolver program |
+| `process.entity_id` | Agent ID + local owning PID + `stat` field 22, or matched query context | Full SHA-256 process-instance identity | Correlate DNS and process events |
 
 No TCP DNS, DoH/DoT, raw packet payload, authority/additional records, or full packet capture is shipped. Process attribution uses the shared UDP snapshot and PID socket links/`comm`/`exe`/`stat`; new or short-lived sockets may remain unattributed, and ambiguous socket ownership is omitted. Responses can inherit query context matched by client/resolver endpoints, transaction ID, and question for up to 5 s. The entire `process` object is omitted when attribution is unavailable.
 
@@ -169,7 +172,7 @@ Direct files: `/etc/{passwd,shadow,group,gshadow,security/opasswd,sudoers,cronta
 
 [`fim.go`](../internal/telemetry/file/fim.go) uses inotify plus hourly rescans against one serialized, persistent BoltDB baseline. Unchanged observations and repeated delete notifications emit nothing; changes and deletion/recreation remain distinct. Initial baseline emits no events; warm restarts retain existing records. New subdirectories of recursive watches are added. Renames are delete/create events; inotify overflow schedules a rescan. Individually watched files can lose their watch after replacement; rescans still compare their paths.
 
-| Payload field(s) | Meaning / local use |
+| Field(s) | Meaning / local use |
 | --- | --- |
 | `file.path`, `file.name`, `file.directory` | Full path, basename, and parent directory |
 | `file.type` | File kind, normally `file` or `symlink`; targets are not followed for hashing |
@@ -188,7 +191,7 @@ Events are `file.created`, `file.modified`, `file.attrs_changed`, `file.deleted`
 
 Content and stored metadata changes drive events. Creates are severity 2; attribute changes are 1. Modifications/deletions are 2, or 3 on critical paths. Entropy >7.5 raises severity to at least 3 and adds `high-entropy` / `potentially-packed` tags; it is not itself a YARA match. Deleted events can contain last-known metadata. Symlinks are recorded without hashing their target; files above the size limit have no content hash.
 
-[`access.go`](../internal/telemetry/file/access.go) watches `/etc/shadow`, `/etc/gshadow`, `/etc/security/opasswd` for open/read, and `/root/.ssh`, `/etc/ssh` for immediate-child opens. Emits `file.access`, module `telemetry.file`, category `file`, severity 3. `file.{path,name,directory}` identify the accessed file; `file.event.action=access` and `event.action=file-accessed` label the action inside the payload. ATT&CK mapping is Credential Access / T1003.008 (password files) or T1552.004 (SSH paths), based on path rather than a confirmed attack. Legitimate reads, including the Agent's own, can trigger events; inotify provides no accessing PID/user. Watches are installed once, not recursively; missing/replaced paths need restart to reinstall. Repeated open/read occurrences remain distinct, with an overload cap of 200 events/s. Health is separately reported as `telemetry.file.access`; running health does not guarantee every optional watch succeeded.
+[`access.go`](../internal/telemetry/file/access.go) watches `/etc/shadow`, `/etc/gshadow`, `/etc/security/opasswd` for open/read, and `/root/.ssh`, `/etc/ssh` for immediate-child opens. Emits `file.access`, module `telemetry.file`, category `file`, severity 3. `file.{path,name,directory}` identify the accessed file; `file.event.action=access` and `event.action=file-accessed` label the action at the document root. ATT&CK mapping is Credential Access / T1003.008 (password files) or T1552.004 (SSH paths), based on path rather than a confirmed attack. Legitimate reads, including the Agent's own, can trigger events; inotify provides no accessing PID/user. Watches are installed once, not recursively; missing/replaced paths need restart to reinstall. Repeated open/read occurrences remain distinct, with an overload cap of 200 events/s. Health is separately reported as `telemetry.file.access`; running health does not guarantee every optional watch succeeded.
 
 ## Protection and runtime logs
 
@@ -199,9 +202,9 @@ Content and stored metadata changes drive events. Creates are severity 2; attrib
 | `prevention.execution` / `prevention.action` | Reports fanotify execution-denial decisions or response failures |
 | `agent.logger` / `agent.log` | Captures the Agent's standard logger; shipper diagnostics stay local to avoid feedback loops |
 
-Protection payload names below are literal dotted keys, except `action`, `detail`, and `method`:
+Protection detail names below are literal dotted keys, except `action`, `detail`, and `method`:
 
-| Payload field(s) | Meaning |
+| Field(s) | Meaning |
 | --- | --- |
 | `rule.id`, `rule.name` | First matching YARA rule identifier; both currently contain the same name |
 | `rule.names` | Array of all matching rule identifiers |

@@ -5,9 +5,9 @@
 // for opened/closed connections.
 //
 // Events are emitted using ECS-compatible field names:
-//   - source.ip / source.port   — the local endpoint
-//   - destination.ip / destination.port — the remote endpoint
-//   - source.user.id / source.user.name — process owner resolved from UID
+//   - local.ip / local.port   — the local endpoint
+//   - remote.ip / remote.port — the remote endpoint
+//   - local.user.id / local.user.name — socket owner resolved from UID
 //   - network.transport — "tcp" or "udp"
 //   - network.type      — "ipv4" or "ipv6"
 //   - network.direction — perimeter direction, or "unknown"
@@ -345,7 +345,7 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 	// Compute Community ID hash.
 	cid := CommunityID(conn.LocalAddr, conn.RemoteAddr, conn.LocalPort, conn.RemotePort, tr)
 
-	sourceMap := map[string]interface{}{
+	localMap := map[string]interface{}{
 		"ip":   conn.LocalAddr,
 		"port": conn.LocalPort,
 		"user": map[string]interface{}{
@@ -354,7 +354,7 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 		},
 	}
 
-	destinationMap := map[string]interface{}{
+	remoteMap := map[string]interface{}{
 		"ip":   conn.RemoteAddr,
 		"port": conn.RemotePort,
 	}
@@ -369,9 +369,9 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 	}
 
 	payload := map[string]interface{}{
-		"source":      sourceMap,
-		"destination": destinationMap,
-		"network":     networkMap,
+		"local":   localMap,
+		"remote":  remoteMap,
+		"network": networkMap,
 	}
 
 	// Include the socket's retained process context when available.
@@ -392,7 +392,6 @@ func (n *NetworkCollector) emitEvent(eventType string, conn ConnectionInfo, proc
 		Type:      eventType,
 		Category:  "network",
 		Kind:      "event",
-		Severity:  events.SeverityInfo,
 		Module:    "telemetry.network",
 		AgentID:   n.agentID,
 		Hostname:  n.hostname,

@@ -174,7 +174,7 @@ func (e *Engine) Start(ctx context.Context) error {
 		if err != nil {
 			action = "execution_response_failed"
 		}
-		e.pipeline.Emit(events.Event{Timestamp: time.Now().UTC(), Type: "prevention.action", Kind: "event", Category: "prevention", Module: "prevention.execution", Severity: events.SeverityHigh, Payload: map[string]interface{}{"action": action, "process.pid": pid}})
+		e.pipeline.Emit(events.Event{Timestamp: time.Now().UTC(), Type: "prevention.action", Kind: "event", Category: "prevention", Module: "prevention.execution", Severity: events.SeverityHigh.Pointer(), Payload: map[string]interface{}{"action": action, "process.pid": pid}})
 	}
 	if err := guard.Start(ctx); err != nil {
 		e.setHealth("execution_blocking", "degraded: "+err.Error())
@@ -223,7 +223,7 @@ func (e *Engine) emitAlert(source events.Event, path string, result malware.Resu
 	if pid, ok := source.Payload["process.pid"]; ok {
 		payload["process.pid"] = pid
 	}
-	e.pipeline.Emit(events.Event{ID: "yara-" + strconv.FormatInt(time.Now().UnixNano(), 10), Timestamp: time.Now().UTC(), Type: "alert", Category: "threat", Kind: "alert", Severity: events.SeverityHigh, Module: "detection.malware", AgentID: source.AgentID, Hostname: source.Hostname, Payload: payload, Tags: []string{"yara", "malware"}})
+	e.pipeline.Emit(events.Event{ID: "yara-" + strconv.FormatInt(time.Now().UnixNano(), 10), Timestamp: time.Now().UTC(), Type: "alert", Category: "threat", Kind: "alert", Severity: events.SeverityHigh.Pointer(), Module: "detection.malware", AgentID: source.AgentID, Hostname: source.Hostname, Payload: payload, Tags: []string{"yara", "malware"}})
 }
 func pathFromEvent(event events.Event) string {
 	key, field := "file", "path"
