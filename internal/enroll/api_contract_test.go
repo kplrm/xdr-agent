@@ -70,12 +70,10 @@ func TestAgentAPI(t *testing.T) {
 						}
 						if name == "telemetry" || name == "security" || name == "logs" {
 							event := body["events"].([]interface{})[0].(map[string]interface{})
-							id, ok := event["_id"].(string)
-							if !ok || !strings.HasPrefix(id, "agent-1:") {
-								t.Error("missing document identity metadata")
-							}
-							if _, exists := event["id"]; exists {
-								t.Error("internal event ID leaked into the batch")
+							for _, field := range []string{"id", "_id", "source.event.id"} {
+								if _, exists := event[field]; exists {
+									t.Errorf("internal identity field %q leaked into the batch", field)
+								}
 							}
 						}
 						if name == "heartbeat" {

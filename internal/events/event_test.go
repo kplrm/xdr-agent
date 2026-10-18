@@ -28,8 +28,10 @@ func TestEventRootFieldsRoundTrip(t *testing.T) {
 		if _, wrapped := document["payload"]; wrapped {
 			t.Fatalf("event details must be at the root: %s", encoded)
 		}
-		if _, exists := document["id"]; exists || document["_id"] != event.ID {
-			t.Fatalf("event identity must use metadata: %s", encoded)
+		for _, field := range []string{"id", "_id"} {
+			if _, exists := document[field]; exists {
+				t.Fatalf("internal event identity was serialized: %s", encoded)
+			}
 		}
 		for field := range details {
 			if _, exists := document[field]; !exists {
@@ -40,7 +42,7 @@ func TestEventRootFieldsRoundTrip(t *testing.T) {
 		if err := json.Unmarshal(encoded, &decoded); err != nil {
 			t.Fatal(err)
 		}
-		if decoded.ID != event.ID || decoded.AgentID != event.AgentID || !decoded.Timestamp.Equal(event.Timestamp) {
+		if decoded.ID != "" || decoded.AgentID != event.AgentID || !decoded.Timestamp.Equal(event.Timestamp) {
 			t.Fatalf("envelope changed: %+v", decoded)
 		}
 		roundTrip, err := json.Marshal(decoded)
@@ -54,15 +56,6 @@ func TestEventRootFieldsRoundTrip(t *testing.T) {
 		if !reflect.DeepEqual(document, restored) {
 			t.Fatalf("root fields changed after decoding: %s", roundTrip)
 		}
-	}
-}
-
-func TestDocumentID(t *testing.T) {
-	if got := (Event{AgentID: "agent", ID: "reading"}).DocumentID(); got != "agent:reading" {
-		t.Fatalf("document ID = %q", got)
-	}
-	if got := (Event{AgentID: "agent"}).DocumentID(); got != "" {
-		t.Fatalf("unlinked event has document ID %q", got)
 	}
 }
 

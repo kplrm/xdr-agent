@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,17 +18,7 @@ func TestShipperBatchesRetriesAndPreservesIDs(t *testing.T) {
 	batches := make(chan TelemetryBatch, 8)
 	reject := true
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gz, err := gzip.NewReader(r.Body)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer gz.Close()
-		var batch TelemetryBatch
-		if err := json.NewDecoder(gz).Decode(&batch); err != nil {
-			t.Error(err)
-		}
-		batches <- batch
+		batches <- decodeShipperBatch(t, r)
 		if reject {
 			w.WriteHeader(400)
 			return
@@ -39,12 +29,16 @@ func TestShipperBatchesRetriesAndPreservesIDs(t *testing.T) {
 	s := NewShipper(ShipperConfig{TelemetryURL: server.URL, TelemetryPath: "/fixture", AgentID: "agent", BatchSize: 2, MaxQueueEvents: 3, Interval: 50 * time.Millisecond})
 	s.Enqueue(events.Event{Type: "one", Payload: map[string]interface{}{"process": map[string]interface{}{"pid": 42}}})
 	s.Enqueue(events.Event{Type: "two"})
+	firstID := s.buffer[0].ID
+	if firstID == "" || firstID == s.buffer[1].ID {
+		t.Fatal("missing unique internal IDs")
+	}
 	if err := s.Flush(context.Background()); err == nil {
 		t.Fatal("expected rejection")
 	}
 	first := <-batches
-	if !strings.HasPrefix(first.Events[0].ID, "agent:") || first.Events[0].ID == first.Events[1].ID {
-		t.Fatal("missing unique IDs")
+	if s.buffer[0].ID != firstID {
+		t.Fatal("delivery changed the retained internal ID")
 	}
 	if first.Events[0].Payload["process"].(map[string]interface{})["pid"] != float64(42) {
 		t.Fatal("batch delivery lost root detail fields")
@@ -54,8 +48,8 @@ func TestShipperBatchesRetriesAndPreservesIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	retried := <-batches
-	if retried.Events[0].ID != first.Events[0].ID {
-		t.Fatal("retry changed identity")
+	if !reflect.DeepEqual(retried, first) {
+		t.Fatal("retry changed the buffered observation")
 	}
 	s.Enqueue(events.Event{Type: "three"})
 	s.Enqueue(events.Event{Type: "four"})
@@ -104,7 +98,7 @@ func TestShipperIntervalUpdateRetainsQueuedEvents(t *testing.T) {
 	shipper.SetInterval(20 * time.Millisecond)
 	select {
 	case batch := <-batches:
-		if len(batch.Events) != 1 || batch.Events[0].ID != "agent:queued-before-policy" {
+		if len(batch.Events) != 1 || batch.Events[0].Type != "process.start" {
 			t.Fatalf("policy update changed queued events: %+v", batch)
 		}
 	case <-time.After(2 * time.Second):
@@ -152,6 +146,7 @@ func TestShipperDeduplicatesInFlightIDs(t *testing.T) {
 	s.Enqueue(first) // The buffer has already been detached for delivery.
 	second := first
 	second.ID = "new-occurrence"
+	second.Type = "dns.answer"
 	s.Enqueue(second)
 	unblock()
 	if err := <-flushed; err != nil {
@@ -161,7 +156,7 @@ func TestShipperDeduplicatesInFlightIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := <-batches
-	if len(next.Events) != 1 || next.Events[0].ID != "agent:"+second.ID {
+	if len(next.Events) != 1 || next.Events[0].Type != second.Type {
 		t.Fatalf("events received during an in-flight request = %+v", next.Events)
 	}
 	if len(s.pending) != 0 {
@@ -197,6 +192,7 @@ func TestShipperFailureAndAutomaticRetryKeepEventIDs(t *testing.T) {
 	s.Enqueue(event) // A retained failure must still suppress another enqueue.
 	other := event
 	other.ID = "another-reading"
+	other.Type = "network.socket_disappeared"
 	s.Enqueue(other)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -207,9 +203,8 @@ func TestShipperFailureAndAutomaticRetryKeepEventIDs(t *testing.T) {
 	if len(first.Events) != 1 || len(failed.Events) != 2 || len(retried.Events) != 2 {
 		t.Fatalf("unexpected batches: first=%+v failed=%+v retried=%+v", first, failed, retried)
 	}
-	if first.Events[0].ID != "agent:"+event.ID || failed.Events[0].ID != "agent:"+event.ID || retried.Events[0].ID != "agent:"+event.ID ||
-		failed.Events[1].ID != "agent:"+other.ID || retried.Events[1].ID != "agent:"+other.ID {
-		t.Fatalf("event identities changed across retained/automatic retries: %+v / %+v / %+v", first, failed, retried)
+	if first.Events[0].Type != event.Type || failed.Events[1].Type != other.Type || !reflect.DeepEqual(failed, retried) {
+		t.Fatalf("observations changed across retained/automatic retries: %+v / %+v / %+v", first, failed, retried)
 	}
 	if len(s.buffer) != 0 || len(s.pending) != 0 {
 		t.Fatal("successful retry did not clear retained events")
@@ -224,9 +219,29 @@ func decodeShipperBatch(t *testing.T, r *http.Request) TelemetryBatch {
 		return TelemetryBatch{}
 	}
 	defer gz.Close()
-	var batch TelemetryBatch
-	if err := json.NewDecoder(gz).Decode(&batch); err != nil {
+	var wire struct {
+		AgentID string            `json:"agent_id"`
+		Events  []json.RawMessage `json:"events"`
+	}
+	if err := json.NewDecoder(gz).Decode(&wire); err != nil {
 		t.Errorf("decode telemetry batch: %v", err)
+	}
+	batch := TelemetryBatch{AgentID: wire.AgentID}
+	for _, body := range wire.Events {
+		var fields map[string]interface{}
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"id", "_id", "source.event.id"} {
+			if _, exists := fields[field]; exists {
+				t.Errorf("identity field %q was shipped", field)
+			}
+		}
+		var event events.Event
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		batch.Events = append(batch.Events, event)
 	}
 	return batch
 }

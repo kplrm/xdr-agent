@@ -19,7 +19,7 @@ Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus
 
 Health is independent of version checks. Execution blocking is `not_applicable` in detection mode. YARA scan failures report degraded health and successful scans restore it when the scan queue is no longer full; execution-blocking failures remain separate.
 
-Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Each event carries `_id=agent_id:internal_event_id` as transport metadata; Coordinator validates the agent prefix and moves `_id` into bulk metadata. Documents contain neither `id` nor `_id` in their body. [Telemetry](telemetry.md) defines the event envelope and root-level detail fields. Process, connection, and DNS events omit `event.severity`; file, security, and runtime-log events include it. Connection and host DNS endpoints use nested `local.{ip,port}` and `remote.{ip,port}` objects; forwarded DNS uses `dns.client.{ip,port}` and `dns.server.{ip,port}`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
+Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Internal event IDs are never shipped; events contain neither `id`, `_id`, nor an originating event ID. OpenSearch generates document `_id` metadata. [Telemetry](telemetry.md) defines the event envelope and root-level detail fields. Process, connection, and DNS events omit `event.severity`; file, security, and runtime-log events include it. Connection and host DNS endpoints use nested `local.{ip,port}` and `remote.{ip,port}` objects; forwarded DNS uses `dns.client.{ip,port}` and `dns.server.{ip,port}`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
 
 ## Managed configuration
 
@@ -74,7 +74,7 @@ The systemd unit reads this file; foreground runs must export the variable. Requ
 
 A shared account writes all three streams without Coordinator's per-agent ownership enforcement; Agent IDs and hostnames stay separate. Revoking enrollment does **not** revoke direct writes. Password rotation requires updating every affected environment file and restarting services. When migrating, replace old OpenSearch authentication fields with the block above and update the environment file.
 
-Bulk operations use `create` in `xdr-agent-telemetry`, `xdr-agent-security` and `xdr-agent-logs`, with `@timestamp` and `_id=agent_id:event_id`. Both delivery paths retain failed batches and accept duplicate-ID conflicts on retry. Deduplication is limited to the current backing index; retries after rollover can duplicate events. Other bulk errors retain the batch. Direct credentials go only to the configured API; redirects are rejected.
+Bulk operations use `create` in `xdr-agent-telemetry`, `xdr-agent-security` and `xdr-agent-logs`, with `@timestamp` and no supplied `_id`. Both delivery paths retain failed batches. Internal queue IDs prevent duplicate enqueueing, but retries after partial success or a lost acknowledgment can create duplicate OpenSearch documents. Bulk errors retain the batch. Direct credentials go only to the configured API; redirects are rejected.
 
 The security stream can remain empty when no YARA alerts or prevention outcomes occur. [Telemetry](telemetry.md) lists each producer's fields.
 

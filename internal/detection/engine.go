@@ -208,7 +208,7 @@ func (e *Engine) Close() error {
 	return nil
 }
 func (e *Engine) emitAlert(source events.Event, path string, result malware.Result, denyRequested bool) {
-	payload := map[string]interface{}{"rule.id": result.Rules[0], "rule.name": result.Rules[0], "rule.names": result.Rules, "file.path": path, "method": "yara", "execution.deny_requested": denyRequested, "source.event.id": source.DocumentID()}
+	payload := map[string]interface{}{"rule.id": result.Rules[0], "rule.name": result.Rules[0], "rule.names": result.Rules, "file.path": path, "method": "yara", "execution.deny_requested": denyRequested}
 	if st, ok := result.FileInfo.Sys().(*syscall.Stat_t); ok {
 		payload["file.device"] = st.Dev
 		payload["file.inode"] = st.Ino

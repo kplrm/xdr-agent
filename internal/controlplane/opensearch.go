@@ -72,12 +72,11 @@ func (s *Shipper) shipOpenSearch(ctx context.Context, batch []events.Event) erro
 	encoder := json.NewEncoder(gz)
 	for _, event := range batch {
 		if err := encoder.Encode(map[string]any{"create": map[string]string{
-			"_index": s.stream, "_id": s.cfg.AgentID + ":" + event.ID,
+			"_index": s.stream,
 		}}); err != nil {
 			return err
 		}
 		event.AgentID = s.cfg.AgentID
-		event.ID = "" // Identity belongs in bulk metadata, not the document body.
 		if err := encoder.Encode(event); err != nil {
 			return err
 		}
@@ -141,11 +140,6 @@ func (s *Shipper) shipOpenSearch(ctx context.Context, batch []events.Event) erro
 		for _, item := range result.Items {
 			action := item.Create
 			if action.Status >= 200 && action.Status < 300 {
-				continue
-			}
-			// A partial batch retry may include documents already created in this
-			// backing index. Rollover is a deduplication boundary, as a date was before.
-			if action.Status == 409 && action.Error.Type == "version_conflict_engine_exception" {
 				continue
 			}
 			return fmt.Errorf("OpenSearch bulk item rejected: status=%d type=%s", action.Status, action.Error.Type)

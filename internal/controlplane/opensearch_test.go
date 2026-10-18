@@ -31,7 +31,7 @@ func directFixture(t *testing.T, handler http.HandlerFunc) (config.OpenSearchCon
 	return config.OpenSearchConfig{URL: server.URL + "/opensearch", Username: "custom-writer", PasswordEnv: "XDR_TEST_PASSWORD", CAFile: ca}, server
 }
 
-func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
+func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndAutomaticIDs(t *testing.T) {
 	var requests atomic.Int32
 	target, _ := directFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -63,7 +63,7 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 		if err := decoder.Decode(&document); err != nil {
 			t.Error(err)
 		}
-		if action["create"]["_index"] != TelemetryStream || action["create"]["_id"] != "agent:event" || document["agent.id"] != "agent" {
+		if action["create"]["_index"] != TelemetryStream || len(action["create"]) != 1 || document["agent.id"] != "agent" {
 			t.Error("incorrect stream, identity or operation")
 		}
 		for _, field := range []string{"id", "_id"} {
@@ -77,8 +77,10 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if requests.Load() == 1 {
 			fmt.Fprint(w, `{"errors":true,"items":[{"create":{"status":400,"error":{"type":"mapper_parsing_exception","reason":"private event value"}}}]}`)
-		} else {
+		} else if requests.Load() == 2 {
 			fmt.Fprint(w, `{"errors":true,"items":[{"create":{"status":409,"error":{"type":"version_conflict_engine_exception"}}}]}`)
+		} else {
+			fmt.Fprint(w, `{"errors":false,"items":[{"create":{"status":201,"_id":"generated-by-opensearch"}}]}`)
 		}
 	})
 	s, err := NewOpenSearchShipper(ShipperConfig{AgentID: "agent", EnrollmentToken: "enrollment-token", InsecureSkipTLS: true}, target, TelemetryStream)
@@ -98,11 +100,14 @@ func TestDirectBulkUsesTrustedTLSBasicAuthNDJSONAndStableCreates(t *testing.T) {
 	if s.buffer[0].ID != "event" {
 		t.Fatal("shipping mutated the buffered event identity")
 	}
+	if err := s.Flush(context.Background()); err == nil || len(s.buffer) != 1 {
+		t.Fatal("a conflict must retain the unacknowledged event")
+	}
 	if err := s.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.buffer) != 0 || requests.Load() != 2 {
-		t.Fatal("conflicting retry was not acknowledged")
+	if len(s.buffer) != 0 || requests.Load() != 3 {
+		t.Fatal("successful retry was not acknowledged")
 	}
 }
 
