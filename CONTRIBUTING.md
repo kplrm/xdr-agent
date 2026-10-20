@@ -1,65 +1,50 @@
 # Contributing to xdr-agent
 
-This document covers contribution expectations for the endpoint runtime.
+This repository owns Linux endpoint telemetry and release-bundled YARA protection. Start with the [README](README.md), [architecture](docs/architecture.md), [telemetry mappings](docs/telemetry.md), and [HTTP contract](docs/api-endpoints.md). Keep planned work in the [roadmap](docs/roadmap.md).
 
-## License
+## Development and validation
 
-`xdr-agent` is licensed under the GNU Affero General Public License v3.0.
-See `LICENSE` for the full terms.
-
-By submitting a change, you agree that your contribution is distributed under the same license.
-
-## Contribution Flow
-
-1. Branch from `main`.
-2. Make a focused change.
-3. Add or update tests when behavior changes.
-4. Build and test before opening a pull request.
-5. Include a clear description of the runtime impact, and any compatibility implications.
-
-## Build And Test
+Use Debian/Ubuntu Linux, a Go toolchain compatible with `go.mod`, Python 3, Make, and Docker. Install `yara` and `yarac` to exercise the native scanner tests. Keep the local YARA snapshot available for rule generation. Node.js and an adjacent Coordinator checkout enable the Coordinator handler checks.
 
 ```bash
 make build
 make test
 ```
 
-Run the smallest relevant test scope when iterating, but do not open a change without a clean build.
+`make test` runs Go, rule-bundling, HTTP-contract, enrollment, and bounded fanotify checks. Docker must be available for the disposable kernel-test container. Use focused tests while iterating; run the full checks before submitting runtime changes. For packaging changes, also validate `make deb` in a disposable Linux environment.
 
-## Engineering Expectations
+## Engineering expectations
 
-- Follow the current runtime architecture in `docs/architecture.md`.
-- Keep capability boundaries clear instead of adding cross-cutting logic in ad hoc places.
-- Prefer minimal, justified dependencies. External libraries are acceptable when they solve a real endpoint-security need better than custom code.
-- Keep protection configuration local and content tied to agent releases; Coordinator policies manage only the allowlisted settings in the Agent HTTP contract.
-- Update docs and contract tests when routes, field ownership, or scope change.
-- Keep runtime changes within process/file/network collection and release-bundled YARA protection. Additional protection domains require a separate scope decision.
-- Use the shared event envelope and lifecycle in `internal/service/run.go`; keep constructor dependencies explicit.
-- For HTTP changes, update `docs/api-endpoints.md`, the Go contract test, and the Coordinator handler test together. Builds enforce route compatibility.
-- Protection changes need matching/nonmatching and failure-path tests; kernel enforcement needs disposable privileged Linux validation.
-- Update the source-to-field mappings in `docs/telemetry.md` when collection or emission changes; keep current behavior separate from planned work in `docs/roadmap.md`.
+- Follow the runtime architecture, shared event envelope, and lifecycle in `internal/service/run.go`; keep constructor dependencies explicit.
+- Keep runtime work within the documented telemetry and YARA scope. Discuss additional protection domains before implementation.
+- Keep protection configuration local and content tied to Agent releases; Coordinator manages only the settings allowed by the HTTP contract.
+- For HTTP changes, update the authoritative contract, Agent contract tests, and [Coordinator handler tests](https://github.com/kplrm/xdr-coordinator/blob/main/scripts/test_api.cjs) together.
+- Update telemetry source-to-field mappings when collection or emitted events change.
+- Cover matching, nonmatching, and failure paths for protection changes. Validate kernel enforcement only in a disposable Linux test environment.
+- Format Go with `gofmt`, follow existing package boundaries, use the project logging path, and prefer focused, table-driven tests where practical.
+- Justify dependencies and preserve the licenses and notices of bundled YARA rules.
 
-## Code Style
+## Issues and pull requests
 
-- Format Go code with `gofmt`.
-- Match existing package structure and naming.
-- Write table-driven tests for new logic where practical.
-- Use the project logging path instead of ad hoc stdout logging.
+Use this repository's [issue tracker](https://github.com/kplrm/xdr-agent/issues) for general questions, reproducible bugs, and proposals. Discuss substantial changes before implementation.
 
-## Security Issues
+1. Fork the repository and branch from `main`.
+2. Keep the change focused and follow the existing code style.
+3. Add regression coverage for changed behavior and update affected documentation.
+4. In your PR, explain the problem, resulting behavior, validation performed, and compatibility impact. List any checks you could not run, including the reason.
 
-Do not open public issues for vulnerabilities, secrets exposure, or bypasses.
-Report them privately to the maintainer through the established private contact path.
+Use sanitized logs and fixtures; remove secrets and identifying customer data before posting.
 
-## General Issues And Pull Requests
+## License and attribution
 
-For non-security issues, include:
+By submitting a contribution, you agree to license your original changes under the [GNU Affero General Public License, version 3 only](LICENSE) (`AGPL-3.0`). You retain copyright in your contributions. Submit only work you have the right to contribute, and preserve existing copyright and third-party license notices.
 
-- what you changed
-- why the current behavior is wrong or incomplete
-- how you validated the change
-- whether agent, coordinator, or defense compatibility is affected
+## Security reports
+
+Report vulnerabilities through this repository's [private vulnerability reporting](https://github.com/kplrm/xdr-agent/security/advisories/new) when enabled. Include affected versions, reproduction steps, impact, and sanitized supporting details. Keep vulnerability, bypass, and credential details out of public issues.
+
+If private reporting is unavailable, open an issue asking the maintainer for a private reporting channel without describing the vulnerability.
 
 ## Conduct
 
-Be direct, respectful, and technically concrete.
+Be respectful, direct, and technically concrete in issues, reviews, and discussions.

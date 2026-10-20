@@ -38,3 +38,9 @@ sudo apt purge xdr-agent
 - [HTTP contract](docs/api-endpoints.md): enrollment, health, ingestion, upgrades, and contract checks.
 - [Roadmap](docs/roadmap.md): release gates and planned work.
 - [Contributing](CONTRIBUTING.md): development and validation guidelines.
+
+## License
+
+Copyright (C) 2026 Diego A. Guillen-Rosaperez
+
+Licensed under the [GNU Affero General Public License, version 3 only](LICENSE) (`AGPL-3.0`). Third-party components retain their own licenses and notices.
