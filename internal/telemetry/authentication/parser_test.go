@@ -1,0 +1,136 @@
+package authentication
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestParseAuthenticationLogs(t *testing.T) {
+	observed := time.Date(2026, 11, 3, 18, 0, 0, 0, time.FixedZone("local", 3600))
+	tests := []struct {
+		name, line string
+		want       map[string]interface{}
+	}{
+		{"public key", "2026-11-03T17:15:14.649352+01:00 node2 sshd-session[2557810]: Accepted publickey for alice from 192.168.2.63 port 39082 ssh2: ED25519 SHA256:example/fingerprint", map[string]interface{}{
+			"@timestamp": "2026-11-03T16:15:14.649352Z", "host.hostname": "node2", "process.pid": float64(2557810),
+			"user.name": "alice", "event.type": "start", "event.action": "authentication-success", "event.outcome": "success",
+			"source.ip": "192.168.2.63", "source.port": float64(39082), "service.name": "sshd",
+			"xdr.authentication.method": "publickey", "xdr.authentication.key.algorithm": "ED25519",
+			"xdr.authentication.key.fingerprint": "SHA256:example/fingerprint", "xdr.authentication.invalid_user": false,
+		}},
+		{"legacy failure", "Mar  3 20:06:27 laptop sshd[99999]: Failed password for invalid user xdr_test from 127.0.0.1 port 55555 ssh2", map[string]interface{}{
+			"@timestamp": "2026-03-03T19:06:27Z", "user.name": "xdr_test", "event.type": "denied",
+			"event.action": "authentication-failure", "event.outcome": "failure", "event.reason": "invalid user",
+			"source.ip": "127.0.0.1", "source.port": float64(55555), "xdr.authentication.invalid_user": true,
+			"xdr.authentication.method": "password", "xdr.authentication.key": nil,
+		}},
+		{"password ipv6", "2026-11-03T17:15:14Z node2 sshd[42]: Accepted password for root from 2001:db8::1 port 22 ssh2", map[string]interface{}{
+			"user.name": "root", "source.ip": "2001:db8::1", "xdr.authentication.method": "password", "event.outcome": "success",
+		}},
+		{"sudo", "2026-03-02T19:01:44.421869+01:00 laptop sudo:    alice : TTY=pts/2 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/true", map[string]interface{}{
+			"user.name": "alice", "user.effective.name": "root", "process.tty.name": "pts/2", "process.working_directory": "/home/alice",
+			"process.command_line": "/usr/bin/true", "event.action": "sudo-command", "event.outcome": "success",
+		}},
+		{"sudo environment", "Mar  3 20:06:27 laptop sudo:    root : TTY=pts/99 ; PWD=/tmp ; USER=nobody ; ENV=XDR_TEST=yes ; COMMAND=/usr/bin/true --flag=a;b", map[string]interface{}{
+			"user.name": "root", "user.effective.name": "nobody", "xdr.authentication.environment": "XDR_TEST=yes",
+			"process.command_line": "/usr/bin/true --flag=a;b", "event.outcome": "success",
+		}},
+		{"sudo denied", "Mar  3 20:06:27 laptop sudo: alice : user NOT in sudoers ; TTY=pts/2 ; PWD=/tmp ; USER=root ; COMMAND=/bin/true", map[string]interface{}{
+			"event.outcome": "failure", "event.type": "denied", "event.reason": "user NOT in sudoers",
+		}},
+		{"pam open", "2026-11-03T17:15:14.651210+01:00 node2 sshd-session[2557810]: pam_unix(sshd:session): session opened for user alice(uid=1000) by alice(uid=0)", map[string]interface{}{
+			"user.name": "alice", "user.id": "1000", "source.user.name": "alice", "source.user.id": "0", "event.action": "session-start",
+			"xdr.authentication.pam.module": "pam_unix", "xdr.authentication.pam.type": "session", "service.name": "sshd",
+		}},
+		{"pam close", "2026-03-02T19:02:17.302232+01:00 laptop sudo: pam_unix(sudo:session): session closed for user root", map[string]interface{}{
+			"user.name": "root", "event.action": "session-end", "event.type": "end", "user.id": nil, "event.outcome": "success",
+		}},
+		{"systemd pam", "2026-11-03T17:15:14.720159+01:00 node2 (systemd): pam_unix(systemd-user:session): session opened for user alice(uid=1000) by (uid=0)", map[string]interface{}{
+			"process.name": "(systemd)", "service.name": "systemd-user", "user.id": "1000", "source.user.id": "0",
+		}},
+		{"pkexec", "2026-03-02T19:02:33.599027+01:00 laptop pkexec[61586]: alice: Executing command [USER=root] [TTY=unknown] [CWD=/home/alice] [COMMAND=/usr/lib/update-notifier/package-system-locked]", map[string]interface{}{
+			"user.name": "alice", "user.effective.name": "root", "process.pid": float64(61586), "process.tty.name": "unknown",
+			"process.working_directory": "/home/alice", "process.command_line": "/usr/lib/update-notifier/package-system-locked", "event.action": "pkexec-command",
+		}},
+		{"logind", "2026-11-03T17:15:14.662261+01:00 node2 systemd-logind[1615]: New session '3584' of user 'alice' with class 'user' and type 'tty'.", map[string]interface{}{
+			"user.name": "alice", "xdr.authentication.session.id": "3584", "xdr.authentication.session.class": "user",
+			"xdr.authentication.session.type": "tty", "event.action": "session-start",
+		}},
+		{"logind legacy", "Mar  3 20:06:27 laptop systemd-logind[1615]: New session 42 of user alice.", map[string]interface{}{
+			"user.name": "alice", "xdr.authentication.session.id": "42", "event.action": "session-start",
+		}},
+		{"pam failure", "Mar  3 20:06:27 laptop sshd[42]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=192.0.2.1 user=alice", map[string]interface{}{
+			"user.name": "alice", "source.ip": "192.0.2.1", "process.tty.name": "ssh", "xdr.authentication.uid": "0",
+			"xdr.authentication.euid": "0", "event.action": "authentication-failure", "event.outcome": "failure",
+		}},
+		{"invalid user context", "Mar  3 20:06:27 laptop sshd[42]: Invalid user alice from 192.0.2.1 port 22", map[string]interface{}{
+			"user.name": "alice", "event.action": "invalid-user", "event.outcome": "unknown", "source.ip": "192.0.2.1",
+		}},
+		{"unknown", "Mar  3 20:06:27 laptop login[42]: unsupported authentication message", map[string]interface{}{
+			"event.action": "authentication-log", "event.outcome": "unknown", "message": "unsupported authentication message",
+		}},
+		{"malformed", "not a syslog line", map[string]interface{}{"event.outcome": "unknown", "message": "not a syslog line"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event, keep := parse(test.line, observed, "agent-1", "fallback", "/var/log/auth.log")
+			if !keep {
+				t.Fatal("unexpectedly ignored record")
+			}
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]interface{}
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range test.want {
+				if got := lookup(document, key); !reflect.DeepEqual(got, want) {
+					t.Errorf("%s = %#v, want %#v", key, got, want)
+				}
+			}
+			for key, want := range map[string]interface{}{"event.category": "authentication", "event.module": "telemetry.authentication", "agent.id": "agent-1", "event.original": test.line, "event.created": "2026-11-03T17:00:00Z", "log.file.path": "/var/log/auth.log"} {
+				if got := lookup(document, key); got != want {
+					t.Errorf("%s = %#v, want %#v", key, got, want)
+				}
+			}
+			if _, exists := document["event.severity"]; exists {
+				t.Fatal("authentication telemetry must be unscored")
+			}
+		})
+	}
+}
+
+func lookup(document map[string]interface{}, key string) interface{} {
+	if value, exists := document[key]; exists {
+		return value
+	}
+	parts := strings.SplitN(key, ".", 2)
+	if len(parts) == 2 {
+		if nested, ok := document[parts[0]].(map[string]interface{}); ok {
+			return lookup(nested, parts[1])
+		}
+	}
+	return nil
+}
+
+func TestIgnoreCronAndInferLegacyYear(t *testing.T) {
+	now := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, line := range []string{
+		"2026-03-02T18:45:01.188159+01:00 laptop CRON[53218]: pam_unix(cron:session): session closed for user root",
+		"Mar  3 20:06:27 laptop crond[42]: pam_unix(crond:session): session opened for user root(uid=0) by root(uid=0)",
+		"Mar  3 20:06:27 laptop other[42]: pam_unix(cron:session): session closed for user root",
+	} {
+		if _, keep := parse(line, now, "agent", "host", "auth.log"); keep {
+			t.Errorf("retained CRON: %s", line)
+		}
+	}
+	event, _ := parse("Dec 31 23:59:59 laptop sshd[42]: Failed password for root from 127.0.0.1 port 22 ssh2", now, "agent", "host", "auth.log")
+	if event.Timestamp.Year() != 2026 {
+		t.Fatalf("year = %d", event.Timestamp.Year())
+	}
+}

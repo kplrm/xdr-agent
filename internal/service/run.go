@@ -22,6 +22,7 @@ import (
 	"xdr-agent/internal/identity"
 	"xdr-agent/internal/platform/linux"
 	"xdr-agent/internal/prevention"
+	"xdr-agent/internal/telemetry/authentication"
 	"xdr-agent/internal/telemetry/file"
 	"xdr-agent/internal/telemetry/network"
 	"xdr-agent/internal/telemetry/process"
@@ -171,6 +172,7 @@ func Run(ctx context.Context, configPath string, once bool, enrollmentToken stri
 		file.NewFileAccessCollector(pipeline, state.AgentID, state.Hostname, nil),
 		connections,
 		dns,
+		authentication.NewCollector(pipeline, state.AgentID, state.Hostname),
 	}
 	started := make([]capability.Capability, 0, len(collectors))
 	failed := map[string]string{}

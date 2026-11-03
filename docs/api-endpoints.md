@@ -7,7 +7,7 @@ The Linux agent has **no inbound HTTP server**. This is the authoritative ingest
 | POST | /api/v1/agents/enroll | Register persistent identity using an enrollment token |
 | POST | /api/v1/agents/heartbeat | Report health, protections, and configuration status; receive upgrades and settings |
 | GET | /api/v1/agents/commands | Poll upgrades and settings with `agent_id` and `agent_version` query parameters |
-| POST | /api/v1/agents/telemetry | Deliver process, file, connection, and DNS events |
+| POST | /api/v1/agents/telemetry | Deliver process, file, connection, DNS, and authentication events |
 | POST | /api/v1/agents/security | Deliver YARA alerts and prevention outcomes |
 | POST | /api/v1/agents/logs | Deliver runtime logs |
 
@@ -19,7 +19,7 @@ Heartbeat sends identity, hostname, grouping metadata, and `agent_version`, plus
 
 Health is independent of version checks. Execution blocking is `not_applicable` in detection mode. YARA scan failures report degraded health and successful scans restore it when the scan queue is no longer full; execution-blocking failures remain separate.
 
-Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Internal event IDs are never shipped; events contain neither `id`, `_id`, nor an originating event ID. OpenSearch generates document `_id` metadata. [Telemetry](telemetry.md) defines the event envelope and root-level detail fields. Process, connection, and DNS events omit `event.severity`; file, security, and runtime-log events include it. Connection and host DNS endpoints use nested `local.{ip,port}` and `remote.{ip,port}` objects; forwarded DNS uses `dns.client.{ip,port}` and `dns.server.{ip,port}`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
+Batches contain `{ "agent_id": "...", "events": [...] }`, use gzip JSON with `Content-Encoding: gzip`, and receive an `indexed` count. Internal event IDs are never shipped; events contain neither `id`, `_id`, nor an originating event ID. OpenSearch generates document `_id` metadata. [Telemetry](telemetry.md) defines the event envelope and root-level detail fields. Process, connection, DNS, and authentication events omit `event.severity`; file, security, and runtime-log events include it. Connection and host DNS endpoints use nested `local.{ip,port}` and `remote.{ip,port}` objects; forwarded DNS uses `dns.client.{ip,port}` and `dns.server.{ip,port}`. Coordinator checks ownership and topic and returns an error for failed bulk indexing.
 
 ## Managed configuration
 
