@@ -69,6 +69,18 @@ func TestParseAuthenticationLogs(t *testing.T) {
 			"event.action": "authentication-log", "file.path": nil,
 			"tags": []interface{}{"authentication-unparsed"},
 		}},
+		{"pam user environment deprecation", "2026-11-06T23:50:10.842254Z node4 sshd[237340]: pam_env(sshd:session): deprecated reading of user environment enabled", map[string]interface{}{
+			"@timestamp": "2026-11-06T23:50:10.842254Z", "host.hostname": "node4", "process.pid": float64(237340),
+			"event.action": "pam-environment-warning", "event.type": "info", "event.outcome": "unknown",
+			"event.reason": "deprecated reading of user environment enabled", "service.name": "sshd",
+			"xdr.authentication.pam.module": "pam_env", "xdr.authentication.pam.type": "session",
+			"user.name": nil, "xdr.authentication.method": nil, "file.path": nil,
+			"tags": nil, "event.original": nil,
+		}},
+		{"environment deprecation from another module", "2026-11-06T23:50:10.842254Z node4 sshd[237340]: pam_other(sshd:session): deprecated reading of user environment enabled", map[string]interface{}{
+			"event.action": "authentication-log", "event.outcome": "unknown",
+			"tags": []interface{}{"authentication-unparsed"},
+		}},
 		{"unknown pam diagnostic", "2026-11-06T23:33:48.432036Z xdr-agent-dev su[22]: pam_env(su:session): unsupported environment diagnostic", map[string]interface{}{
 			"event.action": "authentication-log", "event.outcome": "unknown", "file.path": nil,
 			"tags": []interface{}{"authentication-unparsed"},

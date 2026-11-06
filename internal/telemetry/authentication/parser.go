@@ -159,6 +159,9 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 				setAction("pam-environment-error", "info", "unknown")
 				fields["event.reason"] = match[4]
 				fields["file"] = map[string]interface{}{"path": path}
+			} else if match[1] == "pam_env" && match[4] == "deprecated reading of user environment enabled" {
+				setAction("pam-environment-warning", "info", "unknown")
+				fields["event.reason"] = match[4]
 			} else {
 				event.Tags = append(event.Tags, "authentication-unparsed")
 			}
