@@ -41,6 +41,27 @@ func TestParseAuthenticationLogs(t *testing.T) {
 		{"sudo denied", "Mar  3 20:06:27 laptop sudo: alice : user NOT in sudoers ; TTY=pts/2 ; PWD=/tmp ; USER=root ; COMMAND=/bin/true", map[string]interface{}{
 			"event.outcome": "failure", "event.type": "denied", "event.reason": "user NOT in sudoers",
 		}},
+		{"su summary", "2026-11-06T21:34:57.031197+00:00 xdr-agent-dev su[31]: (to nobody) root on none", map[string]interface{}{
+			"user.name": "root", "user.effective.name": "nobody", "process.tty.name": "none", "process.pid": float64(31),
+			"event.action": "su-command", "event.type": "change", "event.outcome": "unknown",
+			"xdr.authentication.method": nil, "tags": nil,
+		}},
+		{"su pam open", "2026-11-06T21:34:57.031769+00:00 xdr-agent-dev su[31]: pam_unix(su:session): session opened for user nobody(uid=65534) by root(uid=0)", map[string]interface{}{
+			"user.name": "nobody", "user.id": "65534", "source.user.name": "root", "source.user.id": "0",
+			"event.action": "session-start", "event.outcome": "success", "service.name": "su",
+			"xdr.authentication.pam.module": "pam_unix", "xdr.authentication.pam.type": "session",
+			"xdr.authentication.method": nil, "user.effective.name": nil, "tags": nil,
+		}},
+		{"su pam close", "2026-11-06T21:34:57.035518+00:00 xdr-agent-dev su[31]: pam_unix(su:session): session closed for user nobody", map[string]interface{}{
+			"user.name": "nobody", "event.action": "session-end", "event.outcome": "success",
+			"xdr.authentication.method": nil, "user.effective.name": nil, "source.user.name": nil, "tags": nil,
+		}},
+		{"pam environment diagnostic", "2026-11-06T21:34:57.031442+00:00 xdr-agent-dev su[31]: pam_env(su:session): Unable to open env file: /etc/default/locale", map[string]interface{}{
+			"event.action": "authentication-log", "event.outcome": "unknown", "service.name": "su",
+			"xdr.authentication.pam.module": "pam_env", "xdr.authentication.pam.type": "session",
+			"user.name": nil, "user.effective.name": nil, "xdr.authentication.method": nil,
+			"tags": []interface{}{"authentication-unparsed"},
+		}},
 		{"pam open", "2026-11-03T17:15:14.651210+01:00 node2 sshd-session[2557810]: pam_unix(sshd:session): session opened for user alice(uid=1000) by alice(uid=0)", map[string]interface{}{
 			"user.name": "alice", "user.id": "1000", "source.user.name": "alice", "source.user.id": "0", "event.action": "session-start",
 			"xdr.authentication.pam.module": "pam_unix", "xdr.authentication.pam.type": "session", "service.name": "sshd",

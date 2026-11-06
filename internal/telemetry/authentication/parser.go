@@ -19,6 +19,7 @@ var (
 	pamRE            = regexp.MustCompile(`^(pam_\w+)\(([^:]+):([^)]+)\): (.*)$`)
 	sessionRE        = regexp.MustCompile(`^session (opened|closed) for user ([^ (]+)(?:\(uid=(\d+)\))?(?: by ([^ (]*)(?:\(uid=(\d+)\))?)?$`)
 	pamFieldRE       = regexp.MustCompile(`(?:^|[; ]+)(logname|uid|euid|tty|ruser|rhost|user)=([^; ]*)`)
+	suRE             = regexp.MustCompile(`^\(to ([^)]+)\) (\S+) on (.+)$`)
 	sudoRE           = regexp.MustCompile(`^\s*(\S+)\s*:\s*(.*?)(?: ; )?TTY=([^;]*?)\s*;\s*PWD=([^;]*?)\s*;\s*USER=([^;]*?)\s*;\s*(?:ENV=(.*?)\s*;\s*)?COMMAND=(.*)$`)
 	pkexecRE         = regexp.MustCompile(`^(\S+): Executing command \[USER=([^]]+)\] \[TTY=([^]]+)\] \[CWD=([^]]+)\] \[COMMAND=(.*)\]$`)
 	logindRE         = regexp.MustCompile(`^New session '?([^' ]+)'? of user '?([^' ]+?)'?(?: with class '([^']+)' and type '([^']+)')?\.$`)
@@ -156,6 +157,11 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 				event.Tags = append(event.Tags, "authentication-unparsed")
 			}
 		}
+	} else if match := suRE.FindStringSubmatch(message); match != nil && program == "su" {
+		user["name"], user["effective"] = match[2], map[string]interface{}{"name": match[1]}
+		process["tty"] = map[string]interface{}{"name": match[3]}
+		// The summary names the actor and target, but not the credential method or result.
+		setAction("su-command", "change", "unknown")
 	} else if match := sudoRE.FindStringSubmatch(message); match != nil && program == "sudo" {
 		user["name"] = match[1]
 		user["effective"] = map[string]interface{}{"name": match[5]}

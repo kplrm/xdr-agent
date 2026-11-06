@@ -14,18 +14,27 @@ export OSD_ROOT="$PWD/../.build/OpenSearch-Dashboards"
 CGO_ENABLED=0 make build
 ```
 
-This creates `dist/xdr-agent`; disabling CGO lets it run in the slim image without host C-library dependencies. After code changes, repeat only the build command.
+This creates `dist/xdr-agent`; disabling CGO lets it run in the container without host C-library dependencies. After code changes, repeat only the build command.
 
 ## 2. Prepare the development container
 
-Build a small runtime image once. It supplies `yara` and `yarac`; the Agent binary is mounted separately so code changes do not require rebuilding the image.
+Build the runtime image with only YARA, trusted CA certificates, and rsyslog plus their dependencies. It creates `/var/log/auth.log`, routes local authentication messages there, and starts rsyslog before the Agent. The Agent binary is mounted separately so code changes do not require rebuilding the image.
 
 ```bash
 podman build -t localhost/xdr-agent-dev - <<'EOF'
-FROM docker.io/library/debian:stable-slim
-RUN apt-get update && apt-get install -y --no-install-recommends yara ca-certificates && rm -rf /var/lib/apt/lists/*
-ENTRYPOINT ["/usr/local/bin/xdr-agent", "run", "--config", "/etc/xdr-agent/config.json"]
+FROM docker.io/library/debian:stable
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    yara ca-certificates rsyslog \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf '%s\n' 'module(load="imuxsock")' 'auth,authpriv.* /var/log/auth.log' > /etc/rsyslog.conf \
+    && install -m 640 /dev/null /var/log/auth.log
+ENTRYPOINT ["/bin/sh", "-ec", "rsyslogd; exec /usr/local/bin/xdr-agent run --config /etc/xdr-agent/config.json"]
 EOF
+```
+
+Create the development `config.json`.
+
+```bash
 mkdir -p ../.build/agent-dev
 cp config/config.default.json ../.build/agent-dev/config.json
 ```
@@ -56,8 +65,6 @@ The foreground `run` command enrolls automatically and ships events after enroll
 
 Delivery is **Agent → Coordinator → OpenSearch**. Coordinator writes runtime logs to `xdr-agent-logs`, activity to `xdr-agent-telemetry`, and alerts to `xdr-agent-security`. Check the Agent in Coordinator and the streams in Discover. The Agent needs no OpenSearch password for this route. Container-local `localhost` refers to the Agent container, so use the Dashboards service name above.
 
-This setup exercises container activity rather than full host coverage. `NET_RAW` enables DNS packet capture inside the container's network namespace. Keep host PID/filesystem access and broad privileges out of this workflow. For optional direct HTTPS delivery, see the [HTTP contract](api-endpoints.md#direct-opensearch-ingestion).
-
 ## 4. Inspect logs and health
 
 The Agent writes runtime logs to the container's stderr, shown in the foreground terminal; it does not create an internal log file. From a second **host terminal**, follow the same output with [Podman logs](https://docs.podman.io/en/latest/markdown/podman-logs.1.html):
@@ -66,17 +73,17 @@ The Agent writes runtime logs to the container's stderr, shown in the foreground
 podman logs --tail 100 -f xdr-agent-dev
 ```
 
-Coordinator marks the Agent **degraded** when a collector reports failed/degraded health, even while other collectors ship events successfully. Hover over its status to see the affected components. In this container:
+In this container:
 
 - DNS requires `NET_RAW`. If you started without it, stop with Ctrl+C and rerun the updated command in step 3, keeping the config and state volume.
-- Authentication tails `/var/log/auth.log`, which the slim image does not supply. To test this collector, append a **synthetic SSH failure** from the host:
+- Authentication tails `/var/log/auth.log`, supplied by the image above. To generate real PAM session messages from the host:
 
 ```bash
-podman exec xdr-agent-dev sh -c \
-  'printf "%s %s\n" "$(date "+%b %e %T")" "xdr-agent-dev sshd[123]: Failed password for dev from 192.0.2.10 port 2222 ssh2" >> /var/log/auth.log'
+podman exec xdr-agent-dev su nobody -s /bin/sh -c true
+podman exec xdr-agent-dev tail -n 10 /var/log/auth.log
 ```
 
-The collector retries automatically; Coordinator reflects recovery on the next heartbeat. This fixture creates a test source and event, not real authentication coverage; repeat it after recreating the container. Use a VM with actual authentication logging for full testing. Logs already shipped remain available in Discover under `xdr-agent-logs`; `--rm` removes the container's local logs when it exits.
+These events exercise container authentication only; use a VM for full host coverage. Coordinator reflects collector health on the next heartbeat. Logs already shipped remain available in Discover under `xdr-agent-logs`; `--rm` removes the container's local logs when it exits.
 
 ## Full endpoint and package testing
 
