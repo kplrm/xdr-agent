@@ -1,35 +1,25 @@
-# xdr-agent
+# XDR Agent
 
-Debian/Ubuntu endpoint for process, file, and network telemetry with release-bundled YARA Forge Core rules. Detection is the default: matches generate alerts without stopping execution. Check the mode in the config passed to `enroll`; enrollment copies that file into the installed service config, including an existing `prevent` setting. Set `detection_prevention.mode` to `prevent` to enable execution denial and termination of matched processes. The installed rules change with agent releases. `VERSION` sets the release version; GitHub builds and publishes its AMD64 and ARM64 Debian packages on pushes to `main` or through **Actions → Release → Run workflow**. Select the branch containing the intended `VERSION`; existing release tags are skipped.
+XDR Agent is the Linux endpoint component of [XDR Security](https://github.com/kplrm/xdr-security/blob/main/README.md). It collects endpoint activity, detects threats, and sends events to OpenSearch for investigation in the XDR plugins.
 
-## Build, test, and install locally (Debian/Ubuntu, amd64)
+- **Telemetry:** process, file, network, DNS, and authentication activity.
+- **Protection:** release-bundled YARA Forge Core rules. Detection is the default; prevention mode adds execution blocking and termination of matched processes.
+- **Fleet management:** Coordinator handles enrollment, health, upgrades, and shared telemetry policies. Protection settings remain local.
+- **Delivery:** telemetry, security alerts, and runtime logs go through Coordinator or directly to OpenSearch.
 
-Set `control_plane_url` in `./config/config.json` to your Coordinator URL (`http://localhost:5601` if local). Leave `enrollment_token` empty. Packages use `config/config.default.json` as their token-free template; the installed service reads `/etc/xdr-agent/config.json`. Upgrades preserve existing values; startup fills missing telemetry settings using [effective defaults](docs/architecture.md#runtime-and-configuration). Set `max_cpu_cores` to the maximum logical CPUs the Agent and YARA may use (default `1`; `0` uses all available CPUs). The systemd unit also limits the service to 75% of one CPU and gives it lower CPU priority. Restart the service after editing the installed config. In prevention mode, execution blocking checks the complete `execution_watch_paths` tree before installing watches. If it exceeds 2,048 directories, blocking stays off and the Agent reports degraded health while YARA detection and verified process termination continue. Slow execution scans fail open after 500 ms. `make test` checks fanotify decisions and these failure paths inside a disposable Docker container.
+## Screenshot
 
-```bash
-make build
-make test
-make deb
-sudo apt install "./dist/xdr-agent_$(cat VERSION)_amd64.deb"
-sudo /usr/bin/xdr-agent enroll '<TOKEN>' --config ./config/config.json
-```
+TODO: Add an Agent overview showing fleet health, collected telemetry, and a protection alert in XDR Security.
 
-Replace `<TOKEN>` with the token from **Coordinator → Enroll new XDR Agent**. Enrollment reads `--config`, saves the enrolled config to `/etc/xdr-agent/config.json` without changing the source file, and starts the service. `make build` creates a binary; `make deb` packages it with the systemd unit. The agent uses the external `yara` and `yarac` programs; installing the DEB pulls in the `yara` package automatically. `make test` runs a non-root, CPU-limited post-enrollment smoke test and a bounded Docker prevention test before packaging. Without it, `make test` skips the native YARA scanner test.
+<!-- ![XDR Agent overview](images/xdr-agent-overview.png) -->
 
-## Operate and remove
+## Local development
 
-Manage shared scan intervals, shipment timing, and internal networks through **Coordinator → Policies → Edit**; enrolled agents [save and apply policy settings automatically](docs/api-endpoints.md#managed-configuration). For direct event delivery to OpenSearch 3.7+, configure a restricted username/password and trusted CA using [these steps](docs/api-endpoints.md#direct-opensearch-ingestion). Health and enrollment continue through Coordinator.
+See [local development](docs/local-development.md) for source builds, a container workflow connected to the local XDR stack, and VM-based endpoint testing.
 
-```bash
-sudo systemctl status xdr-agent.service
-sudo journalctl -u xdr-agent.service -f
-sudo systemctl stop xdr-agent.service
-sudo systemctl start xdr-agent.service
-sudo systemctl restart xdr-agent.service
-sudo apt purge xdr-agent
-```
+## Releases
 
-`apt purge` also deletes `/etc/xdr-agent` and `/var/lib/xdr-agent`, including enrollment identity and local state. `apt remove` keeps them for reinstall. The `_apt` "unsandboxed" notice during local installation only means `_apt` could not read the `.deb` inside your home directory; installation still succeeds.
+Debian/Ubuntu packages support AMD64 and ARM64. `VERSION` controls independent Agent releases and their bundled rules. [GitHub Actions](.github/workflows/release.yml) builds and publishes packages on pushes to `main` or manual runs; existing release tags are skipped.
 
 ## Documentation
 
