@@ -4,6 +4,7 @@ package authentication
 import (
 	"net"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +38,7 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 		Module: "telemetry.authentication", AgentID: agentID, Hostname: hostname, Payload: fields}
 	header := headerRE.FindStringSubmatch(line)
 	if header == nil {
-		event.Tags = []string{"authentication-parse-failure"}
+		event.Tags = []string{"authentication-parse-failure", "authentication-unparsed"}
 		return event, true
 	}
 	program, message := header[3], header[5]
@@ -153,6 +154,11 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 			if strings.HasPrefix(match[4], "authentication failure") {
 				setAction("authentication-failure", "denied", "failure")
 				fields["event.reason"] = "PAM authentication failure"
+			} else if path, ok := strings.CutPrefix(match[4], "Unable to open env file: "); ok && path != "" && match[1] == "pam_env" {
+				// An environment-file diagnostic does not establish the login outcome.
+				setAction("pam-environment-error", "info", "unknown")
+				fields["event.reason"] = match[4]
+				fields["file"] = map[string]interface{}{"path": path}
 			} else {
 				event.Tags = append(event.Tags, "authentication-unparsed")
 			}
@@ -191,6 +197,9 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 		setAction("session-end", "end", "success")
 	} else {
 		event.Tags = append(event.Tags, "authentication-unparsed")
+	}
+	if !slices.Contains(event.Tags, "authentication-unparsed") {
+		delete(fields, "event.original")
 	}
 	return event, true
 }

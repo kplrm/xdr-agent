@@ -3,6 +3,7 @@ package authentication
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -56,10 +57,20 @@ func TestParseAuthenticationLogs(t *testing.T) {
 			"user.name": "nobody", "event.action": "session-end", "event.outcome": "success",
 			"xdr.authentication.method": nil, "user.effective.name": nil, "source.user.name": nil, "tags": nil,
 		}},
-		{"pam environment diagnostic", "2026-11-06T21:34:57.031442+00:00 xdr-agent-dev su[31]: pam_env(su:session): Unable to open env file: /etc/default/locale", map[string]interface{}{
-			"event.action": "authentication-log", "event.outcome": "unknown", "service.name": "su",
+		{"pam environment diagnostic", "2026-11-06T23:33:48.432036Z xdr-agent-dev su[22]: pam_env(su:session): Unable to open env file: /etc/default/locale", map[string]interface{}{
+			"@timestamp": "2026-11-06T23:33:48.432036Z", "process.pid": float64(22),
+			"event.action": "pam-environment-error", "event.type": "info", "event.outcome": "unknown", "service.name": "su",
+			"event.reason": "Unable to open env file: /etc/default/locale", "file.path": "/etc/default/locale",
 			"xdr.authentication.pam.module": "pam_env", "xdr.authentication.pam.type": "session",
 			"user.name": nil, "user.effective.name": nil, "xdr.authentication.method": nil,
+			"tags": nil, "event.original": nil,
+		}},
+		{"pam environment diagnostic without path", "2026-11-06T23:33:48.432036Z xdr-agent-dev su[22]: pam_env(su:session): Unable to open env file: ", map[string]interface{}{
+			"event.action": "authentication-log", "file.path": nil,
+			"tags": []interface{}{"authentication-unparsed"},
+		}},
+		{"unknown pam diagnostic", "2026-11-06T23:33:48.432036Z xdr-agent-dev su[22]: pam_env(su:session): unsupported environment diagnostic", map[string]interface{}{
+			"event.action": "authentication-log", "event.outcome": "unknown", "file.path": nil,
 			"tags": []interface{}{"authentication-unparsed"},
 		}},
 		{"pam open", "2026-11-03T17:15:14.651210+01:00 node2 sshd-session[2557810]: pam_unix(sshd:session): session opened for user alice(uid=1000) by alice(uid=0)", map[string]interface{}{
@@ -93,7 +104,10 @@ func TestParseAuthenticationLogs(t *testing.T) {
 		{"unknown", "Mar  3 20:06:27 laptop login[42]: unsupported authentication message", map[string]interface{}{
 			"event.action": "authentication-log", "event.outcome": "unknown", "message": "unsupported authentication message",
 		}},
-		{"malformed", "not a syslog line", map[string]interface{}{"event.outcome": "unknown", "message": "not a syslog line"}},
+		{"malformed", "not a syslog line", map[string]interface{}{
+			"event.outcome": "unknown", "message": "not a syslog line",
+			"tags": []interface{}{"authentication-parse-failure", "authentication-unparsed"},
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -114,10 +128,14 @@ func TestParseAuthenticationLogs(t *testing.T) {
 					t.Errorf("%s = %#v, want %#v", key, got, want)
 				}
 			}
-			for key, want := range map[string]interface{}{"event.category": "authentication", "event.module": "telemetry.authentication", "agent.id": "agent-1", "event.original": test.line, "event.created": "2026-11-03T17:00:00Z", "log.file.path": "/var/log/auth.log"} {
+			for key, want := range map[string]interface{}{"event.category": "authentication", "event.module": "telemetry.authentication", "agent.id": "agent-1", "event.created": "2026-11-03T17:00:00Z", "log.file.path": "/var/log/auth.log"} {
 				if got := lookup(document, key); got != want {
 					t.Errorf("%s = %#v, want %#v", key, got, want)
 				}
+			}
+			original, exists := document["event.original"]
+			if unparsed := slices.Contains(event.Tags, "authentication-unparsed"); exists != unparsed || (unparsed && original != test.line) {
+				t.Errorf("event.original = %#v (exists=%v), tags=%v", original, exists, event.Tags)
 			}
 			if _, exists := document["event.severity"]; exists {
 				t.Fatal("authentication telemetry must be unscored")

@@ -85,8 +85,11 @@ func TestTailNewLinesRotationAndTruncation(t *testing.T) {
 	}
 	ids := map[string]bool{}
 	for _, event := range received {
-		if event.Payload["event.original"] != strings.TrimSpace(line) {
-			t.Fatalf("unexpected original: %#v", event.Payload["event.original"])
+		if event.Payload["event.action"] != "authentication-failure" {
+			t.Fatalf("unexpected action: %#v", event.Payload["event.action"])
+		}
+		if _, exists := event.Payload["event.original"]; exists {
+			t.Fatal("parsed authentication event must omit event.original")
 		}
 		if event.ID == "" || ids[event.ID] {
 			t.Fatalf("repeated records must have distinct queue IDs: %q", event.ID)

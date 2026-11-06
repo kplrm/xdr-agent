@@ -170,12 +170,11 @@ func parseJournal(line []byte, observed time.Time, agentID, hostname string) (ev
 	if _, err := strconv.Atoi(pid); err == nil {
 		program += "[" + pid + "]"
 	}
-	// Reuse message parsing while retaining the original structured journal record
-	// as evidence and identifying the journal rather than inventing a file path.
+	// Reconstruct a readable log line for unparsed messages; journal transport
+	// metadata stays internal. Preserve the journal's microsecond timestamp.
 	normalized := time.UnixMicro(micros).UTC().Format(time.RFC3339Nano) + " " + hostname + " " + program + ": " + message
 	event, keep := parse(normalized, observed, agentID, hostname, "")
 	if keep {
-		event.Payload["event.original"] = string(line)
 		event.Payload["log"] = map[string]interface{}{"logger": "systemd-journald"}
 	}
 	return event, keep, cursor, nil

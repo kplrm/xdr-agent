@@ -38,7 +38,7 @@ func TestParseJournal(t *testing.T) {
 	for key, want := range map[string]interface{}{
 		"@timestamp": "2026-11-06T21:34:57.031769Z", "host.hostname": "node4", "process.pid": float64(31),
 		"user.name": "nobody", "source.user.name": "root", "event.action": "session-start",
-		"event.original": line, "log.logger": "systemd-journald", "log.file.path": nil,
+		"event.original": nil, "log.logger": "systemd-journald", "log.file.path": nil,
 		"xdr.authentication.method": nil,
 	} {
 		if got := lookup(document, key); !reflect.DeepEqual(got, want) {
@@ -68,6 +68,47 @@ func TestParseJournal(t *testing.T) {
 	}
 	if got := event.Payload["xdr"].(map[string]interface{})["authentication"].(map[string]interface{})["method"]; got != "publickey" {
 		t.Fatalf("SSH method lost: %v", got)
+	}
+}
+
+func TestJournalAuthenticationSamples(t *testing.T) {
+	observed := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		micros, message, action, timestamp string
+		unparsed                           bool
+	}{
+		{"1794006462538386", "pam_unix(su:session): session closed for user nobody", "session-end", "2026-11-06T23:07:42.538386Z", false},
+		{"1794006462534809", "pam_env(su:session): Unable to open env file: /etc/default/locale", "pam-environment-error", "2026-11-06T23:07:42.534809Z", false},
+		{"1794006462534809", "pam_env(su:session): unsupported environment diagnostic", "authentication-log", "2026-11-06T23:07:42.534809Z", true},
+		{"1794006462534920", "pam_unix(su:session): session opened for user nobody(uid=65534) by root(uid=0)", "session-start", "2026-11-06T23:07:42.53492Z", false},
+		{"1794006462533668", "(to nobody) root on none", "su-command", "2026-11-06T23:07:42.533668Z", false},
+	}
+	for _, test := range tests {
+		t.Run(test.action, func(t *testing.T) {
+			data, _ := json.Marshal(map[string]string{
+				"__CURSOR": "cursor1", "__REALTIME_TIMESTAMP": test.micros,
+				"__SEQNUM": "5", "__SEQNUM_ID": "sequence", "__MONOTONIC_TIMESTAMP": "21602635043", "_BOOT_ID": "boot",
+				"_HOSTNAME": "xdr-agent-dev", "SYSLOG_IDENTIFIER": "su", "SYSLOG_PID": "22", "_PID": "22", "_COMM": "su", "MESSAGE": test.message,
+			})
+			event, keep, cursor, err := parseJournal(data, observed, "agent", "host")
+			if err != nil || !keep || cursor != "cursor1" {
+				t.Fatalf("parse: keep=%v cursor=%q err=%v", keep, cursor, err)
+			}
+			if got := event.Payload["event.action"]; got != test.action {
+				t.Errorf("action = %v, want %s", got, test.action)
+			}
+			if got := event.Timestamp.Format(time.RFC3339Nano); got != test.timestamp {
+				t.Errorf("timestamp = %s, want %s", got, test.timestamp)
+			}
+			if got := slices.Contains(event.Tags, "authentication-unparsed"); got != test.unparsed {
+				t.Errorf("tags = %v, want unparsed=%v", event.Tags, test.unparsed)
+			}
+			original, exists := event.Payload["event.original"]
+			wantOriginal := test.timestamp + " xdr-agent-dev su[22]: " + test.message
+			if exists != test.unparsed || (test.unparsed && original != wantOriginal) {
+				t.Errorf("event.original = %#v (exists=%v), want unparsed=%v, original=%q", original, exists, test.unparsed, wantOriginal)
+			}
+		})
 	}
 }
 
