@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -27,6 +28,8 @@ type Collector struct {
 	offset                  int64
 	pending                 []byte
 	discard                 bool
+	journalCursor           string
+	journalCommand          func(context.Context, ...string) *exec.Cmd
 }
 
 func NewCollector(pipeline *events.Pipeline, agentID, hostname string) *Collector {
@@ -55,7 +58,7 @@ func (c *Collector) Start(ctx context.Context) error {
 	if err := c.open(true); err == nil {
 		c.setHealth(capability.HealthRunning)
 	} else {
-		log.Printf("authentication: cannot tail %s; retrying: %v", c.path, err)
+		log.Printf("authentication: cannot tail %s; trying system journal: %v", c.path, err)
 	}
 	child, cancel := context.WithCancel(ctx)
 	c.cancel = cancel
@@ -70,11 +73,33 @@ func (c *Collector) Start(ctx context.Context) error {
 		}()
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		lastJournalError := ""
 		for {
+			if c.file == nil {
+				// Once journal collection has a cursor, keep that source until restart.
+				// Switching to a file mid-stream could replay the same authentication records.
+				if c.journalCursor == "" {
+					_ = c.open(false)
+				}
+				if c.file == nil {
+					err := c.followJournal(child)
+					if child.Err() != nil {
+						return
+					}
+					c.setHealth(capability.HealthDegraded)
+					if message := err.Error(); message != lastJournalError {
+						log.Printf("authentication: journal unavailable; retrying: %s", message)
+						lastJournalError = message
+					}
+				}
+			}
 			select {
 			case <-child.Done():
 				return
 			case <-ticker.C:
+				if c.file == nil {
+					continue
+				}
 				if c.poll() != nil {
 					c.setHealth(capability.HealthDegraded)
 				} else {

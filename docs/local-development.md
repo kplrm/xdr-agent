@@ -18,21 +18,21 @@ This creates `dist/xdr-agent`; disabling CGO lets it run in the container withou
 
 ## 2. Prepare the development container
 
-Build the runtime image with only YARA, trusted CA certificates, and rsyslog plus their dependencies. It creates `/var/log/auth.log`, routes local authentication messages there, and starts rsyslog before the Agent. The Agent binary is mounted separately so code changes do not require rebuilding the image.
+Build the runtime image with YARA, trusted CA certificates, and systemd's `journald`/`journalctl` tools plus their dependencies. Journald runs alongside the Agent and collects container authentication messages. Journal storage is capped at 16 MiB.
 
 ```bash
 podman build -t localhost/xdr-agent-dev - <<'EOF'
 FROM docker.io/library/debian:stable
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    yara ca-certificates rsyslog \
-    && rm -rf /var/lib/apt/lists/* \
-    && printf '%s\n' 'module(load="imuxsock")' 'auth,authpriv.* /var/log/auth.log' > /etc/rsyslog.conf \
-    && install -m 640 /dev/null /var/log/auth.log
-ENTRYPOINT ["/bin/sh", "-ec", "rsyslogd; exec /usr/local/bin/xdr-agent run --config /etc/xdr-agent/config.json"]
+    yara ca-certificates systemd \
+    && rm -rf /var/lib/apt/lists/*
+RUN printf '%s\n' '[Journal]' 'Storage=volatile' 'RuntimeMaxUse=16M' 'ReadKMsg=no' > /etc/systemd/journald.conf
+ENV MEMORY_PRESSURE_WATCH=/dev/null
+ENTRYPOINT ["/bin/sh", "-ec", "mkdir -p /run/systemd/journal; ln -sf /run/systemd/journal/dev-log /dev/log; /usr/lib/systemd/systemd-journald & exec /usr/local/bin/xdr-agent run --config /etc/xdr-agent/config.json"]
 EOF
 ```
 
-Create the development `config.json`.
+On first setup, create the development `config.json`. Keep your existing config and state volume when rebuilding the image.
 
 ```bash
 mkdir -p ../.build/agent-dev
@@ -61,7 +61,7 @@ podman run --rm -it --name xdr-agent-dev --hostname xdr-agent-dev \
   localhost/xdr-agent-dev
 ```
 
-The foreground `run` command enrolls automatically and ships events after enrollment. It does not need systemd. Keep the config and named state volume across restarts to retain the Agent identity; stop with Ctrl+C, rebuild, and rerun the command after changes.
+The foreground `run` command enrolls automatically and ships events after enrollment. Journald runs alongside it. Keep the config and named state volume across restarts to retain the Agent identity; stop with Ctrl+C, rebuild, and rerun the command after changes.
 
 Delivery is **Agent → Coordinator → OpenSearch**. Coordinator writes runtime logs to `xdr-agent-logs`, activity to `xdr-agent-telemetry`, and alerts to `xdr-agent-security`. Check the Agent in Coordinator and the streams in Discover. The Agent needs no OpenSearch password for this route. Container-local `localhost` refers to the Agent container, so use the Dashboards service name above.
 
@@ -73,14 +73,16 @@ The Agent writes runtime logs to the container's stderr, shown in the foreground
 podman logs --tail 100 -f xdr-agent-dev
 ```
 
+Journald may report an ignored audit-socket error under rootless Podman; this does not prevent PAM authentication collection.
+
 In this container:
 
 - DNS requires `NET_RAW`. If you started without it, stop with Ctrl+C and rerun the updated command in step 3, keeping the config and state volume.
-- Authentication tails `/var/log/auth.log`, supplied by the image above. To generate real PAM session messages from the host:
+- Authentication uses the journal fallback; look for `authentication: following system journal (auth/authpriv)` in the Agent logs. To generate and inspect real PAM session messages from the host:
 
 ```bash
 podman exec xdr-agent-dev su nobody -s /bin/sh -c true
-podman exec xdr-agent-dev tail -n 10 /var/log/auth.log
+podman exec xdr-agent-dev journalctl --no-pager --facility=auth,authpriv -n 10
 ```
 
 These events exercise container authentication only; use a VM for full host coverage. Coordinator reflects collector health on the next heartbeat. Logs already shipped remain available in Discover under `xdr-agent-logs`; `--rm` removes the container's local logs when it exits.

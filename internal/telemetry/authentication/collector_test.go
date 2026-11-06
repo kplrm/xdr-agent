@@ -3,6 +3,7 @@ package authentication
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,6 +98,10 @@ func TestTailNewLinesRotationAndTruncation(t *testing.T) {
 func TestMissingFileRecoversAndStops(t *testing.T) {
 	collector := NewCollector(events.NewPipeline(4), "agent", "host")
 	collector.path = filepath.Join(t.TempDir(), "auth.log")
+	missingJournal := filepath.Join(t.TempDir(), "missing-journalctl")
+	collector.journalCommand = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, missingJournal, args...)
+	}
 	if err := collector.Init(capability.Dependencies{}); err != nil {
 		t.Fatal(err)
 	}
