@@ -31,6 +31,31 @@ func TestParseAuthenticationLogs(t *testing.T) {
 		{"password ipv6", "2026-11-03T17:15:14Z node2 sshd[42]: Accepted password for root from 2001:db8::1 port 22 ssh2", map[string]interface{}{
 			"user.name": "root", "source.ip": "2001:db8::1", "xdr.authentication.method": "password", "event.outcome": "success",
 		}},
+		{"ssh disconnected user", "2026-11-09T21:40:41.351653+01:00 node2 sshd-session[34056]: Disconnected from user kplrm 192.168.2.63 port 46088", map[string]interface{}{
+			"user.name": "kplrm", "source.ip": "192.168.2.63", "source.port": float64(46088), "service.name": "sshd",
+			"event.action": "ssh-disconnect", "event.type": "end", "event.outcome": "unknown",
+			"network.transport": "tcp", "network.protocol": "ssh", "tags": nil,
+		}},
+		{"ssh received disconnect", "2026-11-09T21:40:41.350558+01:00 node2 sshd-session[34056]: Received disconnect from 192.168.2.63 port 46088:11: disconnected by user", map[string]interface{}{
+			"source.ip": "192.168.2.63", "source.port": float64(46088), "user.name": nil,
+			"event.action": "ssh-disconnect", "event.type": "end", "event.outcome": "unknown", "event.reason": "disconnected by user",
+			"network.transport": "tcp", "network.protocol": "ssh", "tags": nil,
+		}},
+		{"ssh received disconnect other port", "2026-11-09T21:23:52.961268+01:00 node2 sshd-session[31406]: Received disconnect from 192.168.2.63 port 51496:11: disconnected by user", map[string]interface{}{
+			"source.ip": "192.168.2.63", "source.port": float64(51496), "process.pid": float64(31406),
+			"event.action": "ssh-disconnect", "event.reason": "disconnected by user", "tags": nil,
+		}},
+		{"sshd disconnect ipv6", "2026-11-09T21:40:41Z node2 sshd[42]: Received disconnect from 2001:db8::1 port 46088:2: protocol error", map[string]interface{}{
+			"source.ip": "2001:db8::1", "source.port": float64(46088), "service.name": "sshd",
+			"event.action": "ssh-disconnect", "event.outcome": "unknown", "event.reason": "protocol error", "tags": nil,
+		}},
+		{"ssh logout diagnostic", "2026-11-09T21:40:41.348264+01:00 node2 sshd-session[33975]: syslogin_perform_logout: logout() returned an error", map[string]interface{}{
+			"event.action": "ssh-logout-error", "event.type": "info", "event.outcome": "unknown",
+			"event.reason": "syslogin_perform_logout: logout() returned an error", "user.name": nil, "tags": nil,
+		}},
+		{"logout diagnostic from another program", "2026-11-09T21:40:41Z node2 other[42]: syslogin_perform_logout: logout() returned an error", map[string]interface{}{
+			"event.action": "authentication-log", "event.outcome": "unknown", "tags": []interface{}{"authentication-unparsed"},
+		}},
 		{"sudo", "2026-03-02T19:01:44.421869+01:00 laptop sudo:    alice : TTY=pts/2 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/true", map[string]interface{}{
 			"user.name": "alice", "user.effective.name": "root", "process.tty.name": "pts/2", "process.working_directory": "/home/alice",
 			"process.command_line": "/usr/bin/true", "event.action": "sudo-command", "event.outcome": "success",
@@ -105,6 +130,13 @@ func TestParseAuthenticationLogs(t *testing.T) {
 		}},
 		{"logind legacy", "Mar  3 20:06:27 laptop systemd-logind[1615]: New session 42 of user alice.", map[string]interface{}{
 			"user.name": "alice", "xdr.authentication.session.id": "42", "event.action": "session-start",
+		}},
+		{"logind logged out", "2026-11-09T21:40:41.357819+01:00 node2 systemd-logind[1292]: Session 16 logged out. Waiting for processes to exit.", map[string]interface{}{
+			"xdr.authentication.session.id": "16", "user.name": nil,
+			"event.action": "session-end", "event.type": "end", "event.outcome": "success", "tags": nil,
+		}},
+		{"logind logged out other session", "2026-11-09T21:23:52.965046+01:00 node2 systemd-logind[1292]: Session 14 logged out. Waiting for processes to exit.", map[string]interface{}{
+			"xdr.authentication.session.id": "14", "event.action": "session-end", "tags": nil,
 		}},
 		{"pam failure", "Mar  3 20:06:27 laptop sshd[42]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=192.0.2.1 user=alice", map[string]interface{}{
 			"user.name": "alice", "source.ip": "192.0.2.1", "process.tty.name": "ssh", "xdr.authentication.uid": "0",

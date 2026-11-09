@@ -13,18 +13,21 @@ import (
 )
 
 var (
-	headerRE         = regexp.MustCompile(`^(\d{4}-\S+|[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^\s:\[]+)(?:\[(\d+)\])?:\s*(.*)$`)
-	sshRE            = regexp.MustCompile(`^(Accepted|Failed|Partial) (\S+) for (invalid user )?(\S+) from (\S+) port (\d+) (ssh\d)(?::? (.*))?$`)
-	keyRE            = regexp.MustCompile(`^(\S+) ((?:SHA256:|MD5:)[^ ]+)`)
-	invalidUserRE    = regexp.MustCompile(`^Invalid user (\S+) from (\S+)(?: port (\d+))?`)
-	pamRE            = regexp.MustCompile(`^(pam_\w+)\(([^:]+):([^)]+)\): (.*)$`)
-	sessionRE        = regexp.MustCompile(`^session (opened|closed) for user ([^ (]+)(?:\(uid=(\d+)\))?(?: by ([^ (]*)(?:\(uid=(\d+)\))?)?$`)
-	pamFieldRE       = regexp.MustCompile(`(?:^|[; ]+)(logname|uid|euid|tty|ruser|rhost|user)=([^; ]*)`)
-	suRE             = regexp.MustCompile(`^\(to ([^)]+)\) (\S+) on (.+)$`)
-	sudoRE           = regexp.MustCompile(`^\s*(\S+)\s*:\s*(.*?)(?: ; )?TTY=([^;]*?)\s*;\s*PWD=([^;]*?)\s*;\s*USER=([^;]*?)\s*;\s*(?:ENV=(.*?)\s*;\s*)?COMMAND=(.*)$`)
-	pkexecRE         = regexp.MustCompile(`^(\S+): Executing command \[USER=([^]]+)\] \[TTY=([^]]+)\] \[CWD=([^]]+)\] \[COMMAND=(.*)\]$`)
-	logindRE         = regexp.MustCompile(`^New session '?([^' ]+)'? of user '?([^' ]+?)'?(?: with class '([^']+)' and type '([^']+)')?\.$`)
-	removedSessionRE = regexp.MustCompile(`^Removed session '?([^'. ]+)'?\.$`)
+	headerRE                = regexp.MustCompile(`^(\d{4}-\S+|[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^\s:\[]+)(?:\[(\d+)\])?:\s*(.*)$`)
+	sshRE                   = regexp.MustCompile(`^(Accepted|Failed|Partial) (\S+) for (invalid user )?(\S+) from (\S+) port (\d+) (ssh\d)(?::? (.*))?$`)
+	keyRE                   = regexp.MustCompile(`^(\S+) ((?:SHA256:|MD5:)[^ ]+)`)
+	invalidUserRE           = regexp.MustCompile(`^Invalid user (\S+) from (\S+)(?: port (\d+))?`)
+	sshDisconnectedRE       = regexp.MustCompile(`^Disconnected from user (\S+) (\S+) port (\d+)$`)
+	sshReceivedDisconnectRE = regexp.MustCompile(`^Received disconnect from (\S+) port (\d+):\d+: (.+)$`)
+	pamRE                   = regexp.MustCompile(`^(pam_\w+)\(([^:]+):([^)]+)\): (.*)$`)
+	sessionRE               = regexp.MustCompile(`^session (opened|closed) for user ([^ (]+)(?:\(uid=(\d+)\))?(?: by ([^ (]*)(?:\(uid=(\d+)\))?)?$`)
+	pamFieldRE              = regexp.MustCompile(`(?:^|[; ]+)(logname|uid|euid|tty|ruser|rhost|user)=([^; ]*)`)
+	suRE                    = regexp.MustCompile(`^\(to ([^)]+)\) (\S+) on (.+)$`)
+	sudoRE                  = regexp.MustCompile(`^\s*(\S+)\s*:\s*(.*?)(?: ; )?TTY=([^;]*?)\s*;\s*PWD=([^;]*?)\s*;\s*USER=([^;]*?)\s*;\s*(?:ENV=(.*?)\s*;\s*)?COMMAND=(.*)$`)
+	pkexecRE                = regexp.MustCompile(`^(\S+): Executing command \[USER=([^]]+)\] \[TTY=([^]]+)\] \[CWD=([^]]+)\] \[COMMAND=(.*)\]$`)
+	logindRE                = regexp.MustCompile(`^New session '?([^' ]+)'? of user '?([^' ]+?)'?(?: with class '([^']+)' and type '([^']+)')?\.$`)
+	removedSessionRE        = regexp.MustCompile(`^Removed session '?([^'. ]+)'?\.$`)
+	loggedOutSessionRE      = regexp.MustCompile(`^Session '?([^' ]+)'? logged out\. Waiting for processes to exit\.$`)
 )
 
 // parse retains unknown lines for inspection; false means an intentionally skipped CRON record.
@@ -108,6 +111,19 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 		setSource(match[2], match[3])
 		// This is context for a later Failed record, not another failed attempt.
 		setAction("invalid-user", "info", "unknown")
+	} else if match := sshDisconnectedRE.FindStringSubmatch(message); match != nil && strings.HasPrefix(program, "sshd") {
+		user["name"] = match[1]
+		setSource(match[2], match[3])
+		fields["network"] = map[string]interface{}{"transport": "tcp", "protocol": "ssh"}
+		setAction("ssh-disconnect", "end", "unknown")
+	} else if match := sshReceivedDisconnectRE.FindStringSubmatch(message); match != nil && strings.HasPrefix(program, "sshd") {
+		setSource(match[1], match[2])
+		fields["network"] = map[string]interface{}{"transport": "tcp", "protocol": "ssh"}
+		fields["event.reason"] = match[3]
+		setAction("ssh-disconnect", "end", "unknown")
+	} else if message == "syslogin_perform_logout: logout() returned an error" && strings.HasPrefix(program, "sshd") {
+		fields["event.reason"] = message
+		setAction("ssh-logout-error", "info", "unknown")
 	} else if match := pamRE.FindStringSubmatch(message); match != nil {
 		if strings.EqualFold(match[2], "cron") || strings.EqualFold(match[2], "crond") {
 			return events.Event{}, false
@@ -196,6 +212,9 @@ func parse(line string, observed time.Time, agentID, hostname, path string) (eve
 		auth["session"] = session
 		setAction("session-start", "start", "success")
 	} else if match := removedSessionRE.FindStringSubmatch(message); match != nil && program == "systemd-logind" {
+		auth["session"] = map[string]interface{}{"id": match[1]}
+		setAction("session-end", "end", "success")
+	} else if match := loggedOutSessionRE.FindStringSubmatch(message); match != nil && program == "systemd-logind" {
 		auth["session"] = map[string]interface{}{"id": match[1]}
 		setAction("session-end", "end", "success")
 	} else {
